@@ -1,0 +1,43 @@
+{
+  "name": "adverse",
+  "version": "0.2.0",
+  "description": "Multi-agent adversarial code review for any coding agent. Single model, three lenses, two rounds. Ships as both a CLI and a Claude Code Skill.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Addy Osmani",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "adverse": "bin/adverse.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:watch": "node --test --watch tests/*.test.mjs",
+    "test:live": "ADVERSE_LIVE=1 node --test tests/live-claude.test.mjs",
+    "lint": "node --check bin/adverse.mjs && find src skills tests -name '*.mjs' -exec node --check {} \\;"
+  },
+  "keywords": [
+    "code-review",
+    "adversarial",
+    "multi-agent",
+    "claude-code",
+    "claude",
+    "codex",
+    "ai",
+    "llm",
+    "review",
+    "skill"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/addyosmani/adverse"
+  }
+}
