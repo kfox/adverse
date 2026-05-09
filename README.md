@@ -40,7 +40,21 @@ npx adverse review ./src
 
 ### As a Claude Code Skill
 
-Lives under [`skills/adverse-review/`](skills/adverse-review/). Inside Claude Code, ask for "adversarial review" / "adverse review" / "review my changes from multiple angles" and the skill takes over. Spawns reviewers via Claude Code's native Agent tool (no nested-auth issues, no subprocess overhead) and calls a small Node helper for the deterministic synthesis step.
+The skill is in [`skills/adverse-review/`](skills/adverse-review/). One-liner install via [skills.sh](https://skills.sh/):
+
+```bash
+npx skills add addyosmani/adverse
+```
+
+That clones the repo, locates `skills/adverse-review/`, and installs it to `~/.claude/skills/adverse-review/` (or `.claude/skills/` with `--project`). Re-run to update. If you'd rather pin the exact subpath, `npx skills add https://github.com/addyosmani/adverse/tree/main/skills/adverse-review` works too. Or do it by hand:
+
+```bash
+git clone https://github.com/addyosmani/adverse.git ~/.adverse-source
+mkdir -p ~/.claude/skills
+ln -s ~/.adverse-source/skills/adverse-review ~/.claude/skills/adverse-review
+```
+
+Inside Claude Code, ask for "adversarial review", "adverse review of these changes", or "review my changes from multiple angles" — or hit `/adverse-review`. The skill handles scope detection (uncommitted changes vs branch diff vs full tree), spawns three reviewer subagents in parallel via Claude Code's native Agent tool (no nested-auth issues, no subprocess overhead), runs the cross-review round, and calls a small Node helper for the deterministic synthesis step. Needs `node` ≥ 20 on PATH; no `npm install`.
 
 Both modes share the same `src/` core, so a finding the CLI flags is the same finding the Skill flags — no drift between the two.
 
@@ -128,34 +142,6 @@ adverse synthesize \
     --out report.md \
     --html-out report.html
 ```
-
-## Skill usage (Claude Code)
-
-The Skill is in [`skills/adverse-review/`](skills/adverse-review/). One-liner install via [skills.sh](https://skills.sh/):
-
-```bash
-npx skills add addyosmani/adverse
-```
-
-That clones the repo, locates `skills/adverse-review/`, and installs it to `~/.claude/skills/adverse-review/` (or `.claude/skills/` if you pass `--project`). Re-run the same command to update.
-
-If you'd rather be explicit about which skill to install, the direct subdirectory form works too:
-
-```bash
-npx skills add https://github.com/addyosmani/adverse/tree/main/skills/adverse-review
-```
-
-Or do it by hand, no CLI needed:
-
-```bash
-mkdir -p ~/.claude/skills
-git clone https://github.com/addyosmani/adverse.git ~/.adverse-source
-ln -s ~/.adverse-source/skills/adverse-review ~/.claude/skills/adverse-review
-```
-
-Then in Claude Code: ask for "adversarial review" or "adverse review of these changes" or hit `/adverse-review`. The Skill handles scope detection (uncommitted changes vs branch diff vs full tree), spawns three reviewer subagents in parallel, runs the cross-review round, calls Node helpers for source collection and synthesis, and presents you with a summary plus pointers to the full report.
-
-The Skill needs `node` (>= 20) on PATH but no `npm install` — its helper scripts under `scripts/` use stdlib only.
 
 ## The personas
 
