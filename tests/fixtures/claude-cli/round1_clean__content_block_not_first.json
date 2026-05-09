@@ -1,0 +1,13 @@
+{
+  "content": [
+    {
+      "type": "tool_use",
+      "name": "x",
+      "input": {}
+    },
+    {
+      "type": "text",
+      "text": "{\"persona\":\"auditor\",\"verdict\":\"approve\",\"summary\":\"Nothing in scope.\",\"findings\":[]}"
+    }
+  ]
+}

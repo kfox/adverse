@@ -1,0 +1,20 @@
+Reviewing 3 files...
+Token usage: 1234
+---
+{
+  "persona": "adversary",
+  "verdict": "reject",
+  "summary": "SQL injection in user lookup.",
+  "findings": [
+    {
+      "severity": "critical",
+      "file": "auth.py",
+      "line": 18,
+      "title": "SQL injection via string concatenation",
+      "detail": "check_user concatenates name into the WHERE clause.",
+      "fix": "Use parameterized queries."
+    }
+  ]
+}
+
+Total cost: $0.02

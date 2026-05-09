@@ -1,0 +1,3 @@
+{
+  "result": "{\"persona\":\"auditor\",\"validate\":[{\"from\":\"adversary\",\"title\":\"SQL injection via string concatenation\",\"reason\":\"Confirmed line 18.\"}],\"challenge\":[],\"added\":[]}"
+}

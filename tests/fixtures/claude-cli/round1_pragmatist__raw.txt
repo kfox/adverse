@@ -1,0 +1,15 @@
+{
+  "persona": "pragmatist",
+  "verdict": "approve",
+  "summary": "Maintainability is fine. No tests exist.",
+  "findings": [
+    {
+      "severity": "warning",
+      "file": "auth.py",
+      "line": null,
+      "title": "No test file for auth module",
+      "detail": "Public functions have no test coverage.",
+      "fix": "Add tests/test_auth.py."
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+{
+  "result": "```json\n{\n  \"persona\": \"pragmatist\",\n  \"verdict\": \"approve\",\n  \"summary\": \"Maintainability is fine. No tests exist.\",\n  \"findings\": [\n    {\n      \"severity\": \"warning\",\n      \"file\": \"auth.py\",\n      \"line\": null,\n      \"title\": \"No test file for auth module\",\n      \"detail\": \"Public functions have no test coverage.\",\n      \"fix\": \"Add tests/test_auth.py.\"\n    }\n  ]\n}\n```"
+}
