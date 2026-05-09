@@ -131,16 +131,26 @@ adverse synthesize \
 
 ## Skill usage (Claude Code)
 
-The Skill is in [`skills/adverse-review/`](skills/adverse-review/). To install it into your Claude Code config:
+The Skill is in [`skills/adverse-review/`](skills/adverse-review/). One-liner install via [skills.sh](https://skills.sh/):
 
 ```bash
-# Symlink into your user skills directory
-mkdir -p ~/.claude/skills
-ln -s "$(pwd)/skills/adverse-review" ~/.claude/skills/adverse-review
+npx skills add addyosmani/adverse
+```
 
-# Or, install the package and link from there
-npm install -g adverse
-ln -s "$(npm root -g)/adverse/skills/adverse-review" ~/.claude/skills/adverse-review
+That clones the repo, locates `skills/adverse-review/`, and installs it to `~/.claude/skills/adverse-review/` (or `.claude/skills/` if you pass `--project`). Re-run the same command to update.
+
+If you'd rather be explicit about which skill to install, the direct subdirectory form works too:
+
+```bash
+npx skills add https://github.com/addyosmani/adverse/tree/main/skills/adverse-review
+```
+
+Or do it by hand, no CLI needed:
+
+```bash
+mkdir -p ~/.claude/skills
+git clone https://github.com/addyosmani/adverse.git ~/.adverse-source
+ln -s ~/.adverse-source/skills/adverse-review ~/.claude/skills/adverse-review
 ```
 
 Then in Claude Code: ask for "adversarial review" or "adverse review of these changes" or hit `/adverse-review`. The Skill handles scope detection (uncommitted changes vs branch diff vs full tree), spawns three reviewer subagents in parallel, runs the cross-review round, calls Node helpers for source collection and synthesis, and presents you with a summary plus pointers to the full report.
