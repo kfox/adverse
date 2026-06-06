@@ -5,12 +5,13 @@
 import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const { values } = parseArgs({
+const { values, positionals } = parseArgs({
   options: {
     round1: { type: 'string', multiple: true },
     round2: { type: 'string', multiple: true },
     out:    { type: 'string' },
   },
+  allowPositionals: true,
   strict: true,
 });
 
@@ -19,11 +20,14 @@ if (!values.out) {
   process.exit(2);
 }
 
-const inputs = values.round1 ?? values.round2 ?? [];
-if (inputs.length === 0) {
-  process.stderr.write('combine: at least one --round1 or --round2 input is required\n');
+const hasRound1 = values.round1 !== undefined;
+const hasRound2 = values.round2 !== undefined;
+if (hasRound1 === hasRound2) {
+  process.stderr.write('combine: provide exactly one of --round1 or --round2\n');
   process.exit(2);
 }
+
+const inputs = [...(values.round1 ?? values.round2), ...positionals];
 
 const combined = {};
 for (const path of inputs) {
