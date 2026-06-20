@@ -1,6 +1,6 @@
 {
   "name": "adverse",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Multi-agent adversarial code review for any coding agent. Single model, three lenses, two rounds. Ships as both a CLI and a Claude Code Skill.",
   "type": "module",
   "license": "MIT",
