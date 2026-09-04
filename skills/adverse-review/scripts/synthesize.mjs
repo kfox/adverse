@@ -8,8 +8,10 @@
 import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 
-import { synthesize, renderMarkdown, toJsonReport } from '../../../src/synthesis.mjs';
-import { renderHtml } from '../../../src/html.mjs';
+import { importFromSrc } from './package-root.mjs';
+
+const { synthesize, renderMarkdown, toJsonReport } = await importFromSrc('synthesis.mjs');
+const { renderHtml } = await importFromSrc('html.mjs');
 
 const { values } = parseArgs({
   options: {

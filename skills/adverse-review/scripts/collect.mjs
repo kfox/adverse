@@ -6,7 +6,9 @@ import { parseArgs } from 'node:util';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { collectDirectory, collectDiff } from '../../../src/collect.mjs';
+import { importFromSrc } from './package-root.mjs';
+
+const { collectDirectory, collectDiff } = await importFromSrc('collect.mjs');
 
 const { values } = parseArgs({
   options: {

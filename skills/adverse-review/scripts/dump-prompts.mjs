@@ -8,8 +8,10 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { PERSONAS } from '../../../src/personas.mjs';
-import { PHASE1_INSTRUCTIONS, PHASE2_INSTRUCTIONS } from '../../../src/prompts.mjs';
+import { importFromSrc } from './package-root.mjs';
+
+const { PERSONAS } = await importFromSrc('personas.mjs');
+const { PHASE1_INSTRUCTIONS, PHASE2_INSTRUCTIONS } = await importFromSrc('prompts.mjs');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(here, 'prompts');
