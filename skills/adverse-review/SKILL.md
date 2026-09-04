@@ -20,33 +20,6 @@ Claude Code, prefer this skill — it uses Claude Code's native Agent tool to
 spawn reviewers (no subprocess auth issues, faster) and calls Node helpers
 only for the deterministic collection, triage, and synthesis steps.
 
-## What this fork changes, and why it cannot go upstream
-
-The flow below hands reviewers a **repo checkout plus a pinned merge-base SHA**
-instead of a pre-collected source blob, and hands round 2 a **triaged briefing**
-instead of the source blob a second time.
-
-That is only sound because Claude Code subagents run on the same filesystem as
-the repo. The standalone CLI subprocesses a coding agent (`claude -p`,
-`codex exec`, …) that cannot be assumed to share a filesystem, a working
-directory, or a git binary with the repo under review — the collected blob
-exists *precisely* so those agents can review code they cannot open. **Do not
-port the read-the-repo-directly parts of this file upstream.** The Node helpers
-under `scripts/` are upstreamable; this file's flow is not.
-
-Measured on one real 39-file branch, same model, same personas:
-
-| | Round 1 blob flow (v1) | Read-the-repo + briefing (v2) |
-|---|---|---|
-| Auditor | 197k tokens · 84 tool calls · 28 min | ~124k tokens · 32-34 tool calls · ~6 min |
-| Adversary | 155k tokens | ~124k tokens · 32-34 tool calls · ~6 min |
-| Pragmatist | 150k tokens | ~124k tokens · 32-34 tool calls · ~6 min |
-| Total | ~503k tokens | ~372k tokens |
-
-The v2 reviewers did *more* verification work — they open files the blob would
-have truncated away — for less. The round-2 briefing is ~30KB against a ~250KB
-source block, an 88% reduction on the largest single input.
-
 ## When to use this skill
 
 The user explicitly asked for an adversarial / multi-perspective / panel
@@ -222,9 +195,9 @@ the same persona system prompt and a user message of:
 3. the repo path and `$BASE` again
 
 **Not the source block.** The briefing (~30KB) anchors every finding to a file
-and line; reviewers open exactly the regions they need to rule on. That is the
-88% input reduction in the table above, and it buys deeper verification, not
-shallower — a reviewer chasing one finding reads 200 lines of real context
+and line; reviewers open exactly the regions they need to rule on. That is ~30KB
+of input where the source block was ~250KB, and it buys deeper verification,
+not shallower — a reviewer chasing one finding reads 200 lines of real context
 instead of whatever survived the blob's truncation.
 
 Round 2 must produce an explicit one-defect-or-two ruling on every cluster and
