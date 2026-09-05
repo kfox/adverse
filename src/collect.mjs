@@ -1,8 +1,10 @@
 // Collect source code from a target directory or a git diff.
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+
+import { closeQuietly, openRegularFileSync } from './fsSafe.mjs';
 
 export const DEFAULT_MAX_TOTAL_CHARS = 250_000;
 export const DEFAULT_MAX_FILE_CHARS = 30_000;
@@ -66,17 +68,16 @@ function walkFiles(root) {
   return files;
 }
 
-function looksBinary(filePath) {
+function looksBinaryExt(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (EXCLUDE_EXTS.has(ext)) return true;
   if (filePath.endsWith('.min.js') || filePath.endsWith('.min.css')) return true;
-  try {
-    const fd = readFileSync(filePath);
-    const head = fd.subarray(0, Math.min(fd.length, 8192));
-    for (const b of head) if (b === 0) return true;
-  } catch {
-    return true;
-  }
+  return false;
+}
+
+function hasNullByte(buf) {
+  const head = buf.subarray(0, Math.min(buf.length, 8192));
+  for (const b of head) if (b === 0) return true;
   return false;
 }
 
@@ -92,19 +93,32 @@ export function collectDirectory(
   let total = 0;
 
   for (const filePath of candidates) {
-    let st;
+    if (looksBinaryExt(filePath)) continue;
+
+    // Open once and check/read through the same descriptor rather than the
+    // path — a stat-then-readFileSync-by-path pair leaves a window where the
+    // path could resolve to something else by the time it's read, and
+    // rejects a symlink outright rather than following it: `git ls-files`
+    // lists a committed symlink (mode 120000) the same as a regular file, and
+    // one pointing outside the checkout would otherwise have its target's
+    // contents read and inlined into the review block.
+    let fd = null;
     try {
-      st = statSync(filePath);
+      fd = openRegularFileSync(filePath);
     } catch {
       continue;
     }
-    if (!st.isFile()) continue;
-    if (looksBinary(filePath)) continue;
+    if (fd === null) continue;
+
     let text;
     try {
-      text = readFileSync(filePath, { encoding: 'utf-8' });
+      const buf = readFileSync(fd);
+      if (hasNullByte(buf)) continue;
+      text = buf.toString('utf-8');
     } catch {
       continue;
+    } finally {
+      closeQuietly(fd);
     }
     if (!text.trim()) continue;
     let truncated = false;

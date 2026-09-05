@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -120,6 +120,33 @@ function buildGitRepo() {
   git(dir, 'commit', '-q', '-m', 'initial');
   return dir;
 }
+
+test('collectDirectory does not follow a git-tracked symlink pointing outside the repo', () => {
+  // `git ls-files` lists a committed symlink (mode 120000) the same as a
+  // regular file; opening it by path with no defense reads and inlines
+  // whatever it points to, into a block that gets sent to an LLM.
+  const dir = buildGitRepo();
+  const outside = freshTmp();
+  const secret = path.join(outside, 'id_rsa');
+  writeFileSync(secret, 'SSH-SENTINEL-DO-NOT-EXFILTRATE\n');
+  try {
+    try {
+      symlinkSync(secret, path.join(dir, 'evil-link.txt'));
+    } catch {
+      return; // no symlink support on this platform; nothing to assert
+    }
+    git(dir, 'add', 'evil-link.txt');
+    git(dir, 'commit', '-q', '-m', 'add tracked symlink');
+
+    const { block, files } = collectDirectory(dir);
+    assert.ok(!files.includes('evil-link.txt'));
+    assert.ok(!block.includes('SSH-SENTINEL'),
+      'the symlink target must never be inlined into the review block');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
 
 test('collectDiff returns uncommitted changes', () => {
   const dir = buildGitRepo();
