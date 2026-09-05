@@ -163,17 +163,26 @@ git diff --name-only "$BASE"...HEAD > "$ADVERSE_RUN/files.txt"
 Then ask how much review this change deserves:
 
 ```bash
+node ${SKILL_DIR}/scripts/plan.mjs --repo . --base "$BASE" --json \
+    > "$ADVERSE_RUN/plan.json"
 node ${SKILL_DIR}/scripts/plan.mjs --repo . --base "$BASE"
 ```
+
+`plan.json` is the run's manifest: the worktree loop below, Phase 4's expected
+roster, and the split-lane bookkeeping all read it, so the plan's decisions
+travel as data instead of prose someone retypes.
 
 The plan says which lanes run, how many agents each gets, and the starting
 rounds and iteration cap. The rules and their rationale live in
 `src/scaling.mjs`; the short version:
 
 - The Auditor and the Steward always run. The Adversary runs unless the
-  trust-boundary gate (`scope.mjs`, which `plan.mjs` subsumes) says it has
-  nothing to look at. The Pragmatist is skipped on a small diff — its findings
-  are advisory, so the skip can cost a backlog item, never a blocking finding.
+  trust-boundary gate (src/scope.mjs, which `plan.mjs` runs for it) says it
+  has nothing to look at — and it is forced on regardless when the diff holds
+  unmeasurable content or heavy deletions, which the gate cannot scan. The
+  Pragmatist is skipped on a small diff: everything it reports is advisory, so
+  the skip costs a backlog item and one potential round-2 validator, never a
+  finding that could block on its own.
 - On a large diff the Auditor and the Adversary each get **two agents**,
   partitioned by file (Phase 2): a large diff exhausts one reviewer's
   attention budget, the documented cause of deterministic lane failures.
@@ -200,10 +209,18 @@ needs, and it is the fallback if spawned reviewers cannot reach the filesystem.
 them mutate the tree to test a claim; without isolation one lane reads another
 lane's half-applied experiment as the code under review.
 
+One checkout per **agent**, not per persona — a split lane's two agents
+mutate the tree independently, so they need `-a` and `-b` checkouts of their
+own. The loop reads the plan rather than a fixed roster:
+
 ```bash
 WORKTREES=$(mktemp -d)
-for p in auditor adversary steward pragmatist; do
-  git worktree add --detach "$WORKTREES/$p" HEAD
+AGENTS=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
+  .lanes.filter((l) => l.run)
+  .flatMap((l) => (l.agents === 2 ? [`${l.persona}-a`, `${l.persona}-b`] : [l.persona]))
+  .join(" ")' "$ADVERSE_RUN/plan.json")
+for agent in $AGENTS; do
+  git worktree add --detach "$WORKTREES/$agent" HEAD
 done
 ```
 
@@ -258,9 +275,9 @@ it cannot check a claim it was never shown.
 
 **A split lane** (two agents, from the Phase 1 plan) partitions
 `$ADVERSE_RUN/files.txt` roughly in half between its two agents. Tell each
-agent which files are its half; both run under the **same persona name**, and
-their replies are saved as `round1-<persona>-a.json` and
-`round1-<persona>-b.json`. The synthesizer counts distinct personas, not
+agent which files are its half; both run under the **same persona name**, each
+in its own checkout (`$WORKTREES/<persona>-a`, `-b`), and their replies are
+saved as `round1-<persona>-a.json` and `round1-<persona>-b.json`. The synthesizer counts distinct personas, not
 agents, so a split lane cannot inflate consensus. If one member of a split
 lane fails, the lane is **degraded** unless that member's half is re-run —
 half the files got no reviewer, and an undeclared gap reads exactly like a
@@ -349,26 +366,37 @@ in the run.
 ## Phase 4 — round 2: cross-review from the briefing
 
 First, re-plan from what round 1 actually found — criticality is not knowable
-until now:
+until now. Pass the roster the plan ran, so a lane whose payload is missing or
+unreadable fails closed instead of reading as "found nothing":
 
 ```bash
-node ${SKILL_DIR}/scripts/plan.mjs --escalate "$ADVERSE_RUN"/round1-*.json
+EXPECT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
+  .lanes.filter((l) => l.run).map((l) => l.persona).join(",")' "$ADVERSE_RUN/plan.json")
+node ${SKILL_DIR}/scripts/plan.mjs --escalate --expect "$EXPECT" --json \
+    "$ADVERSE_RUN"/round1-*.json > "$ADVERSE_RUN/escalation.json"
+ROUNDS=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).rounds' "$ADVERSE_RUN/escalation.json")
+CAP=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).maxIterations' "$ADVERSE_RUN/escalation.json")
+R2_REASON=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).roundsReason' "$ADVERSE_RUN/escalation.json")
 ```
 
 Two dials move, both deterministic:
 
-- **Round 2 is skipped only when provably a no-op**: round 1 reported nothing
-  of a blocking kind, so there is nothing to validate or challenge. It is
-  never skipped on size — without round 2 a solo finding can never block.
+- **Round 2 is skipped only when round 1 reported nothing blocking** under the
+  synthesizer's own `isBlocking` (info-severity findings do not block; a
+  missing or unrecognized kind does). The skip is never free — it forgoes
+  round 2's additive channel, the findings a reviewer only sees with the other
+  lanes in view — so it is never taken on size, and never taken silently:
+  Phase 6 must declare it with `--round2-skipped "$R2_REASON"`. A missing or
+  off-shape round-1 payload fails closed: round 2 runs.
 - **The cap rises to 5** when round 1 holds a critical finding of a blocking
   kind. It never drops below 3: lowering the cap can only manufacture false
-  exit-3 stops, raising it only costs model calls. Carry the printed cap to
+  exit-3 stops, raising it only costs model calls. `$CAP` carries it to
   `converge.mjs --max-iterations` in Phase 8.
 
-If it says skip, phases 4–5 collapse the same way the "faster review" path
-does. Otherwise: for each persona that produced a valid round-1 review
-**except the Pragmatist**, spawn a subagent with the same persona system
-prompt and:
+If `$ROUNDS` is 1, phases 4–5 collapse the same way the "faster review" path
+does — but the skip rides into the report via `--round2-skipped`. Otherwise:
+for each persona that produced a valid round-1 review **except the
+Pragmatist**, spawn a subagent with the same persona system prompt and:
 
 1. `${SKILL_DIR}/scripts/prompts/round2.txt`
 2. `$ADVERSE_RUN/briefing.json`
@@ -417,8 +445,11 @@ Then combine both rounds:
 ```bash
 node ${SKILL_DIR}/scripts/combine.mjs --round1 "$ADVERSE_RUN"/round1-*.json \
     --out "$ADVERSE_RUN"/round1.json
-    # add --merge-personas if the plan split a lane in Phase 2; without it a
-    # duplicate persona is an error, because it usually means a file passed twice
+    # one --merge-personas <persona> per lane the plan split in Phase 2. The
+    # flag names the lane so the duplicate guard stays live everywhere else,
+    # and it requires BOTH halves: a missing half reviewed nothing, so combine
+    # refuses — re-run that half, or declare the lane --degraded. Without the
+    # flag a duplicate persona is an error (a file passed twice).
 node ${SKILL_DIR}/scripts/combine.mjs --round2 "$ADVERSE_RUN"/round2-*.repaired.json \
     --out "$ADVERSE_RUN"/round2.json
 ```
@@ -435,9 +466,11 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     --out "$ADVERSE_RUN"/report.md \
     --json-out "$ADVERSE_RUN"/report.json \
     --html-out "$ADVERSE_RUN"/report.html
-    # one --skipped per lane the plan skipped, e.g.:
+    # one --skipped per lane the plan skipped, quoting the plan's own reason:
     #   --skipped adversary="no trust boundary in the diff"
     #   --skipped pragmatist="small diff; design findings are advisory"
+    # and, when Phase 4 skipped round 2:
+    #   --round2-skipped "$R2_REASON"
 ```
 
 Never LLM-render the findings yourself; the synthesizer's groupings
@@ -523,7 +556,7 @@ missing; do not ignore that line.
 ```bash
 node ${SKILL_DIR}/scripts/converge.mjs --ledger "$LEDGER" \
     --report "$ADVERSE_RUN"/report.json --repo . --head HEAD \
-    --max-iterations "$CAP"   # from plan.mjs --escalate; omit for the default 3
+    ${CAP:+--max-iterations "$CAP"}   # from Phase 4; unset falls back to the default 3
 ```
 
 | Exit | Meaning | Do |

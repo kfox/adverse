@@ -204,7 +204,7 @@ The **Steward** is this fork's addition, and it exists because code-versus-claim
 
 Every step that is not a review is **deterministic Node code**, not another LLM call. A model in any of those positions can hallucinate consensus, and consensus is the product. Counting validate / challenge edges is enough.
 
-Per review: the CLI runs 8 invocations (4 round-1 + 4 round-2); `--single-round` halves it. The Skill runs 7, because the Pragmatist skips round 2 — nothing advisory can block, so cross-validating it buys nothing — and 5 when the Adversary lane has no trust boundary to look at. Wall time is roughly twice the slowest single invocation, since personas run in parallel within each round.
+Per review: the CLI runs 8 invocations (4 round-1 + 4 round-2); `--single-round` halves it. The Skill runs 7 for the full shape, and its Phase 1 plan (`plan.mjs`) scales that in both directions: a small boundary-free diff runs 2 round-1 calls (Auditor + Steward) and, when round 1 reports nothing blocking, no round 2 — a floor of 2 — while a large diff splits the Auditor and Adversary lanes across two agents each, up to 9. The Pragmatist always skips round 2 (nothing advisory can block, so cross-validating it buys nothing). Wall time is roughly twice the slowest single invocation, since personas run in parallel within each round.
 
 ## What this fork adds
 
@@ -283,7 +283,6 @@ skills/adverse-review/
     triage.mjs                # Skill bridge: claim/kind checks, clustering, briefing
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
-    scope.mjs                 # Skill bridge: should the Adversary lane run?
     plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
     dump-prompts.mjs          # Regenerate prompt files from src/ (a test enforces it)

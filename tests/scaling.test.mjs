@@ -1,109 +1,199 @@
 // Tests for src/scaling.mjs — the review's budget policy.
 //
-// The properties that matter: only the advisory lane is skippable on size, the
-// blocking lanes always run, pins override every size-based economy, round 2
-// is dropped only when provably a no-op, and the iteration cap moves in one
-// direction only. Most of these pin a rule whose failure would be silent — a
-// lane quietly not running looks exactly like a lane that found nothing.
+// The properties that matter: size comes from numstat and every measurement
+// failure lands OUTSIDE the cheap bucket, only the advisory lane is skippable
+// on size, pins override every size-based economy case-insensitively, round 2
+// is dropped only when nothing blocks under the synthesizer's own predicate,
+// escalate fails closed on missing or off-shape input, and the iteration cap
+// moves in one direction only. Most of these pin a rule whose failure would be
+// silent — a lane quietly not running looks exactly like a lane that found
+// nothing.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { DEFAULT_PERSONAS } from '../src/personas.mjs';
 import {
-  DEFAULT_MAX_ITERATIONS, ESCALATED_MAX_ITERATIONS, LARGE_MIN_ADDED_LINES,
-  LARGE_MIN_FILES, SMALL_MAX_ADDED_LINES, SMALL_MAX_FILES, SPLIT_AGENTS,
-  diffSize, escalate, planReview,
+  DEFAULT_MAX_ITERATIONS, DELETED_LINES_ADVERSARY_FLOOR, ESCALATED_MAX_ITERATIONS,
+  LARGE_MIN_CHANGED_LINES, LARGE_MIN_FILES, SMALL_MAX_CHANGED_LINES, SMALL_MAX_FILES,
+  SPLIT_AGENTS, diffSize, escalate, parseNumstat, planReview,
 } from '../src/scaling.mjs';
-
-const diffOfAdded = (n) =>
-  ['diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1 +1 @@',
-    ...Array.from({ length: n }, (_, i) => `+const line${i} = ${i};`)].join('\n');
 
 const filesOf = (n) => Array.from({ length: n }, (_, i) => `src/render/mod${i}.mjs`);
 
+// numstat text for n files of `added`/`deleted` lines each.
+const numstatOf = (entries) =>
+  entries.map(([add, del, path]) => `${add}\t${del}\t${path}`).join('\n') + '\n';
+
+const evenNumstat = (files, added, deleted = 0) => {
+  const per = Math.floor(added / files.length);
+  const perDel = Math.floor(deleted / files.length);
+  return numstatOf(files.map((f, i) => [
+    i === 0 ? added - per * (files.length - 1) : per,
+    i === 0 ? deleted - perDel * (files.length - 1) : perDel,
+    f,
+  ]));
+};
+
 const lane = (plan, persona) => plan.lanes.find((l) => l.persona === persona);
 
-// --- diffSize ------------------------------------------------------------------
+// --- parseNumstat / diffSize -----------------------------------------------------
 
-test('the small bucket needs BOTH few files and few added lines', () => {
-  assert.equal(diffSize({ files: filesOf(SMALL_MAX_FILES), diff: diffOfAdded(SMALL_MAX_ADDED_LINES) }).bucket, 'small');
-  assert.equal(diffSize({ files: filesOf(SMALL_MAX_FILES + 1), diff: diffOfAdded(SMALL_MAX_ADDED_LINES) }).bucket, 'medium');
-  assert.equal(diffSize({ files: filesOf(SMALL_MAX_FILES), diff: diffOfAdded(SMALL_MAX_ADDED_LINES + 1) }).bucket, 'medium');
+test('changed lines count additions AND deletions — a deletion-only diff is not small', () => {
+  const files = ['src/gate.mjs'];
+  const size = diffSize({ files, numstat: numstatOf([[0, 200, 'src/gate.mjs']]) });
+  assert.equal(size.changedLines, 200);
+  assert.equal(size.bucket, 'medium');
 });
 
-test('the large bucket needs EITHER many files or many added lines', () => {
-  assert.equal(diffSize({ files: filesOf(LARGE_MIN_FILES), diff: '' }).bucket, 'large');
-  assert.equal(diffSize({ files: filesOf(1), diff: diffOfAdded(LARGE_MIN_ADDED_LINES) }).bucket, 'large');
-  assert.equal(diffSize({ files: filesOf(LARGE_MIN_FILES - 1), diff: diffOfAdded(LARGE_MIN_ADDED_LINES - 1) }).bucket, 'medium');
+test('a deletion-heavy diff can be large', () => {
+  const size = diffSize({
+    files: ['a.mjs'],
+    numstat: numstatOf([[0, LARGE_MIN_CHANGED_LINES, 'a.mjs']]),
+  });
+  assert.equal(size.bucket, 'large');
+});
+
+test('an unmeasurable numstat row (binary or diff-suppressed) excludes the small bucket', () => {
+  const files = ['a.mjs', 'payload.mjs'];
+  const size = diffSize({
+    files,
+    numstat: numstatOf([[1, 0, 'a.mjs']]) + '-\t-\tpayload.mjs\n',
+  });
+  assert.deepEqual(size.unscannable, ['payload.mjs']);
+  assert.equal(size.bucket, 'medium');
+});
+
+test('no numstat means unmeasured, and unmeasured never qualifies as small', () => {
+  const size = diffSize({ files: ['a.mjs'] });
+  assert.equal(size.measured, false);
+  assert.equal(size.bucket, 'medium');
+});
+
+test('the small bucket needs BOTH few files and few changed lines', () => {
+  const files3 = filesOf(SMALL_MAX_FILES);
+  assert.equal(diffSize({ files: files3, numstat: evenNumstat(files3, SMALL_MAX_CHANGED_LINES) }).bucket, 'small');
+  const files4 = filesOf(SMALL_MAX_FILES + 1);
+  assert.equal(diffSize({ files: files4, numstat: evenNumstat(files4, SMALL_MAX_CHANGED_LINES) }).bucket, 'medium');
+  assert.equal(diffSize({ files: files3, numstat: evenNumstat(files3, SMALL_MAX_CHANGED_LINES + 1) }).bucket, 'medium');
+});
+
+test('the large bucket needs EITHER many files or many changed lines', () => {
+  const many = filesOf(LARGE_MIN_FILES);
+  assert.equal(diffSize({ files: many, numstat: evenNumstat(many, 30) }).bucket, 'large');
+  assert.equal(diffSize({ files: ['a.mjs'], numstat: numstatOf([[LARGE_MIN_CHANGED_LINES, 0, 'a.mjs']]) }).bucket, 'large');
+  const some = filesOf(LARGE_MIN_FILES - 1);
+  assert.equal(diffSize({ files: some, numstat: evenNumstat(some, LARGE_MIN_CHANGED_LINES - 1) }).bucket, 'medium');
 });
 
 test('a 2-file diff with a large body is large, not small — large is checked first', () => {
-  assert.equal(diffSize({ files: filesOf(2), diff: diffOfAdded(LARGE_MIN_ADDED_LINES) }).bucket, 'large');
+  assert.equal(diffSize({
+    files: filesOf(2),
+    numstat: evenNumstat(filesOf(2), LARGE_MIN_CHANGED_LINES),
+  }).bucket, 'large');
 });
 
 // --- planReview: lanes -----------------------------------------------------------
 
+const smallPlan = (over = {}) => planReview({
+  files: ['src/render/palette.mjs'],
+  numstat: numstatOf([[5, 0, 'src/render/palette.mjs']]),
+  diff: '',
+  ...over,
+});
+const largeFiles = [...filesOf(20), 'src/auth/session.mjs'];
+const largePlan = () => planReview({
+  files: largeFiles,
+  numstat: evenNumstat(largeFiles, 100),
+  diff: '',
+});
+
+test('the plan covers exactly the persona registry', () => {
+  assert.deepEqual(smallPlan().lanes.map((l) => l.persona), [...DEFAULT_PERSONAS]);
+});
+
 test('the auditor and the steward run in every bucket', () => {
-  for (const plan of [
-    planReview({ files: filesOf(1), diff: diffOfAdded(5) }),
-    planReview({ files: filesOf(8), diff: diffOfAdded(200) }),
-    planReview({ files: filesOf(30), diff: diffOfAdded(2000) }),
-  ]) {
+  for (const plan of [smallPlan(), largePlan()]) {
     assert.equal(lane(plan, 'auditor').run, true);
     assert.equal(lane(plan, 'steward').run, true);
   }
 });
 
 test('the pragmatist is skipped on a small diff and only there', () => {
-  const small = planReview({ files: filesOf(1), diff: diffOfAdded(5) });
+  const small = smallPlan();
   assert.equal(lane(small, 'pragmatist').run, false);
   assert.equal(lane(small, 'pragmatist').agents, 0);
 
-  const medium = planReview({ files: filesOf(8), diff: diffOfAdded(200) });
+  const medium = planReview({ files: filesOf(8), numstat: evenNumstat(filesOf(8), 200), diff: '' });
   assert.equal(lane(medium, 'pragmatist').run, true);
 });
 
 test('at least two personas survive every plan — synthesis needs two voices', () => {
-  // Worst case: small boundary-free diff skips both skippable lanes.
-  const plan = planReview({ files: ['src/render/palette.mjs'], diff: diffOfAdded(3) });
-  assert.ok(plan.lanes.filter((l) => l.run).length >= 2);
+  assert.ok(smallPlan().lanes.filter((l) => l.run).length >= 2);
 });
 
-test('the adversary follows assessScope: skipped on a boundary-free diff, run on a boundary', () => {
-  const clean = planReview({ files: ['src/render/palette.mjs'], diff: diffOfAdded(3) });
-  assert.equal(lane(clean, 'adversary').run, false);
-  assert.equal(lane(clean, 'adversary').agents, 0);
-
-  const boundary = planReview({ files: ['src/auth/session.mjs'], diff: diffOfAdded(3) });
+test('the adversary follows assessScope on a scannable diff', () => {
+  assert.equal(lane(smallPlan(), 'adversary').run, false);
+  const boundary = planReview({
+    files: ['src/auth/session.mjs'],
+    numstat: numstatOf([[5, 0, 'src/auth/session.mjs']]),
+    diff: '',
+  });
   assert.equal(lane(boundary, 'adversary').run, true);
 });
 
+test('unmeasurable content forces the adversary — hidden content cannot prove absence', () => {
+  const plan = planReview({
+    files: ['src/render/palette.mjs', 'payload.mjs'],
+    numstat: numstatOf([[1, 0, 'src/render/palette.mjs']]) + '-\t-\tpayload.mjs\n',
+    diff: '',
+  });
+  assert.equal(lane(plan, 'adversary').run, true);
+  assert.match(lane(plan, 'adversary').reason, /unmeasurable/i);
+});
+
+test('heavy deletions force the adversary — a deletion can remove a guard', () => {
+  const plan = planReview({
+    files: ['src/render/gate.mjs'],
+    numstat: numstatOf([[0, DELETED_LINES_ADVERSARY_FLOOR, 'src/render/gate.mjs']]),
+    diff: '',
+  });
+  assert.equal(lane(plan, 'adversary').run, true);
+  assert.match(lane(plan, 'adversary').reason, /deleted/i);
+});
+
 test('only the per-file lanes split on a large diff, and only there', () => {
-  const large = planReview({ files: [...filesOf(20), 'src/auth/session.mjs'], diff: diffOfAdded(50) });
+  const large = largePlan();
   assert.equal(lane(large, 'auditor').agents, SPLIT_AGENTS);
   assert.equal(lane(large, 'adversary').agents, SPLIT_AGENTS);
   assert.equal(lane(large, 'steward').agents, 1);
   assert.equal(lane(large, 'pragmatist').agents, 1);
 
-  const medium = planReview({ files: filesOf(8), diff: diffOfAdded(200) });
+  const medium = planReview({ files: filesOf(8), numstat: evenNumstat(filesOf(8), 200), diff: '' });
   assert.equal(lane(medium, 'auditor').agents, 1);
 });
 
 // --- planReview: pins ------------------------------------------------------------
 
 test('a matched pin forces every lane on, whatever the size', () => {
-  const plan = planReview({
-    files: ['src/render/palette.mjs'],
-    diff: diffOfAdded(3),
-    pins: ['render/palette'],
-  });
+  const plan = smallPlan({ pins: ['render/palette'] });
   for (const l of plan.lanes) assert.equal(l.run, true, l.persona);
   assert.equal(plan.pinned.length, 1);
-  assert.equal(plan.pinned[0].file, 'src/render/palette.mjs');
+});
+
+test('pin matching is case-insensitive in both directions', () => {
+  const plan = planReview({
+    files: ['src/Auth/Credentials.mjs'],
+    numstat: numstatOf([[1, 0, 'src/Auth/Credentials.mjs']]),
+    diff: '',
+    pins: ['src/auth', 'CREDENTIAL'],
+  });
+  assert.equal(plan.pinned.length, 2);
+  for (const l of plan.lanes) assert.equal(l.run, true, l.persona);
 });
 
 test('an unmatched pin changes nothing', () => {
-  const plan = planReview({ files: ['src/render/palette.mjs'], diff: diffOfAdded(3), pins: ['hw/dma'] });
+  const plan = smallPlan({ pins: ['hw/dma'] });
   assert.deepEqual(plan.pinned, []);
   assert.equal(lane(plan, 'pragmatist').run, false);
 });
@@ -116,10 +206,7 @@ test('an empty file list gets the full shape — handed nothing is not "found no
 });
 
 test('rounds and the cap are the full defaults pre-flight, in every bucket', () => {
-  for (const plan of [
-    planReview({ files: filesOf(1), diff: diffOfAdded(5) }),
-    planReview({ files: filesOf(30), diff: diffOfAdded(2000) }),
-  ]) {
+  for (const plan of [smallPlan(), largePlan()]) {
     assert.equal(plan.rounds, 2);
     assert.equal(plan.maxIterations, DEFAULT_MAX_ITERATIONS);
   }
@@ -133,19 +220,21 @@ const finding = (over = {}) => ({
   title: 'a finding', detail: 'detail', fix: null, counterpart: null, ...over,
 });
 
-test('no findings at all: round 2 is provably a no-op', () => {
+test('no findings at all: round 2 is skippable, and the reason demands a declaration', () => {
   const r = escalate([payload('auditor', []), payload('steward', [])]);
   assert.equal(r.rounds, 1);
   assert.equal(r.maxIterations, DEFAULT_MAX_ITERATIONS);
+  assert.match(r.roundsReason, /--round2-skipped/);
 });
 
-test('advisory-only findings: round 2 still has nothing blocking to rule on', () => {
-  const r = escalate([payload('pragmatist', [finding({ kind: 'design', severity: 'critical' })])]);
+test('an info-severity clean-pass finding does not hold round 2 — the predicate is isBlocking', () => {
+  const r = escalate([payload('auditor', [finding({ severity: 'info', title: 'verified: clean' })])]);
   assert.equal(r.rounds, 1);
 });
 
-test('a critical design finding never raises the cap — advisory cannot escalate', () => {
+test('advisory-only findings: round 2 skippable, and a critical design never raises the cap', () => {
   const r = escalate([payload('pragmatist', [finding({ kind: 'design', severity: 'critical' })])]);
+  assert.equal(r.rounds, 1);
   assert.equal(r.maxIterations, DEFAULT_MAX_ITERATIONS);
 });
 
@@ -171,7 +260,33 @@ test('escalate accepts the keyed-by-persona shape combine.mjs produces', () => {
   assert.equal(r.maxIterations, ESCALATED_MAX_ITERATIONS);
 });
 
-test('escalate tolerates payloads with no findings array', () => {
+test('an off-shape payload fails closed: round 2 runs and the problem is named', () => {
+  // A payload with no findings array is a lane nobody heard from, not a lane
+  // that found nothing — the opposite of the tolerance an earlier version of
+  // this file pinned.
   const r = escalate([{ persona: 'auditor' }, null]);
+  assert.equal(r.rounds, 2);
+  assert.ok(r.problems.length >= 2);
+  assert.match(r.roundsReason, /fail closed/);
+});
+
+test('the combined object wrapped in an array fails closed instead of reading as empty', () => {
+  const combined = { auditor: payload('auditor', [finding({ severity: 'critical' })]) };
+  const r = escalate([combined]);
+  assert.equal(r.rounds, 2);
+  assert.ok(r.problems.length >= 1);
+});
+
+test('an expected lane with no payload fails closed', () => {
+  const r = escalate([payload('auditor', [])], { expected: ['auditor', 'steward'] });
+  assert.equal(r.rounds, 2);
+  assert.match(r.roundsReason, /steward/);
+});
+
+test('a complete expected roster with nothing blocking still skips round 2', () => {
+  const r = escalate(
+    [payload('auditor', []), payload('steward', [])],
+    { expected: ['auditor', 'steward'] },
+  );
   assert.equal(r.rounds, 1);
 });

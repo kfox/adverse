@@ -376,3 +376,21 @@ test('a ledger entry with no atCommit is refused', () => {
   assert.equal(r.status, 1);
   assert.match(r.stderr, /carries no atCommit/);
 });
+
+test('a split lane\'s two payloads merge in briefing.verdicts — worse verdict, both summaries', () => {
+  const { briefing } = runTriage(repo, [
+    { persona: 'auditor', verdict: 'approve', summary: 'half A', findings: [] },
+    { persona: 'auditor', verdict: 'reject', summary: 'half B', findings: [] },
+  ]);
+  assert.equal(briefing.verdicts.auditor.verdict, 'reject');
+  assert.match(briefing.verdicts.auditor.summary, /half A/);
+  assert.match(briefing.verdicts.auditor.summary, /half B/);
+});
+
+test('the merged verdict does not depend on which half the shell globbed first', () => {
+  const { briefing } = runTriage(repo, [
+    { persona: 'auditor', verdict: 'reject', summary: 'half B', findings: [] },
+    { persona: 'auditor', verdict: 'approve', summary: 'half A', findings: [] },
+  ]);
+  assert.equal(briefing.verdicts.auditor.verdict, 'reject');
+});

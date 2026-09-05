@@ -176,7 +176,7 @@ function reviewAs(dir, filename, payload) {
   return p;
 }
 
-test('--merge-personas unions a split lane\'s findings and keeps the worse verdict', () => {
+test('--merge-personas <persona> unions the split lane: findings, worse verdict, BOTH summaries', () => {
   const dir = freshTmp();
   try {
     const a = reviewAs(dir, 'auditor-a.json', {
@@ -188,13 +188,15 @@ test('--merge-personas unions a split lane\'s findings and keeps the worse verdi
       findings: [{ severity: 'critical', kind: 'defect', title: 'from half two' }],
     });
     const out = path.join(dir, 'combined.json');
-    const r = runCombine(['--round1', a, b, '--merge-personas', '--out', out]);
+    const r = runCombine(['--round1', a, b, '--merge-personas', 'auditor', '--out', out]);
     assert.equal(r.status, 0, r.stderr);
     const combined = JSON.parse(readFileSync(out, 'utf-8'));
     assert.deepEqual(Object.keys(combined), ['auditor']);
     assert.deepEqual(combined.auditor.findings.map((f) => f.title),
       ['from half one', 'from half two']);
     assert.equal(combined.auditor.verdict, 'reject');
+    assert.match(combined.auditor.summary, /half one/);
+    assert.match(combined.auditor.summary, /half two/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -207,10 +209,84 @@ test('the worse verdict wins in either input order', () => {
     const b = reviewAs(dir, 'b.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
     for (const order of [[a, b], [b, a]]) {
       const out = path.join(dir, 'combined.json');
-      const r = runCombine(['--round1', ...order, '--merge-personas', '--out', out]);
+      const r = runCombine(['--round1', ...order, '--merge-personas', 'auditor', '--out', out]);
       assert.equal(r.status, 0, r.stderr);
       assert.equal(JSON.parse(readFileSync(out, 'utf-8')).auditor.verdict, 'conditional');
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an off-contract verdict is recorded as reject, loudly — it cannot erase its partner\'s reject', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'a.json', { persona: 'auditor', verdict: 'reject', summary: 's', findings: [] });
+    const b = reviewAs(dir, 'b.json', { persona: 'auditor', verdict: 'REJECTED', summary: 's', findings: [] });
+    for (const order of [[a, b], [b, a]]) {
+      const out = path.join(dir, 'combined.json');
+      const r = runCombine(['--round1', ...order, '--merge-personas', 'auditor', '--out', out]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(JSON.parse(readFileSync(out, 'utf-8')).auditor.verdict, 'reject');
+      assert.match(r.stderr, /off-contract/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an off-contract verdict on an UNSPLIT lane is normalized too — the class, not the merge instance', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'a.json', { persona: 'auditor', verdict: 'REJECT', summary: 's', findings: [] });
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(readFileSync(out, 'utf-8')).auditor.verdict, 'reject');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a persona outside the registry is rejected — no phantom reviewer, no prototype key', () => {
+  const dir = freshTmp();
+  try {
+    for (const persona of ['Auditor', '__proto__', 'constructor']) {
+      const p = reviewAs(dir, 'x.json', { persona, verdict: 'approve', summary: 's', findings: [] });
+      const out = path.join(dir, 'combined.json');
+      const r = runCombine(['--round1', p, '--out', out]);
+      assert.equal(r.status, 1, persona);
+      assert.match(r.stderr, /unknown persona/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a split lane with only one half present is refused — half the diff got no reviewer', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'auditor-a.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, '--merge-personas', 'auditor', '--out', out]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /got 1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--merge-personas leaves the duplicate guard live for lanes it does not name', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'aud-a.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
+    const b = reviewAs(dir, 'aud-b.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
+    const s1 = reviewAs(dir, 'stew-1.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
+    const s2 = reviewAs(dir, 'stew-2.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, s1, s2, '--merge-personas', 'auditor', '--out', out]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /duplicate persona 'steward'/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -221,9 +297,22 @@ test('--merge-personas is refused for --round2 — round-2 payloads carry no fin
   try {
     const a = review(dir, 'auditor');
     const out = path.join(dir, 'combined.json');
-    const r = runCombine(['--round2', a, '--merge-personas', '--out', out]);
+    const r = runCombine(['--round2', a, '--merge-personas', 'auditor', '--out', out]);
     assert.equal(r.status, 2);
     assert.match(r.stderr, /applies only to --round1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--merge-personas rejects a name outside the registry', () => {
+  const dir = freshTmp();
+  try {
+    const a = review(dir, 'auditor');
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, '--merge-personas', 'Auditor', '--out', out]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a persona/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

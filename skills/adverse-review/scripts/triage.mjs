@@ -45,6 +45,7 @@ import { importFromSrc } from './package-root.mjs';
 const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('prompts.mjs');
+const { mergeSplitReviews } = await importFromSrc('synthesis.mjs');
 
 const CLUSTER_WINDOW_LINES = 15;
 
@@ -353,7 +354,16 @@ const regressed = findings.filter(isRegressionCandidate);
 const briefing = {
   base,
   gate: values.gate ?? null,
-  verdicts: Object.fromEntries(reviews.map((r) => [r.persona, { verdict: r.verdict, summary: r.summary }])),
+  // A split lane arrives as two payloads under one persona, and
+  // Object.fromEntries is last-key-wins — which replaced half B's reject with
+  // half A's approve in the one text every round-2 reviewer reads. Merge with
+  // the same semantics combine.mjs uses, from the same export.
+  verdicts: reviews.reduce((acc, r) => {
+    const prev = acc[r.persona];
+    const merged = prev ? mergeSplitReviews(prev, r) : r;
+    acc[r.persona] = { verdict: merged.verdict, summary: merged.summary };
+    return acc;
+  }, Object.create(null)),
   findings,
   clusters,
   crossReferences,

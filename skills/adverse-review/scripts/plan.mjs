@@ -6,13 +6,17 @@
 //   (default)                    plan the review from the diff: which lanes,
 //                                how many agents each, rounds, iteration cap
 //   --escalate round1-*.json     re-plan rounds and the cap from what round 1
-//                                actually found
+//                                actually found (--expect names the lanes the
+//                                plan ran, so a missing payload fails closed)
 //
 // The plan is advice, not a gate: exit 0 = plan printed, 2 = usage error.
-// An unreadable diff fails toward the full shape, same as the scope bridge —
-// unreadable is not the same as small. Every lane the plan skips must still be
-// declared to the synthesizer (`--skipped`); an undeclared skipped lane reads
-// exactly like a lane that looked and found nothing.
+// Size comes from `git diff --numstat`, never from the diff text — see
+// src/scaling.mjs for why the diff text cannot be trusted to measure itself.
+// An unreadable inventory fails toward the full shape (unreadable is not the
+// same as small), and the reads are separate so a supplied --files list
+// survives a failed diff read. Every lane the plan skips must still be
+// declared to the synthesizer (`--skipped`), and a skipped round 2 declared
+// with `--round2-skipped`; an undeclared gap reads exactly like a clean pass.
 
 import { parseArgs } from 'node:util';
 import { execFileSync } from 'node:child_process';
@@ -29,6 +33,7 @@ const { values, positionals } = parseArgs({
     files:    { type: 'string' },
     pin:      { type: 'string', multiple: true },
     escalate: { type: 'boolean' },
+    expect:   { type: 'string' },
     json:     { type: 'boolean' },
   },
   allowPositionals: true,
@@ -43,7 +48,7 @@ function emit(payload, human) {
 
 if (values.escalate) {
   if (!positionals.length) {
-    process.stderr.write('Usage: plan.mjs --escalate [--json] round1-<persona>*.json …\n');
+    process.stderr.write('Usage: plan.mjs --escalate [--expect auditor,steward,…] [--json] round1-<persona>*.json …\n');
     process.exit(2);
   }
   const payloads = positionals.map((path) => {
@@ -56,12 +61,13 @@ if (values.escalate) {
       process.exit(2);
     }
   });
+  const expected = (values.expect ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 
-  const result = escalate(payloads);
+  const result = escalate(payloads, { expected });
   emit(result,
-    `round 2: ${result.rounds === 2 ? 'run' : 'skip'} — ${result.reasons[0]}\n`
+    `round 2: ${result.rounds === 2 ? 'run' : 'skip'} — ${result.roundsReason}\n`
     + `max iterations: ${result.maxIterations}`
-    + (result.reasons[1] ? ` — ${result.reasons[1]}` : '')
+    + (result.capReason ? ` — ${result.capReason}` : '')
     + '\n');
   process.exit(0);
 }
@@ -76,29 +82,64 @@ if (positionals.length) {
 
 const repo = values.repo ?? process.cwd();
 const base = values.base ?? 'main';
-
-let files, diff;
-try {
-  files = values.files
-    ? readFileSync(values.files, 'utf-8').split('\n').filter(Boolean)
-    : execFileSync('git', ['diff', '--name-only', `${base}...HEAD`],
-                   { cwd: repo, encoding: 'utf-8' }).split('\n').filter(Boolean);
-  diff = execFileSync('git', ['diff', `${base}...HEAD`],
-                      { cwd: repo, encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 });
-} catch (e) {
-  process.stderr.write(`plan: could not read the diff (${e.message}); planning the full shape\n`);
-  files = [];
-  diff = '';
+// A base in git's option position would be parsed as a git option — a
+// workflow-doc-supplied ref must not become `--output=…`.
+if (base.startsWith('-')) {
+  process.stderr.write(`plan: --base ${JSON.stringify(base)} looks like an option, not a ref\n`);
+  process.exit(2);
 }
 
-const plan = planReview({ files, diff, pins: values.pin ?? [] });
+const git = (args) => execFileSync('git', args, { cwd: repo, encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 });
 
+// Three separate reads with separate failure policies. A --files list the
+// caller supplied must never be discarded because an unrelated git call
+// failed; a missing numstat only means "unmeasured", which excludes the small
+// bucket; a missing diff only blinds the content signals, which fail toward
+// running the Adversary.
+let files = [];
+if (values.files) {
+  try {
+    files = readFileSync(values.files, 'utf-8').split('\n').filter(Boolean);
+  } catch (e) {
+    process.stderr.write(`plan: --files ${values.files}: ${e.message}\n`);
+    process.exit(2);
+  }
+} else {
+  try {
+    files = git(['diff', '--name-only', `${base}...HEAD`]).split('\n').filter(Boolean);
+  } catch (e) {
+    process.stderr.write(`plan: could not list changed files (${e.message}); planning the full shape\n`);
+  }
+}
+
+let numstat = null;
+try {
+  numstat = git(['diff', '--numstat', `${base}...HEAD`]);
+} catch (e) {
+  process.stderr.write(`plan: could not measure the diff (${e.message}); the small bucket is unreachable\n`);
+}
+
+let diff = '';
+try {
+  diff = git(['diff', `${base}...HEAD`]);
+} catch (e) {
+  process.stderr.write(`plan: could not read the diff (${e.message}); content signals see nothing\n`);
+}
+
+const plan = planReview({ files, diff, numstat, pins: values.pin ?? [] });
+
+const sizeLine = files.length === 0
+  ? 'size: unknown (no file list)'
+  : plan.size.measured
+    ? `size: ${plan.size.bucket} (${plan.size.fileCount} files, ${plan.size.changedLines} changed lines`
+      + (plan.size.unscannable.length ? `, ${plan.size.unscannable.length} unmeasurable` : '') + ')'
+    : `size: ${plan.size.bucket} (${plan.size.fileCount} files, unmeasured)`;
 const laneLine = (l) => `  ${l.persona.padEnd(11)} ${l.run ? `run   ${l.agents} agent${l.agents === 1 ? ' ' : 's'}` : 'skip          '} — ${l.reason}`;
 emit(plan,
-  `size: ${plan.size.bucket} (${plan.size.fileCount} files, ${plan.size.addedLines} added lines)\n`
+  sizeLine + '\n'
   + (plan.reasons.length ? plan.reasons.map((r) => `note: ${r}\n`).join('') : '')
   + 'lanes:\n'
   + plan.lanes.map(laneLine).join('\n') + '\n'
-  + `rounds: ${plan.rounds} (re-decided after round 1: plan.mjs --escalate round1-*.json)\n`
+  + `rounds: ${plan.rounds} (re-decided after round 1: plan.mjs --escalate --expect <lanes> round1-*.json)\n`
   + `max iterations: ${plan.maxIterations}\n`);
 process.exit(0);

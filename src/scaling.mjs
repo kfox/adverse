@@ -15,36 +15,60 @@
 //    Adversary read file by file; the Steward's unit is a claim and the
 //    Pragmatist's is the whole shape, so partitioning their files does not
 //    partition their work.
-//  - Only advisory lanes are skippable on size. Dropping a blocking-kind lane
-//    leaves a kind unowned; dropping the Pragmatist on a small diff forgoes a
-//    backlog item and nothing else, because `design` never blocks. The
+//  - Only a lane whose every kind is advisory is skippable on size. The
+//    predicate is computed from the persona registry, not from a name, so
+//    re-aiming a persona at a blocking kind revokes its skip automatically.
+//    Skipping such a lane costs a backlog item and one potential second
+//    round-1 reporter (a duplicate report is what promotes a solo finding to
+//    cross-validated) — never a finding that could block on its own, and not
+//    a round-2 validator: this lane never cross-reviews. The
 //    Adversary's skip is not size-based at all — it is assessScope's
 //    trust-boundary gate, unchanged.
 //  - Round 2 is never skipped up front. Without it a solo finding can never
 //    block, so a pre-flight skip would make small diffs structurally unable to
-//    produce a blocking finding. It is skipped only after round 1, when it is
-//    provably a no-op: nothing of a blocking kind was reported, so there is
-//    nothing to validate or challenge.
+//    produce a blocking finding. After round 1 it is skipped only when no
+//    finding blocks under the synthesizer's own `isBlocking` — and even then
+//    the skip forgoes round 2's additive channel (findings a reviewer only
+//    sees with the other lanes in view), so it must be declared to the
+//    synthesizer (`--round2-skipped`), never taken silently.
 //  - The iteration cap scales UP only. Lowering it can only manufacture false
 //    exit-3 stops; raising it only costs model calls. Same one-directional
 //    bias as assessScope, for the same reason.
 //
-// Size is a bad proxy for risk — a one-line change to credential handling is
-// tiny and is exactly the diff that must not get the cheap pass — so `pins`
-// (path substrings the consuming repo supplies) force the full shape
-// regardless of size. This module is a budget policy, never a judgment: the
-// orchestrator must still declare every skipped lane to the synthesizer.
+// Size is measured from `git diff --numstat`, never from the diff text: diff
+// text is written by the author of the change, and `.gitattributes -diff`, a
+// binary blob, or a pure deletion can hide any amount of content from it —
+// every measurement error a diff-text metric admits shrinks the bucket, and
+// shrinking is the direction that buys a hostile change the cheapest review.
+// A numstat row git reports as `-\t-\t<path>` is content nobody measured or
+// signal-scanned: it excludes the small bucket and forces the Adversary lane.
+//
+// Size is still a bad proxy for risk — a one-line change to credential
+// handling is tiny and is exactly the diff that must not get the cheap pass —
+// so `pins` (path substrings the consuming repo supplies, matched
+// case-insensitively) force the full shape regardless of size. This module is
+// a budget policy, never a judgment: the orchestrator must still declare
+// every skipped lane to the synthesizer. The policy is consumed by the Skill
+// flow only; the standalone CLI's `--personas` flag remains an explicit,
+// unscaled choice (see kfox/adverse#12).
 
+import { DEFAULT_PERSONAS, PERSONAS } from './personas.mjs';
 import { ADVISORY_KINDS } from './prompts.mjs';
-import { addedLines, assessScope } from './scope.mjs';
+import { assessScope } from './scope.mjs';
+import { isBlocking } from './synthesis.mjs';
 
 // small = a diff one reviewer reads comfortably; large = one that exhausts a
 // reviewer's attention budget, the documented cause of deterministic lane
 // failures. Checked large-first so a 2-file 700-line diff is large.
 export const SMALL_MAX_FILES = 3;
-export const SMALL_MAX_ADDED_LINES = 80;
+export const SMALL_MAX_CHANGED_LINES = 80;
 export const LARGE_MIN_FILES = 15;
-export const LARGE_MIN_ADDED_LINES = 600;
+export const LARGE_MIN_CHANGED_LINES = 600;
+
+// Deletions carry no added line for assessScope to scan, and a deletion can
+// remove a guard as easily as an addition can add a sink — so past this many
+// deleted lines the Adversary runs regardless of what the signals say.
+export const DELETED_LINES_ADVERSARY_FLOOR = 80;
 
 export const SPLIT_AGENTS = 2;
 // The default must match convergenceStatus's own default in ledger.mjs, or the
@@ -53,22 +77,56 @@ export const DEFAULT_MAX_ITERATIONS = 3;
 export const ESCALATED_MAX_ITERATIONS = 5;
 
 const PER_FILE_LANES = new Set(['auditor', 'adversary']);
+const GATED_LANES = new Set(['adversary']);
 
-export function diffSize({ files = [], diff = '' } = {}) {
+// A lane is size-skippable only when nothing it reports can block. Computed
+// from the registry so the invariant survives a persona being re-aimed.
+function sizeSkippable(name) {
+  return PERSONAS[name].kinds.every((kind) => ADVISORY_KINDS.has(kind));
+}
+
+// Parse `git diff --numstat` output. A `-` in either column is a file git
+// could not (or was told not to) line-count — binary, or diff-suppressed.
+export function parseNumstat(text) {
+  let changed = 0;
+  let deleted = 0;
+  const unscannable = [];
+  for (const line of String(text ?? '').split('\n')) {
+    const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
+    if (!m) continue;
+    if (m[1] === '-' || m[2] === '-') {
+      unscannable.push(m[3]);
+      continue;
+    }
+    changed += Number(m[1]) + Number(m[2]);
+    deleted += Number(m[2]);
+  }
+  return { changed, deleted, unscannable };
+}
+
+// `numstat` is raw `git diff --numstat` text. Without it the size was never
+// measured, and unmeasured must not qualify for the cheap bucket — the same
+// rule that keeps an unscannable file out of `small`.
+export function diffSize({ files = [], numstat = null } = {}) {
   const fileCount = files.length;
-  const added = addedLines(diff).length;
+  const measured = numstat !== null && numstat !== undefined;
+  const { changed, deleted, unscannable } = parseNumstat(measured ? numstat : '');
 
   let bucket = 'medium';
-  if (fileCount >= LARGE_MIN_FILES || added >= LARGE_MIN_ADDED_LINES) bucket = 'large';
-  else if (fileCount <= SMALL_MAX_FILES && added <= SMALL_MAX_ADDED_LINES) bucket = 'small';
+  if (fileCount >= LARGE_MIN_FILES || changed >= LARGE_MIN_CHANGED_LINES) bucket = 'large';
+  else if (measured && unscannable.length === 0
+           && fileCount <= SMALL_MAX_FILES && changed <= SMALL_MAX_CHANGED_LINES) {
+    bucket = 'small';
+  }
 
-  return { fileCount, addedLines: added, bucket };
+  return { fileCount, changedLines: changed, deletedLines: deleted, bucket, measured, unscannable };
 }
 
 function matchedPins(files, pins) {
   const hits = [];
   for (const pin of pins) {
-    const file = files.find((f) => String(f).includes(pin));
+    const needle = String(pin).toLowerCase();
+    const file = files.find((f) => String(f).toLowerCase().includes(needle));
     if (file !== undefined) hits.push({ pin, file });
   }
   return hits;
@@ -79,8 +137,8 @@ function agentsFor(persona, run, bucket) {
   return bucket === 'large' && PER_FILE_LANES.has(persona) ? SPLIT_AGENTS : 1;
 }
 
-export function planReview({ files = [], diff = '', pins = [] } = {}) {
-  const size = diffSize({ files, diff });
+export function planReview({ files = [], diff = '', numstat = null, pins = [] } = {}) {
+  const size = diffSize({ files, numstat });
   const pinned = matchedPins(files, pins);
   const forced = pinned.length > 0;
   const reasons = [];
@@ -89,47 +147,61 @@ export function planReview({ files = [], diff = '', pins = [] } = {}) {
   // the same as having looked and found nothing — full treatment.
   const blind = files.length === 0;
   if (blind) reasons.push('no file list to assess; defaulting to the full shape');
+  if (!size.measured && !blind) reasons.push('size not measured (no numstat); the small bucket is unreachable');
+  if (size.unscannable.length) {
+    reasons.push(`${size.unscannable.length} file(s) unmeasurable (binary or diff-suppressed); `
+      + 'the small bucket is unreachable and the Adversary runs');
+  }
   if (forced) {
     reasons.push(`pinned path present (${pinned.map((p) => `"${p.pin}" -> ${p.file}`).join(', ')}); size-based skips overridden`);
   }
 
-  // assessScope already treats an empty file list as "run".
+  // assessScope already treats an empty file list as "run". Its signals scan
+  // only added lines, so content it never saw — suppressed files, deletions —
+  // must force the lane rather than count as evidence of absence.
   const adversary = assessScope({ files, diff });
-  const runAdversary = forced || adversary.recommend === 'run';
-  const runPragmatist = forced || blind || size.bucket !== 'small';
+  const adversaryForced = forced
+    || size.unscannable.length > 0
+    || size.deletedLines >= DELETED_LINES_ADVERSARY_FLOOR;
+  const adversaryForcedReason = forced ? 'pinned path forces the lane'
+    : size.unscannable.length > 0 ? 'unmeasurable file content cannot prove the absence of a boundary'
+    : `${size.deletedLines} deleted lines are not signal-scanned; a deletion can remove a guard`;
 
-  const lanes = [
-    {
-      persona: 'auditor',
+  const lanes = DEFAULT_PERSONAS.map((persona) => {
+    if (GATED_LANES.has(persona)) {
+      const run = adversaryForced || adversary.recommend === 'run';
+      return {
+        persona,
+        run,
+        agents: agentsFor(persona, run, size.bucket),
+        reason: adversaryForced && adversary.recommend !== 'run'
+          ? adversaryForcedReason
+          : adversary.reason,
+      };
+    }
+    if (sizeSkippable(persona)) {
+      const run = forced || blind || size.bucket !== 'small';
+      return {
+        persona,
+        run,
+        agents: agentsFor(persona, run, size.bucket),
+        reason: run
+          ? 'one agent — structure findings are cross-file, so partitioning harms them'
+          : 'small diff; every kind this lane reports is advisory, so the skip costs a backlog item '
+            + 'and a potential second reporter, never a finding that could block on its own',
+      };
+    }
+    return {
+      persona,
       run: true,
-      agents: agentsFor('auditor', true, size.bucket),
-      reason: size.bucket === 'large'
+      agents: agentsFor(persona, true, size.bucket),
+      reason: size.bucket === 'large' && PER_FILE_LANES.has(persona)
         ? 'always runs; split across two agents because a large diff exhausts one reviewer\'s budget'
-        : 'always runs — correctness has no skippable case',
-    },
-    {
-      persona: 'adversary',
-      run: runAdversary,
-      agents: agentsFor('adversary', runAdversary, size.bucket),
-      reason: forced && adversary.recommend !== 'run'
-        ? 'pinned path forces the lane'
-        : adversary.reason,
-    },
-    {
-      persona: 'steward',
-      run: true,
-      agents: 1,
-      reason: 'always runs, one agent — its unit of work is a claim, and partitioning files does not partition claims',
-    },
-    {
-      persona: 'pragmatist',
-      run: runPragmatist,
-      agents: runPragmatist ? 1 : 0,
-      reason: runPragmatist
-        ? 'one agent — structure findings are cross-file, so partitioning harms them'
-        : 'small diff; design findings are advisory and cannot change the gate, so this skip costs a backlog item at most',
-    },
-  ];
+        : persona === 'steward'
+          ? 'always runs, one agent — its unit of work is a claim, and partitioning files does not partition claims'
+          : 'always runs — correctness has no skippable case',
+    };
+  });
 
   return {
     size,
@@ -145,27 +217,58 @@ export function planReview({ files = [], diff = '', pins = [] } = {}) {
 // Accepts the keyed-by-persona object combine.mjs produces or an array of
 // per-persona payloads ({persona, findings}).
 //
-// A finding with a missing or unrecognized `kind` counts as blocking here for
-// the same reason coerceKind sends it to UNCLASSIFIED in synthesis: a finding
-// must not escape scrutiny by being mislabeled. The cap, by contrast, escalates
-// only on a literal `critical` — escalation buys iterations, not safety, so
-// there is no fail-closed case to serve by escalating on garbage.
-export function escalate(round1) {
-  const payloads = Array.isArray(round1) ? round1 : Object.values(round1 ?? {});
-  const findings = payloads.flatMap((p) => (Array.isArray(p?.findings) ? p.findings : []));
-  const blocking = findings.filter((f) => f && !ADVISORY_KINDS.has(f.kind));
-  const criticals = blocking.filter((f) => f.severity === 'critical');
+// Fail closed, in both directions the panel found open. `expected` is the
+// roster of lanes the plan ran: a lane whose payload is missing or off-shape
+// is a lane nobody heard from, which is not a lane that found nothing — so
+// any problem keeps round 2. The blocking predicate is the synthesizer's own
+// `isBlocking` (an info-severity finding does not block, a missing or
+// unrecognized kind does), so this decision and the report it feeds cannot
+// disagree. The cap, by contrast, escalates only on a literal `critical` —
+// escalation buys iterations, not safety, so there is no fail-closed case to
+// serve by escalating on garbage.
+export function escalate(round1, { expected = [] } = {}) {
+  const raw = Array.isArray(round1) ? round1 : Object.values(round1 ?? {});
+  const problems = [];
 
-  const rounds = blocking.length === 0 ? 1 : 2;
-  const maxIterations = criticals.length > 0 ? ESCALATED_MAX_ITERATIONS : DEFAULT_MAX_ITERATIONS;
-
-  const reasons = [];
-  reasons.push(rounds === 1
-    ? `round 2 is provably a no-op: ${findings.length} finding(s), none of a blocking kind — nothing to validate or challenge`
-    : `${blocking.length} blocking-kind finding(s) need cross-examination`);
-  if (criticals.length > 0) {
-    reasons.push(`${criticals.length} critical blocking-kind finding(s): cap raised to ${ESCALATED_MAX_ITERATIONS} — stopping on the cap with a critical open is the worst place to stop`);
+  const payloads = [];
+  for (const p of raw) {
+    if (p && typeof p === 'object' && !Array.isArray(p)
+        && typeof p.persona === 'string' && Array.isArray(p.findings)) {
+      payloads.push(p);
+    } else {
+      problems.push('an input is not a per-persona payload ({persona, findings: []})');
+    }
+  }
+  const heard = new Set(payloads.map((p) => p.persona));
+  for (const persona of expected) {
+    if (!heard.has(persona)) problems.push(`expected lane "${persona}" has no readable round-1 payload`);
   }
 
-  return { rounds, maxIterations, blockingCount: blocking.length, criticalCount: criticals.length, reasons };
+  const findings = payloads.flatMap((p) => p.findings.filter((f) => f && typeof f === 'object'));
+  const blocking = findings.filter(isBlocking);
+  const criticals = blocking.filter((f) => f.severity === 'critical');
+
+  const rounds = problems.length === 0 && blocking.length === 0 ? 1 : 2;
+  const maxIterations = criticals.length > 0 ? ESCALATED_MAX_ITERATIONS : DEFAULT_MAX_ITERATIONS;
+
+  const roundsReason = rounds === 1
+    ? `no blocking finding in round 1 (${findings.length} finding(s), all advisory or info). `
+      + 'Skipping round 2 forgoes its additive channel — declare it with --round2-skipped, never silently'
+    : problems.length > 0
+      ? `fail closed — ${problems.join('; ')}`
+      : `${blocking.length} blocking finding(s) need cross-examination`;
+  const capReason = criticals.length > 0
+    ? `${criticals.length} critical blocking finding(s): cap raised to ${ESCALATED_MAX_ITERATIONS} — `
+      + 'stopping on the cap with a critical open is the worst place to stop'
+    : null;
+
+  return {
+    rounds,
+    maxIterations,
+    roundsReason,
+    capReason,
+    problems,
+    blockingCount: blocking.length,
+    criticalCount: criticals.length,
+  };
 }
