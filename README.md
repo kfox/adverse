@@ -268,6 +268,7 @@ src/                          # Shared core, used by both CLI and Skill
   trace.mjs                   # Re-project a finding's anchor across commits
   ledger.mjs                  # Adjudication log + the convergence stop condition
   scope.mjs                   # Does this change have a trust boundary in it?
+  scaling.mjs                 # How much review does this change deserve?
   html.mjs                    # Self-contained HTML dashboard renderer
   cli.mjs                     # Argv parsing + command dispatch
 
@@ -283,6 +284,7 @@ skills/adverse-review/
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
     scope.mjs                 # Skill bridge: should the Adversary lane run?
+    plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
     dump-prompts.mjs          # Regenerate prompt files from src/ (a test enforces it)
     prompts/                  # Generated — edit src/, then re-run dump-prompts.mjs
@@ -301,7 +303,7 @@ tests/
 - **Source size cap.** Default 250 KB total / 30 KB per file. Trips on very large repos in non-diff mode. Use `--diff` for review-on-PR workflows where the change set is what matters.
 - **Subprocess agent contract.** The CLI assumes the agent reads prompt from stdin and writes the response to stdout, exiting cleanly. Most coding agents support this; some need a flag (`-p` for Claude Code, `exec` for Codex CLI). When in doubt, run the agent manually with a stdin prompt first to confirm the shape.
 - **Not a fix-applier — mostly.** The CLI produces a report and stops; hand it to your coding agent if you want fixes applied. The Skill's convergence loop *does* apply fixes, but only when the user asks for that shape, and it records a reason for every finding it declines as well as every one it fixes.
-- **The scope gate is a budget hint, not a security judgment.** It decides whether the Adversary lane has anything to look at by pattern-matching changed paths and added lines. It cannot know that an innocuous-looking helper is called from an auth path, so it is biased toward running the lane, and a skipped lane is always named in the report — an unmentioned one reads exactly like a lane that looked and found nothing.
+- **The review plan is a budget policy, not a judgment.** The scope gate decides whether the Adversary lane has anything to look at by pattern-matching changed paths and added lines; the scaling policy sizes the rest — lanes, agents per lane, rounds, and the iteration cap — from the diff and from what round 1 found. Neither can know that an innocuous-looking helper is called from an auth path, so both are biased toward more review (pins force the full panel on paths a repo names), and a skipped lane is always named in the report — an unmentioned one reads exactly like a lane that looked and found nothing.
 - **`design` findings never gate.** That is deliberate, but it means the loop can converge with real design feedback outstanding. It is reported as a backlog; someone still has to read it.
 
 ## License and credit

@@ -68,8 +68,9 @@ stops:
 A run whose lanes **failed** does not converge either, however few findings the
 survivors returned: a lane that failed did not find nothing, it did not look.
 
-The loop is capped at 3 iterations, and a run that hits the cap is a **stop,
-not a pass**.
+The loop is capped at 3 iterations — 5 when round 1 reported a critical
+finding of a blocking kind (`plan.mjs --escalate` decides; Phase 4) — and a
+run that hits the cap is a **stop, not a pass**.
 
 ## The four lanes
 
@@ -150,7 +151,7 @@ mkdir -p "$LEDGER_DIR"
 LEDGER="$LEDGER_DIR/$(git rev-parse --abbrev-ref HEAD | tr / -).ledger.json"
 ```
 
-## Phase 1 — file list and lane scoping
+## Phase 1 — file list and review plan
 
 Reviewers read the repo themselves, so all you need is the inventory:
 
@@ -159,17 +160,37 @@ git diff --stat "$BASE"...HEAD | tee "$ADVERSE_RUN/diffstat.txt"
 git diff --name-only "$BASE"...HEAD > "$ADVERSE_RUN/files.txt"
 ```
 
-Then ask whether the Adversary lane has anything to look at:
+Then ask how much review this change deserves:
 
 ```bash
-node ${SKILL_DIR}/scripts/scope.mjs --repo . --base "$BASE"   # exit 0 = run, 1 = skip
+node ${SKILL_DIR}/scripts/plan.mjs --repo . --base "$BASE"
 ```
 
-It is a **budget hint, not a security judgment**, and it is biased toward
-running: a false positive costs two model calls, a false negative ships a
-vulnerability nobody looked for. Skip the lane only when it says skip AND the
-user has not asked for a thorough pass. If you skip it, **say so out loud** and
-pass it to the synthesizer in Phase 6 — a lane that was skipped and not
+The plan says which lanes run, how many agents each gets, and the starting
+rounds and iteration cap. The rules and their rationale live in
+`src/scaling.mjs`; the short version:
+
+- The Auditor and the Steward always run. The Adversary runs unless the
+  trust-boundary gate (`scope.mjs`, which `plan.mjs` subsumes) says it has
+  nothing to look at. The Pragmatist is skipped on a small diff — its findings
+  are advisory, so the skip can cost a backlog item, never a blocking finding.
+- On a large diff the Auditor and the Adversary each get **two agents**,
+  partitioned by file (Phase 2): a large diff exhausts one reviewer's
+  attention budget, the documented cause of deterministic lane failures.
+- Rounds and the cap start at 2 and 3 and are re-decided after round 1
+  (Phase 4).
+
+If the repository's own workflow doc names paths that must always get the full
+panel (credential handling, sandboxes, wire protocols), pass each as
+`--pin <path-substring>` — any match overrides every size-based skip. Size is
+a bad proxy for risk, and a one-line change to a boundary is exactly the diff
+that must not get the cheap pass.
+
+The plan is a **budget policy, not a judgment**, and it is biased toward
+running: a false positive costs model calls, a false negative ships a problem
+nobody looked for. Skip a lane only when the plan says skip AND the user has
+not asked for a thorough pass. Every skipped lane must be **said out loud** and
+passed to the synthesizer in Phase 6 — a lane that was skipped and not
 mentioned reads exactly like a lane that looked and found nothing.
 
 `collect.mjs` still exists and still works — it is what the standalone CLI
@@ -205,8 +226,8 @@ most worth reading.
 
 ## Phase 2 — round 1: independent reviews
 
-Spawn the selected reviewers **in parallel** using the Agent tool, one per
-persona. Each gets:
+Spawn the reviewers the plan selected **in parallel** using the Agent tool,
+one per persona — two for a lane the plan split. Each gets:
 
 - **Subagent type**: `auditor` / `adversary` / `steward` / `pragmatist`, if
   those agent definitions are installed (`~/.claude/agents/<persona>.md`,
@@ -234,6 +255,16 @@ The Steward needs one thing the others don't: point it at where this repo keeps
 its rules and its architecture notes (`CLAUDE.md`, `CONTRIBUTING.md`,
 `docs/architecture*`, a committed schema). Its lane is code-versus-claim, and
 it cannot check a claim it was never shown.
+
+**A split lane** (two agents, from the Phase 1 plan) partitions
+`$ADVERSE_RUN/files.txt` roughly in half between its two agents. Tell each
+agent which files are its half; both run under the **same persona name**, and
+their replies are saved as `round1-<persona>-a.json` and
+`round1-<persona>-b.json`. The synthesizer counts distinct personas, not
+agents, so a split lane cannot inflate consensus. If one member of a split
+lane fails, the lane is **degraded** unless that member's half is re-run —
+half the files got no reviewer, and an undeclared gap reads exactly like a
+clean review.
 
 Each subagent must respond with a single JSON object:
 
@@ -317,8 +348,27 @@ in the run.
 
 ## Phase 4 — round 2: cross-review from the briefing
 
-For each persona that produced a valid round-1 review **except the
-Pragmatist**, spawn a subagent with the same persona system prompt and:
+First, re-plan from what round 1 actually found — criticality is not knowable
+until now:
+
+```bash
+node ${SKILL_DIR}/scripts/plan.mjs --escalate "$ADVERSE_RUN"/round1-*.json
+```
+
+Two dials move, both deterministic:
+
+- **Round 2 is skipped only when provably a no-op**: round 1 reported nothing
+  of a blocking kind, so there is nothing to validate or challenge. It is
+  never skipped on size — without round 2 a solo finding can never block.
+- **The cap rises to 5** when round 1 holds a critical finding of a blocking
+  kind. It never drops below 3: lowering the cap can only manufacture false
+  exit-3 stops, raising it only costs model calls. Carry the printed cap to
+  `converge.mjs --max-iterations` in Phase 8.
+
+If it says skip, phases 4–5 collapse the same way the "faster review" path
+does. Otherwise: for each persona that produced a valid round-1 review
+**except the Pragmatist**, spawn a subagent with the same persona system
+prompt and:
 
 1. `${SKILL_DIR}/scripts/prompts/round2.txt`
 2. `$ADVERSE_RUN/briefing.json`
@@ -367,6 +417,8 @@ Then combine both rounds:
 ```bash
 node ${SKILL_DIR}/scripts/combine.mjs --round1 "$ADVERSE_RUN"/round1-*.json \
     --out "$ADVERSE_RUN"/round1.json
+    # add --merge-personas if the plan split a lane in Phase 2; without it a
+    # duplicate persona is an error, because it usually means a file passed twice
 node ${SKILL_DIR}/scripts/combine.mjs --round2 "$ADVERSE_RUN"/round2-*.repaired.json \
     --out "$ADVERSE_RUN"/round2.json
 ```
@@ -383,7 +435,9 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     --out "$ADVERSE_RUN"/report.md \
     --json-out "$ADVERSE_RUN"/report.json \
     --html-out "$ADVERSE_RUN"/report.html
-    # add --skipped adversary="no trust boundary in the diff" if you skipped a lane
+    # one --skipped per lane the plan skipped, e.g.:
+    #   --skipped adversary="no trust boundary in the diff"
+    #   --skipped pragmatist="small diff; design findings are advisory"
 ```
 
 Never LLM-render the findings yourself; the synthesizer's groupings
@@ -468,7 +522,8 @@ missing; do not ignore that line.
 
 ```bash
 node ${SKILL_DIR}/scripts/converge.mjs --ledger "$LEDGER" \
-    --report "$ADVERSE_RUN"/report.json --repo . --head HEAD
+    --report "$ADVERSE_RUN"/report.json --repo . --head HEAD \
+    --max-iterations "$CAP"   # from plan.mjs --escalate; omit for the default 3
 ```
 
 | Exit | Meaning | Do |
@@ -597,11 +652,12 @@ re-learning the same lesson and re-reporting the same class of finding.
 
 ## Notes for the orchestrator
 
-- **Cost.** A single pass is 4 round-1 calls + 3 round-2 calls = **7**, the same
-  order as the old three-persona 6, with a whole extra lane: the Pragmatist's
-  skipped round 2 pays for the Steward's round 1, and skipping the Adversary on
-  a boundary-free diff takes it to 5. Each loop iteration adds ~3 cheap
-  verification calls, not another 7.
+- **Cost.** The full shape is 4 round-1 calls + 3 round-2 calls = **7**. The
+  Phase 1 plan scales that in both directions: a small boundary-free diff runs
+  2 round-1 calls (Auditor + Steward) and, when round 1 reports nothing of a
+  blocking kind, no round 2 — a floor of **2**. A large diff splits the
+  per-file lanes into two agents each, up to 6 + 3 = **9**. Each loop
+  iteration adds ~3 cheap verification calls, not another 7.
 - **Every deterministic step is deterministic on purpose.** Triage, repair,
   tracing, synthesis, and the stop condition are Node code because a model in
   any of those positions can hallucinate consensus, and consensus is the

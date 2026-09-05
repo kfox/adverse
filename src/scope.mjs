@@ -79,7 +79,7 @@ const CONTENT_SIGNALS = [
 // costs two model calls; a false negative ships a vulnerability nobody looked
 // for), so cost control belongs in the patterns, not in dropping input. The SQL
 // signal, the one that was actually super-linear, is bounded by shape now.
-function addedLines(diffText) {
+export function addedLines(diffText) {
   return String(diffText).split('\n')
     .filter((l) => l.startsWith('+') && !l.startsWith('+++ '))
     .map((l) => l.slice(1));
