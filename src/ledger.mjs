@@ -143,12 +143,15 @@ export function matchFinding(ledger, finding, traceFor = () => null) {
 // `adjudicated.settled` is the flag that suppresses re-litigation. A finding
 // matching a `fixed` entry is annotated too, but never settled — see the note
 // at the top of this file.
-export function annotate(findings, ledger, traceFor = () => null) {
+// `reportDigest` identifies the report being checked. An entry recorded from
+// that same report is the SAME observation, not a new one — see `sameReport`.
+export function annotate(findings, ledger, traceFor = () => null, { reportDigest = null } = {}) {
   return findings.map((f) => {
     const m = matchFinding(ledger, f, traceFor);
     if (!m) return f;
     const settled = isSettled(m.entry.disposition) && m.score >= SETTLING_SCORE;
     const tooWeak = isSettled(m.entry.disposition) && m.score < SETTLING_SCORE;
+    const sameReport = Boolean(reportDigest) && m.entry.reportDigest === reportDigest;
     return {
       ...f,
       adjudicated: {
@@ -160,6 +163,7 @@ export function annotate(findings, ledger, traceFor = () => null) {
         matchedBy: m.why,
         confidence: m.score,
         settled,
+        sameReport,
         note: settled
           ? 'Already decided in an earlier iteration. Do not re-open it. Challenge '
             + 'only if that decision rested on something the fix has since changed.'
@@ -167,9 +171,13 @@ export function annotate(findings, ledger, traceFor = () => null) {
             ? 'An earlier decision covers this file, but it names no line, so it is '
               + 'too weak to settle this finding. Judge the finding on its merits; '
               + 'the earlier reason is shown only as context.'
-            : 'This was recorded FIXED in an earlier iteration. If it is still real, '
-              + 'the fix did not work — say exactly what the fix missed. That is more '
-              + 'important than any new finding on this pass.',
+            : sameReport
+              ? 'Recorded FIXED against THIS report, which was produced before the '
+                + 'fix. Not evidence of anything yet: the fix has not been observed. '
+                + 'Verify it (Phase 9) and re-synthesize before judging.'
+              : 'This was recorded FIXED in an earlier iteration. If it is still real, '
+                + 'the fix did not work — say exactly what the fix missed. That is more '
+                + 'important than any new finding on this pass.',
       },
     };
   });
@@ -178,7 +186,7 @@ export function annotate(findings, ledger, traceFor = () => null) {
 // Add this iteration's decisions. Entries are appended, never rewritten: the
 // ledger is the record of what was decided when, and a decision that gets
 // revisited is a second entry rather than an edit to the first.
-export function recordDecisions(ledger, decisions, { iteration, atCommit }) {
+export function recordDecisions(ledger, decisions, { iteration, atCommit, reportDigest = null }) {
   const next = { ...ledger, entries: [...(ledger.entries ?? [])] };
   for (const d of decisions) {
     if (!DISPOSITIONS.includes(d.disposition)) {
@@ -202,9 +210,11 @@ export function recordDecisions(ledger, decisions, { iteration, atCommit }) {
       reason: String(d.reason).trim(),
       iteration,
       atCommit,
+      reportDigest,
     });
   }
-  next.iterations = [...(ledger.iterations ?? []), { n: iteration, atCommit, decided: decisions.length }];
+  next.iterations = [...(ledger.iterations ?? []),
+    { n: iteration, atCommit, reportDigest, decided: decisions.length }];
   return next;
 }
 
@@ -213,13 +223,22 @@ export function recordDecisions(ledger, decisions, { iteration, atCommit }) {
 // Terminate when nothing is both credible enough and consequential enough to
 // hold the change open, after subtracting what has already been settled. Every
 // input is data the panel already produced; no model judges this.
-export function convergenceStatus(report, ledger, traceFor = () => null, { maxIterations = 3 } = {}) {
+export function convergenceStatus(report, ledger, traceFor = () => null,
+                                  { maxIterations = 3, reportDigest = null } = {}) {
   const open = (report.findings ?? []).filter((f) => f.blocking
     && (f.confidence === 'cross-validated' || f.confidence === 'consensus'));
 
-  const annotated = annotate(open, ledger, traceFor);
+  const annotated = annotate(open, ledger, traceFor, { reportDigest });
   const settled = annotated.filter((f) => f.adjudicated?.settled);
-  const regressed = annotated.filter((f) => f.adjudicated && !f.adjudicated.settled);
+
+  // A finding recorded FIXED against the very report being checked has not
+  // been re-observed — the report predates the fix. Calling that REGRESSED
+  // makes the first convergence check after every fix batch scream, and the
+  // Skill tells the orchestrator to lead with REGRESSED, so the one signal
+  // the loop trusts most would be noise by construction.
+  const regressed = annotated.filter((f) => f.adjudicated && !f.adjudicated.settled
+    && !f.adjudicated.sameReport);
+  const unverified = annotated.filter((f) => f.adjudicated?.sameReport);
   const remaining = annotated.filter((f) => !f.adjudicated?.settled);
 
   const iteration = (ledger.iterations ?? []).length + 1;
@@ -231,6 +250,7 @@ export function convergenceStatus(report, ledger, traceFor = () => null, { maxIt
     open: remaining,
     settled,
     regressed,
+    unverified,
     done: remaining.length === 0,
     capped,
     // The cap is a stop, not a pass. A run that ends here has open findings and

@@ -13,6 +13,7 @@
 // exits clean on the cap would be lying about what it found.
 
 import { parseArgs } from 'node:util';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { importFromSrc } from './package-root.mjs';
@@ -38,9 +39,21 @@ const { values } = parseArgs({
 if (!values.ledger) {
   process.stderr.write(
     'Usage:\n'
-    + '  converge.mjs --ledger L.json --record decisions.json --repo DIR --at REVIEWED_REF\n'
+    + '  converge.mjs --ledger L.json --record decisions.json --report report.json --repo DIR --at REVIEWED_REF\n'
     + '  converge.mjs --ledger L.json --report report.json --repo DIR [--head REF] [--max-iterations N]\n');
   process.exit(2);
+}
+
+// Identifies a report so a decision can say which observation it answered.
+// A finding recorded FIXED against report R has not been re-observed when R is
+// what the next convergence check reads, and calling that REGRESSED would make
+// the loud signal noise on every first check after a fix batch.
+function digest(file) {
+  try {
+    return createHash('sha256').update(readFileSync(file)).digest('hex').slice(0, 16);
+  } catch {
+    return null;
+  }
 }
 
 function readJson(file) {
@@ -84,9 +97,17 @@ if (values.record) {
       + '  the review read> to make re-projection work.\n');
   }
 
+  const reportDigest = values.report ? digest(values.report) : null;
+  if (!values.report) {
+    process.stderr.write(
+      'converge: --record without --report. These decisions will not name the\n'
+      + '  report they answered, so the next check cannot tell "not yet verified"\n'
+      + '  from "the fix did not take" and will report them REGRESSED.\n');
+  }
+
   let next;
   try {
-    next = recordDecisions(ledger, decisions, { iteration, atCommit });
+    next = recordDecisions(ledger, decisions, { iteration, atCommit, reportDigest });
   } catch (e) {
     process.stderr.write(`converge: ${e.message}\n`);
     process.exit(2);
@@ -143,7 +164,8 @@ if (rawMax !== undefined) {
   }
   capOption = { maxIterations: n };
 }
-const status = convergenceStatus(report, ledger ?? emptyLedger(), traceFor, capOption);
+const status = convergenceStatus(report, ledger ?? emptyLedger(), traceFor,
+  { ...capOption, reportDigest: digest(values.report) });
 
 const list = (fs) => fs.map((f) => `    - [${f.severity}·${f.kind}] ${f.title}`
   + (f.file ? ` (${f.file}${f.line !== null && f.line !== undefined ? `:${f.line}` : ''})` : '')).join('\n');
@@ -151,6 +173,11 @@ const list = (fs) => fs.map((f) => `    - [${f.severity}·${f.kind}] ${f.title}`
 let out = `iteration ${status.iteration} of at most ${status.maxIterations}: ${status.reason}\n`;
 if (status.open.length)      out += `  still open (${status.open.length}):\n${list(status.open)}\n`;
 if (status.regressed.length) out += `  REGRESSED — recorded fixed, reported again (${status.regressed.length}):\n${list(status.regressed)}\n`;
+if (status.unverified.length) {
+  out += `  recorded fixed against THIS report, not yet re-observed (${status.unverified.length}):\n`
+       + `${list(status.unverified)}\n`
+       + '    Verify these (Phase 9) and re-synthesize. They are not regressions.\n';
+}
 if (status.settled.length)   out += `  settled in an earlier iteration, not counted (${status.settled.length}):\n${list(status.settled)}\n`;
 process.stdout.write(out);
 

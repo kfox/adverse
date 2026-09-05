@@ -130,7 +130,38 @@ test('recordDecisions appends and stamps the iteration and commit', () => {
   assert.equal(l.entries.length, 1);
   assert.equal(l.entries[0].iteration, 1);
   assert.equal(l.entries[0].atCommit, 'sha1');
-  assert.deepEqual(l.iterations, [{ n: 1, atCommit: 'sha1', decided: 1 }]);
+  assert.deepEqual(l.iterations, [{ n: 1, atCommit: 'sha1', reportDigest: null, decided: 1 }]);
+});
+
+test('a finding recorded fixed against THIS report is unverified, not regressed', () => {
+  // The convergence check runs against the report that was current when the
+  // fixes were decided, so every `fixed` finding trivially "comes back".
+  // Reporting that as REGRESSED makes the loudest signal in the run noise on
+  // the first check after every fix batch.
+  const finding = { title: 'a', kind: 'defect', file: 'x.py', line: 10,
+                    blocking: true, confidence: 'consensus', severity: 'critical' };
+  const l = recordDecisions(emptyLedger(), [{ ...finding, disposition: 'fixed', reason: 'guarded' }],
+    { iteration: 1, atCommit: 'sha1', reportDigest: 'abc123' });
+
+  const same = convergenceStatus({ findings: [finding] }, l, () => null, { reportDigest: 'abc123' });
+  assert.equal(same.regressed.length, 0, 'the same report is not a second observation');
+  assert.equal(same.unverified.length, 1);
+  assert.match(same.unverified[0].adjudicated.note, /not yet|before the fix/i);
+
+  // A LATER report reporting it again is a genuine regression.
+  const later = convergenceStatus({ findings: [finding] }, l, () => null, { reportDigest: 'def456' });
+  assert.equal(later.regressed.length, 1, 'a new report reporting it again IS a regression');
+  assert.equal(later.unverified.length, 0);
+});
+
+test('with no report digest at all, the old regressed behavior stands', () => {
+  const finding = { title: 'a', kind: 'defect', file: 'x.py', line: 10,
+                    blocking: true, confidence: 'consensus', severity: 'critical' };
+  const l = recordDecisions(emptyLedger(), [{ ...finding, disposition: 'fixed', reason: 'guarded' }],
+    { iteration: 1, atCommit: 'sha1' });
+  const s = convergenceStatus({ findings: [finding] }, l, () => null);
+  assert.equal(s.regressed.length, 1);
+  assert.equal(s.unverified.length, 0);
 });
 
 test('recordDecisions never rewrites an earlier decision', () => {
