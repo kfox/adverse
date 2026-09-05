@@ -46,10 +46,21 @@ left. Phases 0–7, then 8–9, looping. Use it when the user says "until clean"
 "until it's done", "keep going", or asks to institutionalize review in a
 workflow. Announce which shape you are running.
 
-The loop terminates on arithmetic, not on judgment: `converge.mjs` counts the
-findings that are both credible enough (cross-validated or consensus) and
-consequential enough (not advisory, not `info`) and not already settled. It is
-capped at 3 iterations, and a run that hits the cap is a **stop, not a pass**.
+The loop terminates on arithmetic, not on judgment. `converge.mjs` holds it
+open while either of two counts is non-zero:
+
+- **Open** — findings that are credible enough (cross-validated or consensus)
+  and consequential enough (not advisory, not `info`) and not already settled.
+- **Unexamined** — blocking findings that *fail* the credibility test and that
+  no reviewer ever went on record about. These are not counted as credible;
+  they are counted as unfinished. Without this the confidence gate silently
+  deleted them, and a round-2 reviewer's own added critical — which has no
+  validators by construction, because surfacing what round 1 missed is the
+  entire point of a cross-review — made the loop report success.
+
+A `disputed` finding is reported but blocks nothing: somebody did go on record,
+and they disagreed. The loop is capped at 3 iterations, and a run that hits the
+cap is a **stop, not a pass**.
 
 ## The four lanes
 
@@ -395,6 +406,7 @@ node ${SKILL_DIR}/scripts/converge.mjs --ledger "$LEDGER" \
 |---|---|---|
 | 0 | converged — nothing blocking is unsettled | stop; report what was fixed and what was declined |
 | 1 | findings still open | go to Phase 9 |
+| 1 | *only* `NOT CROSS-EXAMINED` listed | Phase 9 cannot clear these — each persona verifies only its own findings, so verification can never cross-examine. Either run a round 2 over them, or record an explicit decision on each |
 | 3 | iteration cap reached, findings still open | **stop and say so.** This is not a pass. List what remains and hand it to the user |
 
 ## Phase 9 — verify, then loop

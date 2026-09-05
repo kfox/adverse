@@ -389,10 +389,11 @@ export function toJsonReport(syn) {
     summaries: syn.summaries,
     degraded: syn.degraded,
     skipped: syn.skipped ?? [],
-    // Whether ANY cross-review edge exists in this report. The stop condition
-    // needs it: `open_blocking` counts only cross-validated or consensus
-    // findings, so a report nobody cross-examined counts zero no matter what
-    // it contains, and a loop reading only that number reports success.
+    // Report-level flag, kept only so an older consumer keeps working. It is
+    // NOT what the stop condition should read: `some()` over the whole report
+    // means one edge anywhere — including on an advisory finding that can never
+    // block — marks every finding examined. The per-finding flag below is the
+    // one that matters. See the note on `unexamined` in src/ledger.mjs.
     cross_examined: syn.findings.some((f) =>
       (f.validators ?? []).length > 0 || (f.challengers ?? []).length > 0),
     open_blocking: (syn.openBlocking ?? []).map((f) => f.title),
@@ -410,6 +411,14 @@ export function toJsonReport(syn) {
       challengers: f.challengers,
       confidence: f.confidence,
       blocking: isBlocking(f),
+      // Did any reviewer go on record about THIS finding? A round-2 reviewer's
+      // own added finding has no validators and no challengers by
+      // construction, and that is the normal output of a cross-review — its
+      // whole purpose is to surface what round 1 missed. Such a finding is
+      // `solo`, so the confidence gate drops it; without this field the stop
+      // condition had no way to tell "nobody corroborated it" from "nobody
+      // ever looked at it".
+      cross_examined: (f.validators ?? []).length > 0 || (f.challengers ?? []).length > 0,
     })),
   };
 }

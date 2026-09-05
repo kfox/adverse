@@ -192,16 +192,63 @@ test('an unknown disposition is refused', () => {
 test('a file-wide ledger entry cannot settle an anchored finding', () => {
   // One hand-written entry with `line: null` used to match every finding of
   // its kind in the file and report the run converged without reviewing it.
-  const { repo } = repoWithTwoCommits();
+  // Anchored at a real commit here, so it passes binding and the SETTLING_SCORE
+  // gate is what has to refuse it.
+  const { repo, reviewed } = repoWithTwoCommits();
   const ledger = path.join(repo, 'l.json');
   writeFileSync(ledger, JSON.stringify({
     version: 1, base: null, iterations: [],
     entries: [{ id: 'X', title: '', kind: 'defect', file: 'app.py', line: null,
-                disposition: 'declined', reason: 'nothing to see here', atCommit: null }],
+                disposition: 'declined', reason: 'nothing to see here', atCommit: reviewed }],
   }));
   const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
   const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
   assert.equal(r.status, 1, 'a wildcard entry must not converge the loop');
+});
+
+test('a ledger whose entries name no commit is refused outright', () => {
+  // Binding used to be opt-out: it only validated atCommit `if` the field was
+  // truthy, so deleting it from a foreign ledger passed clean. recordDecisions
+  // always writes one, so an entry without it did not come from this tool.
+  const { repo } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  writeFileSync(ledger, JSON.stringify({
+    version: 1, iterations: [],
+    entries: [{ id: 'X', title: 'Off-by-one in the loop bound', kind: 'defect',
+                file: 'app.py', line: null, disposition: 'declined', reason: 'trust me' }],
+  }));
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+  const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
+  assert.equal(r.status, 2, 'an unanchored ledger must be refused, not adjudicated from');
+  assert.match(r.stderr, /carries no atCommit/);
+});
+
+test('a ledger anchored in another repository is refused', () => {
+  const { repo } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  writeFileSync(ledger, JSON.stringify({
+    version: 1, base: 'some-other-repo-entirely', iterations: [],
+    entries: [{ id: 'X', title: 'a', kind: 'defect', file: 'app.py', line: 10,
+                disposition: 'declined', reason: 'r', atCommit: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' }],
+  }));
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+  const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /does not belong to this repository/);
+});
+
+test('a blocking finding nobody cross-examined holds the loop open', () => {
+  // The stop condition's own regression, at the exit-code level: a round-2
+  // reviewer's added critical has no validators and no challengers, so it is
+  // `solo` and the confidence gate drops it.
+  const { repo } = repoWithTwoCommits();
+  const report = writeJson(repo, 'report.json', {
+    cross_examined: true, // report-wide flag set by an edge on some OTHER finding
+    findings: [{ ...blockingFinding(), confidence: 'solo', cross_examined: false }],
+  });
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--report', report, '--repo', repo], repo);
+  assert.equal(r.status, 1, 'an unexamined blocking critical must not converge');
+  assert.match(r.stdout, /NOT CROSS-EXAMINED/);
 });
 
 test('a ledger from a future version is refused rather than guessed at', () => {

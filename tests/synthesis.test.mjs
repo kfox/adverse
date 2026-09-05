@@ -296,3 +296,46 @@ test('skipped lanes reach the JSON report', () => {
   }));
   assert.deepEqual(json.skipped, [{ persona: 'adversary', reason: 'r' }]);
 });
+
+// --- the stop condition's producer side --------------------------------------
+// Every test of the `unexamined` gate lives on the consumer side and hand-builds
+// a report object, so replacing this expression with a literal `true` left the
+// whole suite green — and that mutation is exactly the false convergence the
+// gate exists to prevent.
+
+test('cross_examined is false per finding until someone goes on record about it', () => {
+  const round1 = {
+    auditor: { persona: 'auditor', verdict: 'reject', summary: '', findings: [
+      { severity: 'critical', kind: 'defect', file: 'a.js', line: 1, title: 'boom', detail: 'd' }] },
+  };
+  const soloReport = toJsonReport(synthesize(round1));
+  assert.equal(soloReport.cross_examined, false, 'round-1 only: nothing was cross-examined');
+  assert.equal(soloReport.findings[0].cross_examined, false);
+
+  const round2 = { steward: { persona: 'steward',
+    validate: [{ from: 'auditor', title: 'boom', reason: 'confirmed' }], challenge: [], added: [] } };
+  const examined = toJsonReport(synthesize(round1, round2));
+  assert.equal(examined.cross_examined, true);
+  assert.equal(examined.findings[0].cross_examined, true);
+});
+
+test("a round-2 reviewer's own added finding is not cross-examined", () => {
+  // This is the shape that leaked: surfacing what round 1 missed is the whole
+  // point of a cross-review, so an added finding has no validators by
+  // construction — it is `solo`, and the confidence gate drops it. A
+  // report-wide flag reads `true` here because of the OTHER finding's edge.
+  const round1 = {
+    auditor: { persona: 'auditor', verdict: 'approve', summary: '', findings: [
+      { severity: 'info', kind: 'design', file: 'a.js', line: 1, title: 'nit', detail: 'd' }] },
+  };
+  const round2 = { steward: { persona: 'steward',
+    validate: [{ from: 'auditor', title: 'nit', reason: 'agreed' }], challenge: [],
+    added: [{ severity: 'critical', kind: 'defect', file: 'auth.js', line: 42,
+              title: 'Auth bypass', detail: 'd', fix: 'f' }] } };
+
+  const rep = toJsonReport(synthesize(round1, round2));
+  assert.equal(rep.cross_examined, true, 'the report-wide flag is satisfied by the nit');
+  const crit = rep.findings.find((f) => f.severity === 'critical');
+  assert.equal(crit.blocking, true);
+  assert.equal(crit.cross_examined, false, 'but nobody went on record about the critical');
+});

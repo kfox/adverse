@@ -123,7 +123,12 @@ export function resolveRef(repo, ref) {
   } catch {
     sha = null;
   }
-  refCache.set(key, sha);
+  // Negative results are NOT cached: a ref that does not exist yet would stay
+  // unresolvable for the life of the process. Positive results are, which is
+  // safe for the one-shot CLIs that call this — but a symbolic ref like HEAD
+  // is frozen at first resolution, so a long-lived process that moves HEAD
+  // must call clearRefCache.
+  if (sha !== null) refCache.set(key, sha);
   return sha;
 }
 

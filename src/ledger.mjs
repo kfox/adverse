@@ -94,8 +94,19 @@ export function checkBinding(ledger, resolve) {
     problems.push(`base ${ledger.base} is not a commit in this repository`);
   }
   for (const e of ledger.entries ?? []) {
-    if (e.atCommit && !resolve(e.atCommit)) {
+    // Presence is required, not merely validity. Checking `if (e.atCommit)`
+    // made the whole binding opt-out: delete the field from a foreign ledger
+    // and it passed clean. `recordDecisions` always writes one, so an entry
+    // without it did not come from this tool.
+    if (!e.atCommit) {
+      problems.push(`entry ${JSON.stringify(e.title)} carries no atCommit; every recorded decision has one`);
+      continue;
+    }
+    if (!resolve(e.atCommit)) {
       problems.push(`entry ${JSON.stringify(e.title)} is anchored at ${e.atCommit}, which is not a commit in this repository`);
+    }
+    if (e.disposition !== undefined && !DISPOSITIONS.includes(e.disposition)) {
+      problems.push(`entry ${JSON.stringify(e.title)} has disposition ${JSON.stringify(e.disposition)}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
   }
   return problems;
@@ -196,12 +207,18 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
     return {
       ...f,
       adjudicated: {
-        matchedId: m.entry.id ?? null,
-        disposition: m.entry.disposition,
+        // EVERY string here is copied out of a file on disk and rendered into
+        // briefing.json, which becomes the round-2 prompt. Hardening `reason`
+        // alone just moved the channel: a 6,000-character `id` full of newlines
+        // and a fake system block rode through untouched, and `disposition`
+        // spelled exactly 'declined' plus a payload both settled the finding
+        // and delivered the text. Sanitize the lot.
+        matchedId: clipReason(m.entry.id ?? '') || null,
+        disposition: clipReason(m.entry.disposition ?? '') || null,
         reason: m.entry.reason ? clipReason(m.entry.reason) : null,
         reasonIsUntrusted: true,
-        iteration: m.entry.iteration ?? null,
-        atCommit: m.entry.atCommit ?? null,
+        iteration: Number.isFinite(Number(m.entry.iteration)) ? Number(m.entry.iteration) : null,
+        atCommit: clipReason(m.entry.atCommit ?? '') || null,
         matchedBy: m.why,
         confidence: m.score,
         settled,
@@ -289,22 +306,36 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
     && !f.adjudicated.settled);
   const remaining = annotated.filter((f) => !f.adjudicated?.settled);
 
-  // A blocking finding that no cross-review ever adjudicated is NOT evidence
-  // of convergence, and the confidence gate erases it: `open` keeps only
-  // cross-validated and consensus findings, so a report with no round 2 counts
-  // zero however many criticals it holds. That is exactly the shape Phase 9
-  // produces — each persona verifies only its own findings, so nothing it
-  // reports can ever be cross-validated — and the loop read it as success.
+  // A blocking finding that no cross-review ever adjudicated is NOT evidence of
+  // convergence, and the confidence gate erases it: `open` keeps only
+  // cross-validated and consensus findings, so anything nobody corroborated
+  // counts zero however serious it is, and the loop read that as success.
   //
-  // The confidence gate stays: it exists so one reviewer's hunch cannot hold a
-  // change open forever. What changes is that an UNEXAMINED blocking finding
-  // is neither counted as credible nor silently dropped. It holds the loop
-  // open until a cross-review adjudicates it or a decision settles it.
-  const crossExamined = report.cross_examined !== false;
-  const unexamined = crossExamined ? [] : annotate(
-    blocking.filter((f) => f.confidence !== 'cross-validated' && f.confidence !== 'consensus'),
+  // This is PER FINDING, and that distinction is the whole fix. A report-wide
+  // flag ("did any cross-review edge exist anywhere?") is satisfied by a single
+  // edge on an advisory `design` note, and it is satisfied in every ordinary
+  // run — so the gate would fire only for a report where not one finding was
+  // examined, which is not the shape that leaks. The shape that leaks is a
+  // round-2 reviewer's OWN added critical: no validators, no challengers,
+  // therefore `solo`, therefore dropped by the confidence gate — and surfacing
+  // what round 1 missed is precisely what a cross-review is for.
+  //
+  // The confidence gate itself stays: it exists so one reviewer's hunch cannot
+  // hold a change open forever. What changes is that a finding failing it is
+  // held rather than silently dropped, until a reviewer goes on record about it
+  // or a decision settles it.
+  const examined = (f) => (f.cross_examined ?? report.cross_examined) !== false;
+  const credible = (f) => f.confidence === 'cross-validated' || f.confidence === 'consensus';
+  const unexamined = annotate(
+    blocking.filter((f) => !credible(f) && !examined(f)),
     ledger, traceFor, { reportDigest },
   ).filter((f) => !f.adjudicated?.settled);
+
+  // Cross-examined and contested. Not credible enough to block on its own, and
+  // deliberately not `unexamined` — someone did go on record. Reported so it
+  // cannot fall out of every bucket and become invisible.
+  const disputed = blocking.filter((f) => !credible(f) && examined(f)
+    && f.confidence === 'disputed');
 
   const iteration = (ledger.iterations ?? []).length + 1;
   const capped = iteration > maxIterations;
@@ -317,6 +348,7 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
     regressed,
     unverified,
     unexamined,
+    disputed,
     done: remaining.length === 0 && unexamined.length === 0,
     capped,
     // The cap is a stop, not a pass. A run that ends here has open findings and
@@ -327,6 +359,6 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
         ? `iteration cap (${maxIterations}) reached with ${remaining.length + unexamined.length} still open`
         : remaining.length === 0
           ? `${unexamined.length} blocking finding(s) were never cross-examined`
-          : `${remaining.length} blocking finding(s) still open`,
+          : `${remaining.length} still open, ${unexamined.length} never cross-examined`,
   };
 }

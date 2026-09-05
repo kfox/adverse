@@ -42,8 +42,8 @@ import path from 'node:path';
 
 import { importFromSrc } from './package-root.mjs';
 
-const { annotate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
-const { traceAnchor } = await importFromSrc('trace.mjs');
+const { annotate, checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
+const { resolveRef, traceAnchor } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('prompts.mjs');
 
 const CLUSTER_WINDOW_LINES = 15;
@@ -323,6 +323,17 @@ if (values.ledger) {
     ledger = loadLedger(values.ledger);
   } catch (e) {
     process.stderr.write(`triage: ${e.message}\n`);
+    process.exit(1);
+  }
+
+  // The same binding converge.mjs enforces, and this script needs it more:
+  // triage is what writes briefing.json, which IS the round-2 prompt. A
+  // foreign ledger accepted here marks findings settled with "Do not re-open
+  // it" and puts its own text in front of every reviewer.
+  const problems = checkBinding(ledger, (ref) => resolveRef(repo, ref));
+  if (problems.length) {
+    process.stderr.write('triage: this ledger does not belong to this repository:\n'
+      + problems.map((p) => `  - ${p}\n`).join(''));
     process.exit(1);
   }
 }

@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, renameSync, unlinkSync } from 'node
 import os from 'node:os';
 import path from 'node:path';
 
-import { followRename, parseHunks, projectLine, resolveRef, traceAnchor } from '../src/trace.mjs';
+import { clearRefCache, followRename, parseHunks, projectLine, resolveRef, traceAnchor } from '../src/trace.mjs';
 
 // --- pure arithmetic ---------------------------------------------------------
 
@@ -206,4 +206,19 @@ test('projectLine never returns line 0 when a hunk deletes the top of the file',
   const r = projectLine(parseHunks('@@ -1,2 +0,0 @@'), 1);
   assert.equal(r.status, 'touched');
   assert.equal(r.line, 1);
+});
+
+test('resolveRef caches resolutions but not failures, and clears on demand', () => {
+  // A ref that does not exist YET must not be remembered as unresolvable, or a
+  // long-lived process could never see it appear. Positive results are cached,
+  // which is safe for the one-shot CLIs that call this — but a symbolic ref is
+  // frozen at first resolution, so the invalidation hook has to work.
+  clearRefCache();
+  assert.equal(resolveRef(repo, 'not-a-ref-yet'), null);
+  execFileSync('git', ['tag', 'not-a-ref-yet', 'v1'], { cwd: repo, env: GIT_ENV });
+  assert.ok(resolveRef(repo, 'not-a-ref-yet'), 'a negative result must not be cached');
+
+  const first = resolveRef(repo, 'HEAD');
+  clearRefCache();
+  assert.equal(resolveRef(repo, 'HEAD'), first, 'clearRefCache re-resolves rather than breaking');
 });
