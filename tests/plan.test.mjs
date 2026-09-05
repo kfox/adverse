@@ -75,9 +75,10 @@ test('diff-suppressed content cannot buy the cheap shape (.gitattributes -diff)'
   try {
     const r = runPlan(['--repo', dir, '--base', 'main']);
     assert.equal(r.status, 0, r.stderr);
-    assert.doesNotMatch(r.stdout, /^size: small /);
+    assert.match(r.stdout, /^size: large /);
     assert.match(r.stdout, /unmeasurable/);
-    assert.match(r.stdout, /adversary\s+run/);
+    assert.match(r.stdout, /adversary\s+run\s+2 agents/);
+    assert.match(r.stdout, /auditor\s+run\s+2 agents/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -161,8 +162,14 @@ test('a stray positional in plan mode is a usage error', () => {
 });
 
 test('--escalate: an unreadable round-1 file is exit 2, not default advice', () => {
-  const r = runPlan(['--escalate', 'no-such-file.json']);
+  const r = runPlan(['--escalate', '--expect', 'auditor', 'no-such-file.json']);
   assert.equal(r.status, 2);
+});
+
+test('--escalate without --expect is a usage error — blind escalation is the fail-open it closes', () => {
+  const r = runPlan(['--escalate', 'whatever.json']);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /--expect/);
 });
 
 test('--escalate: a missing expected lane fails closed', () => {
@@ -189,6 +196,44 @@ test('--escalate: a quiet round 1 skips round 2 and says how to declare it', () 
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /round 2: skip/);
     assert.match(r.stdout, /--round2-skipped/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a supplied --files list is never sized by an unrelated numstat — unmeasured, not small', () => {
+  // base HEAD means an empty diff range: an empty measurement of the wrong
+  // range must not read as a measurement of the supplied list.
+  const dir = repoWith({
+    base: { 'a.mjs': 'const a = 1;\n' },
+    change: { 'a.mjs': 'const a = 2;\n' },
+  });
+  try {
+    const list = path.join(dir, 'files.txt');
+    writeFileSync(list, 'big1.mjs\nbig2.mjs\nbig3.mjs\n');
+    const r = runPlan(['--repo', dir, '--base', 'HEAD', '--files', list, '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    const plan = JSON.parse(r.stdout);
+    assert.equal(plan.size.measured, false);
+    assert.notEqual(plan.size.bucket, 'small');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a sub-floor guard deletion still runs the adversary — removed lines are signal-scanned', () => {
+  // 79 deleted lines of permission checks: below DELETED_LINES_ADVERSARY_FLOOR,
+  // neutral path, nothing added — the near-miss that reproduced after the
+  // first fix. The signal now comes from the removed lines themselves.
+  const guards = Array.from({ length: 79 }, (_, i) => `if (!u.permission[${i}]) throw new Error(${i});`).join('\n') + '\n';
+  const dir = repoWith({
+    base: { 'widget.js': guards + 'const keep = 1;\n' },
+    change: { 'widget.js': 'const keep = 1;\n' },
+  });
+  try {
+    const r = runPlan(['--repo', dir, '--base', 'main']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /adversary\s+run/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

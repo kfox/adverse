@@ -54,14 +54,27 @@ test('a deletion-heavy diff can be large', () => {
   assert.equal(size.bucket, 'large');
 });
 
-test('an unmeasurable numstat row (binary or diff-suppressed) excludes the small bucket', () => {
+test('an unmeasurable numstat row sizes the diff LARGE — hidden content must never shrink the bucket', () => {
+  // Out of `small` was not enough: a hidden 2,000-line file still shrank
+  // large to medium and halved the split lanes' budget.
   const files = ['a.mjs', 'payload.mjs'];
   const size = diffSize({
     files,
     numstat: numstatOf([[1, 0, 'a.mjs']]) + '-\t-\tpayload.mjs\n',
   });
   assert.deepEqual(size.unscannable, ['payload.mjs']);
-  assert.equal(size.bucket, 'medium');
+  assert.equal(size.bucket, 'large');
+});
+
+test('an unread diff (null) forces the adversary with a truthful reason', () => {
+  const plan = planReview({
+    files: ['src/render/palette.mjs'],
+    numstat: numstatOf([[5, 0, 'src/render/palette.mjs']]),
+    diff: null,
+  });
+  const adv = plan.lanes.find((l) => l.persona === 'adversary');
+  assert.equal(adv.run, true);
+  assert.match(adv.reason, /could not be read/);
 });
 
 test('no numstat means unmeasured, and unmeasured never qualifies as small', () => {

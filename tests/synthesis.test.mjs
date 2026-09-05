@@ -401,3 +401,22 @@ test('an undeclared round 2 stays null everywhere', () => {
   assert.equal(syn.round2Skipped, null);
   assert.doesNotMatch(renderMarkdown(syn), /Round 2 skipped:/);
 });
+
+test('synthesize itself normalizes an off-contract verdict — the rule is not bridge-only', () => {
+  const syn = synthesize({
+    auditor: { persona: 'auditor', verdict: 'REJECTED', summary: 's', findings: [] },
+    steward: { persona: 'steward', verdict: 'approve', summary: 's', findings: [] },
+  });
+  assert.equal(syn.verdicts.auditor, 'reject');
+  assert.match(syn.consensusLabel, /HOLD|BLOCK/);
+});
+
+test('a merged summary bounds each half before the join, so the render clip cannot amputate half B', () => {
+  const longA = 'A'.repeat(258);
+  const merged = mergeSplitReviews(
+    { persona: 'auditor', verdict: 'approve', summary: longA, findings: [] },
+    { persona: 'auditor', verdict: 'reject', summary: 'half B found the injection', findings: [] },
+  );
+  assert.ok(merged.summary.length <= 300);
+  assert.match(merged.summary, /half B found the injection/);
+});

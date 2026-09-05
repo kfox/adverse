@@ -317,3 +317,17 @@ test('--merge-personas rejects a name outside the registry', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a third payload under a merged persona is refused — exactly two halves, as the header says', () => {
+  const dir = freshTmp();
+  try {
+    const files = ['a', 'b', 'c'].map((tag) =>
+      reviewAs(dir, `auditor-${tag}.json`, { persona: 'auditor', verdict: 'approve', summary: tag, findings: [] }));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', ...files, '--merge-personas', 'auditor', '--out', out]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /got 3/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -34,8 +34,11 @@ const PATH_SIGNALS = [
   'sql', 'deserial', 'pickle', 'subprocess', 'shell',
 ];
 
-// Content patterns, matched against ADDED lines only — an unchanged sink is
-// somebody else's review. Same pruning rule: `open(`, `exec(`, `readFile`,
+// Content patterns, matched against ADDED and REMOVED lines — an UNCHANGED
+// sink is somebody else's review, but a removed line is this change's doing:
+// deleting `if (!authorized) throw` is a three-line diff that removes a guard,
+// and the false positive on the other side (removing a sink, a security
+// improvement) costs two model calls under the stated bias. Same pruning rule: `open(`, `exec(`, `readFile`,
 // `JSON.parse`, and a bare `../` all fired on essentially every diff, the last
 // three on ordinary imports, so they are gone. What remains either names a
 // dangerous sink or names a security concept outright.
@@ -85,6 +88,14 @@ export function addedLines(diffText) {
     .map((l) => l.slice(1));
 }
 
+// Same header rule on the minus side: `--- a/path` always has the trailing
+// space, `---x` is a removed line.
+export function removedLines(diffText) {
+  return String(diffText).split('\n')
+    .filter((l) => l.startsWith('-') && !l.startsWith('--- '))
+    .map((l) => l.slice(1));
+}
+
 export function assessScope({ files = [], diff = '' } = {}) {
   const evidence = [];
 
@@ -98,16 +109,19 @@ export function assessScope({ files = [], diff = '' } = {}) {
     }
   }
 
-  const added = addedLines(diff);
   const seen = new Set();
-  for (const line of added) {
-    for (const re of CONTENT_SIGNALS) {
-      const m = re.exec(line);
-      if (!m || seen.has(re.source)) continue;
-      seen.add(re.source);
-      evidence.push({ kind: 'content', signal: re.source, sample: line.trim().slice(0, 120) });
+  const scan = (lines, kind) => {
+    for (const line of lines) {
+      for (const re of CONTENT_SIGNALS) {
+        const m = re.exec(line);
+        if (!m || seen.has(re.source)) continue;
+        seen.add(re.source);
+        evidence.push({ kind, signal: re.source, sample: line.trim().slice(0, 120) });
+      }
     }
-  }
+  };
+  scan(addedLines(diff), 'content');
+  scan(removedLines(diff), 'content-removed');
 
   // No files at all means we were handed nothing to reason about, which is not
   // the same as having looked and found nothing.

@@ -115,9 +115,11 @@ for (const path of inputs) {
 // the orchestrator must re-run the missing half or declare the lane degraded.
 for (const p of mergePersonas) {
   const got = payloadCount[p] ?? 0;
-  if (got < 2) {
-    process.stderr.write(`combine: --merge-personas ${p}: expected 2 payloads for the split lane, got ${got}.`
-      + ' What is missing reviewed nothing — re-run it, or pass --degraded to synthesize.\n');
+  if (got !== 2) {
+    process.stderr.write(`combine: --merge-personas ${p}: expected exactly 2 payloads for the split lane, got ${got}.`
+      + (got < 2
+        ? ' What is missing reviewed nothing — re-run it, or pass --degraded to synthesize.\n'
+        : ' Extra payloads mean a stale file or a double glob — clean the run directory.\n'));
     process.exit(1);
   }
 }

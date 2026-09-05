@@ -181,8 +181,10 @@ rounds and iteration cap. The rules and their rationale live in
   has nothing to look at — and it is forced on regardless when the diff holds
   unmeasurable content or heavy deletions, which the gate cannot scan. The
   Pragmatist is skipped on a small diff: everything it reports is advisory, so
-  the skip costs a backlog item and one potential round-2 validator, never a
-  finding that could block on its own.
+  the skip costs a backlog item and one potential second round-1 reporter (the
+  duplicate that would promote a solo finding to cross-validated) — never a
+  finding that could block on its own, and not a round-2 validator: that lane
+  never cross-reviews.
 - On a large diff the Auditor and the Adversary each get **two agents**,
   partitioned by file (Phase 2): a large diff exhausts one reviewer's
   attention budget, the documented cause of deterministic lane failures.

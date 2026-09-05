@@ -62,11 +62,16 @@ export function worseVerdict(a, b) {
 // Union a split lane's two payloads: findings concatenate, the worse verdict
 // wins, and BOTH summaries survive — a verdict from one half rendered beside
 // the other half's summary reads as one reviewer's position, and is not.
+// Each half is bounded BEFORE the join: the renderer clips a summary cell at
+// 300 characters, and a long first half would otherwise amputate the second
+// half entirely, losing exactly the voice the merge exists to keep.
+const MERGED_SUMMARY_PART_MAX = 148;
 export function mergeSplitReviews(a, b) {
+  const part = (s) => String(s ?? '').slice(0, MERGED_SUMMARY_PART_MAX);
   return {
     ...a,
     verdict: worseVerdict(a?.verdict, b?.verdict),
-    summary: [a?.summary, b?.summary].filter(Boolean).join(' · '),
+    summary: [a?.summary, b?.summary].filter(Boolean).map(part).join(' · '),
     findings: [
       ...(Array.isArray(a?.findings) ? a.findings : []),
       ...(Array.isArray(b?.findings) ? b.findings : []),
@@ -234,7 +239,10 @@ export function synthesize(round1, round2 = {},
   const verdicts = {};
   const summaries = {};
   for (const [p, r] of Object.entries(round1)) {
-    verdicts[p] = r?.verdict ?? 'unknown';
+    // Normalized here, not only in the combine bridge, so the CLI path gets
+    // the same rule: an off-contract verdict scores as reject, never as a
+    // neutral string that can dilute a real rejection out of the banner.
+    verdicts[p] = normalizeVerdict(r?.verdict);
     summaries[p] = String(r?.summary ?? '').slice(0, 300);
   }
   const verdictList = Object.values(verdicts);

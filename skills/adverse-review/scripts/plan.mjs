@@ -47,8 +47,13 @@ function emit(payload, human) {
 // --- escalate mode -----------------------------------------------------------
 
 if (values.escalate) {
-  if (!positionals.length) {
-    process.stderr.write('Usage: plan.mjs --escalate [--expect auditor,steward,…] [--json] round1-<persona>*.json …\n');
+  const expectList = (values.expect ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!positionals.length || !expectList.length) {
+    // --expect is required, not optional: without a roster, a lane whose file
+    // never arrived is indistinguishable from a lane that found nothing, and
+    // blind escalation reproduces the exact fail-open this mode was built to
+    // close.
+    process.stderr.write('Usage: plan.mjs --escalate --expect auditor,steward,… [--json] round1-<persona>*.json …\n');
     process.exit(2);
   }
   const payloads = positionals.map((path) => {
@@ -61,9 +66,7 @@ if (values.escalate) {
       process.exit(2);
     }
   });
-  const expected = (values.expect ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-
-  const result = escalate(payloads, { expected });
+  const result = escalate(payloads, { expected: expectList });
   emit(result,
     `round 2: ${result.rounds === 2 ? 'run' : 'skip'} — ${result.roundsReason}\n`
     + `max iterations: ${result.maxIterations}`
@@ -112,11 +115,19 @@ if (values.files) {
   }
 }
 
+// A supplied --files list is not sized: the numstat of `base...HEAD` measures
+// a different change set, and an empty measurement of the wrong range would
+// read as `small` for arbitrarily large files. Unmeasured is the honest
+// answer, and unmeasured never qualifies for the cheap bucket. (The diff read
+// below still feeds assessScope; its signals only ever ADD evidence, so an
+// unrelated diff errs toward running a lane, never toward skipping one.)
 let numstat = null;
-try {
-  numstat = git(['diff', '--numstat', `${base}...HEAD`]);
-} catch (e) {
-  process.stderr.write(`plan: could not measure the diff (${e.message}); the small bucket is unreachable\n`);
+if (!values.files) {
+  try {
+    numstat = git(['diff', '--numstat', `${base}...HEAD`]);
+  } catch (e) {
+    process.stderr.write(`plan: could not measure the diff (${e.message}); the small bucket is unreachable\n`);
+  }
 }
 
 let diff = '';

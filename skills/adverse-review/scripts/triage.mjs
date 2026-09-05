@@ -45,7 +45,8 @@ import { importFromSrc } from './package-root.mjs';
 const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('prompts.mjs');
-const { mergeSplitReviews } = await importFromSrc('synthesis.mjs');
+const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
+const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 
 const CLUSTER_WINDOW_LINES = 15;
 
@@ -75,6 +76,12 @@ if (!values.round1.length || !values.repo || !values.out) {
 
 const repo = path.resolve(values.repo);
 const base = values.base ?? 'main';
+// Same guard as plan.mjs: a base in git's option position becomes a git
+// option, and `--base=--output=X` is an arbitrary file create/truncate.
+if (base.startsWith('-')) {
+  process.stderr.write(`triage: --base ${JSON.stringify(base)} looks like an option, not a ref\n`);
+  process.exit(2);
+}
 
 function readJson(file) {
   try {
@@ -234,6 +241,19 @@ function checkKind(kind, file, line, counterpart) {
 }
 
 const reviews = values.round1.map(readJson);
+// The persona string is model-written and keys the briefing's verdicts,
+// clusters (reporters.size >= 2), and cross-references (a.reporter !==
+// b.reporter) — a re-cased name would mint a phantom reviewer whose agreement
+// with its own other half reads as two independent lanes. Same registry check
+// as combine.mjs, at the earlier reader.
+const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
+for (const r of reviews) {
+  if (!KNOWN_PERSONAS.has(r?.persona)) {
+    process.stderr.write(`triage: unknown persona ${JSON.stringify(r?.persona)}`
+      + ` (expected one of ${DEFAULT_PERSONAS.join(', ')})\n`);
+    process.exit(1);
+  }
+}
 
 const findings = [];
 let n = 0;
@@ -361,7 +381,7 @@ const briefing = {
   verdicts: reviews.reduce((acc, r) => {
     const prev = acc[r.persona];
     const merged = prev ? mergeSplitReviews(prev, r) : r;
-    acc[r.persona] = { verdict: merged.verdict, summary: merged.summary };
+    acc[r.persona] = { verdict: normalizeVerdict(merged.verdict), summary: merged.summary };
     return acc;
   }, Object.create(null)),
   findings,

@@ -41,7 +41,9 @@
 // every measurement error a diff-text metric admits shrinks the bucket, and
 // shrinking is the direction that buys a hostile change the cheapest review.
 // A numstat row git reports as `-\t-\t<path>` is content nobody measured or
-// signal-scanned: it excludes the small bucket and forces the Adversary lane.
+// signal-scanned: it sizes the diff LARGE (out of small was not enough — a
+// hidden 2,000-line file still shrank large to medium and halved the split
+// lanes' budget) and forces the Adversary lane.
 //
 // Size is still a bad proxy for risk — a one-line change to credential
 // handling is tiny and is exactly the diff that must not get the cheap pass —
@@ -113,8 +115,13 @@ export function diffSize({ files = [], numstat = null } = {}) {
   const { changed, deleted, unscannable } = parseNumstat(measured ? numstat : '');
 
   let bucket = 'medium';
-  if (fileCount >= LARGE_MIN_FILES || changed >= LARGE_MIN_CHANGED_LINES) bucket = 'large';
-  else if (measured && unscannable.length === 0
+  if (fileCount >= LARGE_MIN_FILES || changed >= LARGE_MIN_CHANGED_LINES
+      || unscannable.length > 0) {
+    // Unmeasurable content could be any size, and the attacker picks which —
+    // so it takes the bucket where the reviewer budget is largest, never a
+    // smaller one.
+    bucket = 'large';
+  } else if (measured
            && fileCount <= SMALL_MAX_FILES && changed <= SMALL_MAX_CHANGED_LINES) {
     bucket = 'small';
   }
@@ -137,6 +144,10 @@ function agentsFor(persona, run, bucket) {
   return bucket === 'large' && PER_FILE_LANES.has(persona) ? SPLIT_AGENTS : 1;
 }
 
+// `diff: null` means the diff could not be read — distinct from '', an empty
+// diff — and an unread diff forces the Adversary: assessScope saw nothing, so
+// "no trust-boundary signal" would be an assertion of absence about lines
+// nobody scanned.
 export function planReview({ files = [], diff = '', numstat = null, pins = [] } = {}) {
   const size = diffSize({ files, numstat });
   const pinned = matchedPins(files, pins);
@@ -150,7 +161,7 @@ export function planReview({ files = [], diff = '', numstat = null, pins = [] } 
   if (!size.measured && !blind) reasons.push('size not measured (no numstat); the small bucket is unreachable');
   if (size.unscannable.length) {
     reasons.push(`${size.unscannable.length} file(s) unmeasurable (binary or diff-suppressed); `
-      + 'the small bucket is unreachable and the Adversary runs');
+      + 'unmeasured content could be any size, so the diff is sized large and the Adversary runs');
   }
   if (forced) {
     reasons.push(`pinned path present (${pinned.map((p) => `"${p.pin}" -> ${p.file}`).join(', ')}); size-based skips overridden`);
@@ -159,11 +170,14 @@ export function planReview({ files = [], diff = '', numstat = null, pins = [] } 
   // assessScope already treats an empty file list as "run". Its signals scan
   // only added lines, so content it never saw — suppressed files, deletions —
   // must force the lane rather than count as evidence of absence.
-  const adversary = assessScope({ files, diff });
+  const diffUnread = diff === null;
+  const adversary = assessScope({ files, diff: diffUnread ? '' : diff });
   const adversaryForced = forced
+    || diffUnread
     || size.unscannable.length > 0
     || size.deletedLines >= DELETED_LINES_ADVERSARY_FLOOR;
   const adversaryForcedReason = forced ? 'pinned path forces the lane'
+    : diffUnread ? 'the diff could not be read; content signals saw nothing, which is not evidence of absence'
     : size.unscannable.length > 0 ? 'unmeasurable file content cannot prove the absence of a boundary'
     : `${size.deletedLines} deleted lines are not signal-scanned; a deletion can remove a guard`;
 

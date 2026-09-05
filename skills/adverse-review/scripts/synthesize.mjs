@@ -60,7 +60,13 @@ const failedPersonas = (values.degraded ?? []).map((spec) => spec.split('=')[0])
 
 // --round2-skipped makes a skipped round 2 visible in the report; a run whose
 // round 2 was skipped and not declared is textually indistinguishable from one
-// where the panel cross-examined and found nothing.
+// where the panel cross-examined and found nothing. An EMPTY value is that
+// same failure wearing a declaration's clothes (an unset $R2_REASON expands to
+// ""), so it is a usage error, not a silent no-op.
+if (values['round2-skipped'] !== undefined && values['round2-skipped'].trim() === '') {
+  process.stderr.write('synthesize: --round2-skipped requires a non-empty reason\n');
+  process.exit(2);
+}
 const syn = synthesize(round1, round2, {
   skippedPersonas, failedPersonas, round2Skipped: values['round2-skipped'] ?? null,
 });

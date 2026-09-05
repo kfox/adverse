@@ -236,7 +236,7 @@ Review → fix → verify → repeat, stopping when **no blocking finding is lef
 - `declined` / `deferred` **settle** a question. A later pass is told the decision and its reason and told not to re-open it. This is what makes the loop terminate rather than circle.
 - `fixed` settles **nothing**. A finding recorded fixed that comes back means the fix did not work — the most valuable thing a re-review can report. It is surfaced louder than a new finding and still holds the loop open. Suppressing it is the natural-looking optimization that would quietly turn this into a machine for declaring victory.
 
-**A stop condition** ([`converge.mjs`](skills/adverse-review/scripts/converge.mjs)) — arithmetic on data the panel already produced, capped at 3 iterations. The cap exits `3`, not `0`: a capped run has open findings and has to say so, or the loop's promise is a lie told by an exit code.
+**A stop condition** ([`converge.mjs`](skills/adverse-review/scripts/converge.mjs)) — arithmetic on data the panel already produced, capped at 3 iterations — 5 when round 1 reported a critical finding of a blocking kind (`plan.mjs --escalate`). The cap exits `3`, not `0`: a capped run has open findings and has to say so, or the loop's promise is a lie told by an exit code.
 
 The verification pass is not a re-review. It asks two questions — is this finding closed, and *did closing it break something new* — and the second half is not politeness. A fix written under pressure to close a finding is unreviewed code, written by whoever was most convinced the finding was real. A pass that only ever confirmed closures would launder new defects into the tree one iteration at a time.
 

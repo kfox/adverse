@@ -34,10 +34,25 @@ test('a dangerous sink in added code is enough on its own', () => {
   assert.equal(r.evidence[0].kind, 'content');
 });
 
-test('a sink in a REMOVED line does not count — that is somebody else\'s review', () => {
+test('a signal in a REMOVED line counts — a deleted guard is this change\'s doing', () => {
+  // Inverted from "a removed sink is somebody else's review": deleting
+  // `if (!authorized) throw` is a three-line diff that removes a guard, and a
+  // review that skips the Adversary there asserts absence about lines nobody
+  // scanned. The cost — this fixture is a security IMPROVEMENT (innerHTML ->
+  // textContent) and still runs the lane — is two model calls, the direction
+  // the module's bias accepts.
   const diff = ['diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1 +1 @@',
                 '-el.innerHTML = name;', '+el.textContent = name;'].join('\n');
-  assert.equal(assessScope({ files: ['src/render/x.js'], diff }).recommend, 'skip');
+  const r = assessScope({ files: ['src/render/x.js'], diff });
+  assert.equal(r.recommend, 'run');
+  assert.equal(r.evidence[0].kind, 'content-removed');
+});
+
+test('the --- header is not mistaken for a removed line', () => {
+  const diff = ['diff --git a/x b/x', '--- a/subprocess.js', '+++ b/x',
+                '@@ -1 +1 @@', '-const x = 1;', '+const x = 2;'].join('\n');
+  const r = assessScope({ files: ['renderer.js'], diff });
+  assert.equal(r.evidence.length, 0);
 });
 
 test('the +++ header is not mistaken for an added line', () => {
