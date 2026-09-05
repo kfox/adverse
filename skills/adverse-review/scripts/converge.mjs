@@ -32,6 +32,7 @@ const { values } = parseArgs({
     repo:    { type: 'string' },
     head:    { type: 'string' },
     at:      { type: 'string' },
+    base:    { type: 'string' },
     'max-iterations': { type: 'string' },
   },
   strict: true,
@@ -40,7 +41,7 @@ const { values } = parseArgs({
 if (!values.ledger) {
   process.stderr.write(
     'Usage:\n'
-    + '  converge.mjs --ledger L.json --record decisions.json --report report.json --repo DIR --at REVIEWED_REF\n'
+    + '  converge.mjs --ledger L.json --record decisions.json --report report.json --repo DIR --at REVIEWED_REF [--base REF]\n'
     + '  converge.mjs --ledger L.json --report report.json --repo DIR [--head REF] [--max-iterations N]\n');
   process.exit(2);
 }
@@ -123,7 +124,9 @@ if (values.record) {
     process.stderr.write(`converge: ${e.message}\n`);
     process.exit(2);
   }
-  next.base ??= payload.base ?? null;
+  // decisions.json carries no `base` field (SKILL.md Phase 7) — the repo's
+  // pinned base comes from the CLI, the same way triage.mjs already takes it.
+  next.base ??= values.base ?? null;
   saveLedger(values.ledger, next);
   const by = (d) => decisions.filter((x) => x.disposition === d).length;
   process.stdout.write(
