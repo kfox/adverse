@@ -240,3 +240,47 @@ test('verify prompt asks both questions, not just closure', () => {
   assert.match(VERIFY_INSTRUCTIONS, /Is each finding actually closed/);
   assert.match(VERIFY_INSTRUCTIONS, /Did the fix introduce anything new/);
 });
+
+// --- subagent definitions ----------------------------------------------------
+// `.claude/agents/<persona>.md` is what makes the agent list show "steward"
+// instead of a fourth indistinguishable "general-purpose" row. It embeds the
+// persona system prompt, so it is a THIRD copy of text that has already drifted
+// once between the CLI and the Skill. Generated, and checked here.
+
+test('agent definitions match their generators', async () => {
+  const { agentDefinition } = await import('../skills/adverse-review/scripts/dump-prompts.mjs');
+  const agentsDir = path.join(here, '..', 'skills', 'adverse-review', 'agents');
+
+  for (const p of Object.values(PERSONAS)) {
+    const got = readFileSync(path.join(agentsDir, `${p.name}.md`), 'utf-8');
+    assert.equal(got, agentDefinition(p),
+      `${p.name}.md is stale — run: node skills/adverse-review/scripts/dump-prompts.mjs`);
+  }
+
+  const onDisk = readdirSync(agentsDir).filter((n) => n.endsWith('.md')).sort();
+  assert.deepEqual(onDisk, Object.values(PERSONAS).map((p) => `${p.name}.md`).sort(),
+    'agents/ has a definition no persona generates (or is missing one)');
+});
+
+test('an agent definition is parseable frontmatter', async () => {
+  const { agentDefinition } = await import('../skills/adverse-review/scripts/dump-prompts.mjs');
+  for (const p of Object.values(PERSONAS)) {
+    const lines = agentDefinition(p).split('\n');
+    assert.equal(lines[0], '---');
+    const close = lines.indexOf('---', 1);
+    assert.ok(close > 1, `${p.name}: frontmatter is not closed`);
+
+    const fm = Object.fromEntries(lines.slice(1, close).map((l) => {
+      const i = l.indexOf(':');
+      return [l.slice(0, i).trim(), l.slice(i + 1).trim()];
+    }));
+    assert.equal(fm.name, p.name);
+    // Several lenses contain a colon-space; unquoted, YAML reads that as a
+    // nested mapping and the definition fails to load.
+    assert.ok(fm.description.startsWith('"') && fm.description.endsWith('"'),
+      `${p.name}: description must be a quoted YAML string`);
+    assert.ok(!/(^|[^\\])"/.test(fm.description.slice(1, -1)), `${p.name}: unescaped quote`);
+    assert.ok(lines.slice(close + 1).join('\n').includes(p.title),
+      `${p.name}: body must be the persona system prompt`);
+  }
+});
