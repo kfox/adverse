@@ -40,6 +40,11 @@ import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
+import { importFromSrc } from './package-root.mjs';
+
+const { annotate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
+const { traceAnchor } = await importFromSrc('trace.mjs');
+
 const CLUSTER_WINDOW_LINES = 15;
 
 const { values } = parseArgs({
@@ -48,13 +53,14 @@ const { values } = parseArgs({
     repo:   { type: 'string' },
     base:   { type: 'string' },
     gate:   { type: 'string' },
+    ledger: { type: 'string' },
     out:    { type: 'string' },
   },
   strict: true,
 });
 
 if (!values.round1 || !values.repo || !values.out) {
-  process.stderr.write('Usage: triage.mjs --round1 a.json [--round1 b.json …] --repo <dir> [--base <ref>] [--gate "<summary>"] --out <briefing.json>\n');
+  process.stderr.write('Usage: triage.mjs --round1 a.json [--round1 b.json …] --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>\n');
   process.exit(2);
 }
 
@@ -257,6 +263,35 @@ for (const a of findings) {
   }
 }
 
+// What earlier iterations already decided. Positions in the ledger were
+// recorded against the commit the decision was made at, so each one is
+// re-projected to HEAD before matching — otherwise a fix that shifted the file
+// makes every past decision look like a different finding.
+let ledger = emptyLedger();
+if (values.ledger) {
+  try {
+    ledger = loadLedger(values.ledger);
+  } catch (e) {
+    process.stderr.write(`triage: ${e.message}\n`);
+    process.exit(1);
+  }
+}
+const traceFor = (entry) => {
+  if (!entry.file || !entry.atCommit) return null;
+  try {
+    return traceAnchor({ repo, from: entry.atCommit, to: 'HEAD',
+                         file: entry.file, line: entry.line, citedLine: entry.citedLine });
+  } catch {
+    return null;
+  }
+};
+const adjudicatedFindings = annotate(findings, ledger, traceFor);
+for (let i = 0; i < findings.length; i += 1) {
+  if (adjudicatedFindings[i].adjudicated) findings[i].adjudicated = adjudicatedFindings[i].adjudicated;
+}
+const settled = findings.filter((f) => f.adjudicated?.settled);
+const regressed = findings.filter((f) => f.adjudicated && !f.adjudicated.settled);
+
 const briefing = {
   base,
   gate: values.gate ?? null,
@@ -264,12 +299,15 @@ const briefing = {
   findings,
   clusters,
   crossReferences,
+  settled: settled.map((f) => f.id),
+  regressed: regressed.map((f) => f.id),
   sameFileDifferentRegion: [...byFile]
     .filter(([, g]) => new Set(g.map((f) => f.reporter)).size >= 2)
     .map(([file, g]) => ({ file, ids: g.map((f) => f.id) })),
 };
 
 writeFileSync(values.out, JSON.stringify(briefing, null, 2), 'utf-8');
+
 
 const disproved = findings.filter(
   (f) => f.claimCheck.status === 'DISPROVED' || f.counterpartCheck?.status === 'DISPROVED',
@@ -286,4 +324,6 @@ process.stdout.write(
   + `${crossReferences.length ? ` (${crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
   + `  cited outside the diff (annotated, not rejected): ${outside.length}${ids(outside)}\n`
   + `  under-anchored for their kind (annotated, not rejected): ${underAnchored.length}${ids(underAnchored)}\n`
-  + `  advisory (design — cannot block): ${advisory.length}${ids(advisory)}\n`);
+  + `  advisory (design — cannot block): ${advisory.length}${ids(advisory)}\n`
+  + `  already settled in an earlier iteration: ${settled.length}${ids(settled)}\n`
+  + `  REGRESSED (recorded fixed, reported again): ${regressed.length}${ids(regressed)}\n`);

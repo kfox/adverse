@@ -10,12 +10,15 @@ import { AUDITOR, PERSONAS } from '../src/personas.mjs';
 import {
   KINDS,
   PHASE1_INSTRUCTIONS,
+  validateVerify,
   buildPhase1Prompt,
   buildPhase2Prompt,
   knownTitles,
   validatePhase1,
   validatePhase2,
 } from '../src/prompts.mjs';
+
+import * as PROMPTS from '../src/prompts.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -161,9 +164,11 @@ test('skill prompt files match their generators', async () => {
   const { PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS } =
     await import('../src/prompts.mjs');
 
+  const { VERIFY_INSTRUCTIONS } = await import('../src/prompts.mjs');
   const expected = new Map([
     ['round1.txt', PHASE1_INSTRUCTIONS],
     ['round2.txt', PHASE2_BRIEFING_INSTRUCTIONS],
+    ['verify.txt', VERIFY_INSTRUCTIONS],
   ]);
   for (const p of Object.values(PERSONAS)) expected.set(`${p.name}.txt`, p.system + '\n');
 
@@ -195,4 +200,43 @@ test('validator rejects a finding with no kind', () => {
   const p = goodPhase1();
   p.findings = [{ severity: 'warning', title: 'x', detail: 'y' }];
   assert.match(validatePhase1(p, 'auditor'), /kind/);
+});
+
+// --- verification round -------------------------------------------------------
+
+const goodVerify = (persona = 'auditor') => ({ persona, verified: [], added: [] });
+
+test('verify: valid empty', () => {
+  assert.equal(validateVerify(goodVerify(), 'auditor'), null);
+});
+
+test('verify: valid populated', () => {
+  const p = goodVerify();
+  p.verified = [{ id: 'F1', title: 'x', status: 'closed', reason: 'the guard was added' }];
+  p.added = [{ severity: 'warning', kind: 'defect', title: 'new', detail: 'd' }];
+  assert.equal(validateVerify(p, 'auditor'), null);
+});
+
+test('verify: rejects a status outside closed|open|moot', () => {
+  const p = goodVerify();
+  p.verified = [{ id: 'F1', title: 'x', status: 'probably', reason: 'r' }];
+  assert.match(validateVerify(p, 'auditor'), /status/);
+});
+
+test('verify: rejects a verdict with no reason', () => {
+  const p = goodVerify();
+  p.verified = [{ id: 'F1', title: 'x', status: 'closed' }];
+  assert.match(validateVerify(p, 'auditor'), /reason/);
+});
+
+test('verify: an added finding still has to carry a kind', () => {
+  const p = goodVerify();
+  p.added = [{ severity: 'warning', title: 'new', detail: 'd' }];
+  assert.match(validateVerify(p, 'auditor'), /kind/);
+});
+
+test('verify prompt asks both questions, not just closure', () => {
+  const { VERIFY_INSTRUCTIONS } = PROMPTS;
+  assert.match(VERIFY_INSTRUCTIONS, /Is each finding actually closed/);
+  assert.match(VERIFY_INSTRUCTIONS, /Did the fix introduce anything new/);
 });

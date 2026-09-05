@@ -18,8 +18,13 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TRIAGE = path.join(here, '..', 'skills', 'adverse-review', 'scripts', 'triage.mjs');
 
+// Fixture repos must not inherit the developer's global git config: signing,
+// commit templates, and hooks all leak in and fail in ways that have nothing to
+// do with the code under test.
+const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+
 function git(cwd, ...args) {
-  execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: 'pipe' });
+  execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: 'pipe', env: GIT_ENV });
 }
 
 // A repo with one commit on `base` and one changed file on HEAD, so the
@@ -30,6 +35,7 @@ function makeRepo() {
   git(dir, 'config', 'user.email', 'test@example.invalid');
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
+  git(dir, 'config', 'tag.gpgSign', 'false');
   mkdirSync(path.join(dir, 'docs'), { recursive: true });
   writeFileSync(path.join(dir, 'app.py'), Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n') + '\n');
   writeFileSync(path.join(dir, 'docs', 'app.md'), 'app returns a list\n');
@@ -201,4 +207,61 @@ test('the gate summary is carried into the briefing verbatim', () => {
   execFileSync(process.execPath, [TRIAGE, '--round1', p, '--repo', repo,
     '--base', 'base', '--gate', 'make test: green', '--out', out], { encoding: 'utf-8' });
   assert.equal(JSON.parse(readFileSync(out, 'utf-8')).gate, 'make test: green');
+});
+
+// --- the ledger ---------------------------------------------------------------
+
+function runTriageWithLedger(dir, reviews, ledger) {
+  const lp = path.join(dir, 'ledger.json');
+  writeFileSync(lp, JSON.stringify(ledger), 'utf-8');
+  const files = reviews.map((r, i) => {
+    const p = path.join(dir, `lr1-${i}.json`);
+    writeFileSync(p, JSON.stringify(r), 'utf-8');
+    return p;
+  });
+  const out = path.join(dir, 'lbriefing.json');
+  const args = [TRIAGE];
+  for (const f of files) args.push('--round1', f);
+  args.push('--repo', dir, '--base', 'base', '--ledger', lp, '--out', out);
+  const stdout = execFileSync(process.execPath, args, { encoding: 'utf-8' });
+  return { briefing: JSON.parse(readFileSync(out, 'utf-8')), stdout };
+}
+
+const ledgerEntry = (over = {}) => ({
+  id: 'F1', title: 't', kind: 'defect', severity: 'warning',
+  file: 'app.py', line: 20, counterpart: null, citedLine: 'line 20 CHANGED',
+  disposition: 'declined', reason: 'intentional', iteration: 1, atCommit: 'HEAD', ...over,
+});
+
+test('a settled finding is marked in the briefing and counted as settled', () => {
+  const { briefing, stdout } = runTriageWithLedger(repo, [review('auditor', [finding()])], {
+    version: 1, base: null, iterations: [{ n: 1 }], entries: [ledgerEntry()],
+  });
+  const f = briefing.findings[0];
+  assert.equal(f.adjudicated.settled, true);
+  assert.equal(f.adjudicated.reason, 'intentional');
+  assert.deepEqual(briefing.settled, ['F1']);
+  assert.deepEqual(briefing.regressed, []);
+  assert.match(stdout, /already settled in an earlier iteration: 1/);
+});
+
+test('a finding recorded fixed that comes back is flagged regressed, not settled', () => {
+  const { briefing, stdout } = runTriageWithLedger(repo, [review('auditor', [finding()])], {
+    version: 1, base: null, iterations: [{ n: 1 }], entries: [ledgerEntry({ disposition: 'fixed' })],
+  });
+  assert.equal(briefing.findings[0].adjudicated.settled, false);
+  assert.deepEqual(briefing.regressed, ['F1']);
+  assert.deepEqual(briefing.settled, []);
+  assert.match(stdout, /REGRESSED \(recorded fixed, reported again\): 1/);
+});
+
+test('with no ledger, nothing is adjudicated', () => {
+  const { briefing } = runTriage(repo, [review('auditor', [finding()])]);
+  assert.equal(briefing.findings[0].adjudicated, undefined);
+  assert.deepEqual(briefing.settled, []);
+});
+
+test('a ledger from a future version fails the run rather than being ignored', () => {
+  assert.throws(() => runTriageWithLedger(repo, [review('auditor', [finding()])],
+    { version: 99, entries: [] }), /status 1|Command failed/);
 });

@@ -20,7 +20,8 @@ import { fileURLToPath } from 'node:url';
 import { importFromSrc } from './package-root.mjs';
 
 const { PERSONAS } = await importFromSrc('personas.mjs');
-const { PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS } = await importFromSrc('prompts.mjs');
+const { PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS, VERIFY_INSTRUCTIONS } =
+  await importFromSrc('prompts.mjs');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(here, 'prompts');
@@ -31,5 +32,6 @@ for (const p of Object.values(PERSONAS)) {
 }
 writeFileSync(path.join(outDir, 'round1.txt'), PHASE1_INSTRUCTIONS, 'utf-8');
 writeFileSync(path.join(outDir, 'round2.txt'), PHASE2_BRIEFING_INSTRUCTIONS, 'utf-8');
+writeFileSync(path.join(outDir, 'verify.txt'), VERIFY_INSTRUCTIONS, 'utf-8');
 
-process.stdout.write(`wrote ${Object.keys(PERSONAS).length + 2} prompt files to ${outDir}\n`);
+process.stdout.write(`wrote ${Object.keys(PERSONAS).length + 3} prompt files to ${outDir}\n`);
