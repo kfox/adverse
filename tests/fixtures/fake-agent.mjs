@@ -16,6 +16,7 @@ process.stdin.on('end', () => {
 function detectPersona(p) {
   if (p.includes('You are the **Auditor**'))    return 'auditor';
   if (p.includes('You are the **Adversary**'))  return 'adversary';
+  if (p.includes('You are the **Steward**'))    return 'steward';
   if (p.includes('You are the **Pragmatist**')) return 'pragmatist';
   return 'unknown';
 }
@@ -50,14 +51,29 @@ const ROUND1 = {
         fix: 'Use parameterized queries' },
     ],
   },
-  pragmatist: {
-    persona: 'pragmatist', verdict: 'approve',
-    summary: 'Maintainability is fine; one missing test file.',
+  steward: {
+    persona: 'steward', verdict: 'conditional',
+    summary: 'Docstring drift and an untested public entry point.',
     findings: [
-      { severity: 'warning', kind: 'design', file: 'foo.py', line: null,
+      { severity: 'warning', kind: 'contract', file: 'stats.py', line: 30,
+        counterpart: 'docs/stats.md',
+        title: 'Docstring still promises a raise that no longer happens',
+        detail: 'docs/stats.md says mean() raises on empty input; it returns NaN.',
+        fix: 'Update docs/stats.md, or restore the raise' },
+      { severity: 'warning', kind: 'behavioral', file: 'foo.py', line: null,
         title: 'No tests for foo module',
         detail: 'Public API has no test coverage.',
         fix: 'Add tests/test_foo.py' },
+    ],
+  },
+  pragmatist: {
+    persona: 'pragmatist', verdict: 'approve',
+    summary: 'Shape is fine; one abstraction with a single caller.',
+    findings: [
+      { severity: 'info', kind: 'design', file: 'foo.py', line: null,
+        title: 'Wrapper with one caller',
+        detail: 'The adapter layer has exactly one implementation and one call site.',
+        fix: 'Inline it until a second backend exists' },
     ],
   },
 };
@@ -79,6 +95,13 @@ const ROUND2 = {
               title: 'Token compared with == (timing leak)',
               detail: 'Use crypto.timingSafeEqual.',
               fix: 'Switch to constant-time compare' }],
+  },
+  steward: {
+    persona: 'steward',
+    validate: [{ from: 'auditor', title: 'Mean returns NaN for empty input',
+                 reason: 'Same defect my docstring finding points at from the other side.' }],
+    challenge: [],
+    added: [],
   },
   pragmatist: {
     persona: 'pragmatist',
