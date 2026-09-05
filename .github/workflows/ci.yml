@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege. Nothing here writes to the repository, comments on a PR, or
+# uploads security events — it reads the checkout and runs Node.
+permissions:
+  contents: read
+
+# Cancel a superseded run when new commits land on the same ref instead of
+# letting a stale matrix run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The matrix floor is whatever package.json's `engines.node` claims, because
+  # a claim nothing runs is a guess — so the two move together. 22 and 24 are
+  # the LTS lines and 26 is current; 20 is EOL, and setup-node warns on it, so
+  # supporting a release nothing tests and GitHub complains about buys nothing.
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24', '26']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Several tests build throwaway repositories and trace anchors across
+          # their history. Those create their own commits, so a shallow clone
+          # would do — but full history keeps a future test that reads *this*
+          # repository's history from failing for a reason nobody guesses.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+      # There is deliberately nothing to install: the package has no runtime or
+      # dev dependencies, so there is no `npm ci` and no cache. This step fails
+      # the moment that stops being true silently.
+      - name: Still no dependencies to install
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "A lockfile appeared. Add 'npm ci' to this workflow." >&2
+            exit 1
+          fi
+      - run: npm test
+
+  # Syntax-checks every .mjs in the tree. Not a style linter — the gate that
+  # catches a file that cannot be parsed at all, which matters more here than
+  # usual: most modules are only ever loaded by a subprocess the orchestrating
+  # agent spawns, where a parse error arrives as an opaque non-zero exit rather
+  # than a stack trace.
+  lint:
+    name: lint (parse every module)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: npm run lint
+
+  # Workflow files are the one thing in this repository that nothing else can
+  # check locally, and a mistake in one is not a failing job — it is a workflow
+  # that silently does not exist. The first draft of this file used a
+  # double-quoted string inside a `${{ }}` expression, which is a lex error;
+  # the YAML parsed fine, GitHub dropped the whole file, and every job in it
+  # simply never ran. actionlint catches that class in a second.
+  actionlint:
+    name: actionlint (the workflows themselves)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Pinned version plus a checksum rather than a third-party action, so the
+      # thing that vets our supply chain is not itself an unvetted dependency.
+      - name: Run actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum --check --strict
+          tar -xzf "$tarball" actionlint
+          ./actionlint -no-color
+
+  # package.json's `files` array decides what `npm install adverse` actually
+  # gets, and nothing else checks it — a new top-level directory would ship as
+  # an empty install with no error anywhere.
+  package:
+    name: package (the tarball carries the skill)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: The tarball carries bin, src, and the whole skill
+        run: npm pack --dry-run --json | node scripts/check-package-files.mjs
+
+  # One required status check, so the branch protection rule does not have to be
+  # edited every time a Node version joins or leaves the matrix. `needs` fails
+  # this job when an upstream job fails, but treats a SKIPPED or CANCELLED
+  # dependency as fine — hence `if: always()` plus the explicit result check.
+  ci:
+    name: ci
+    if: always()
+    needs: [test, lint, actionlint, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every required job succeeded
+        run: |
+          set -euo pipefail
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "upstream results: $results"
+          for result in $results; do
+            if [ "$result" != "success" ]; then
+              echo "A required job did not succeed." >&2
+              exit 1
+            fi
+          done
