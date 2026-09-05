@@ -1,7 +1,7 @@
 {
   "name": "adverse",
   "version": "0.2.1",
-  "description": "Multi-agent adversarial code review for any coding agent. Single model, three lenses, two rounds. Ships as both a CLI and a Claude Code Skill.",
+  "description": "Multi-agent adversarial code review for any coding agent. Single model, four lenses, two rounds, and a convergence loop that terminates on arithmetic. Ships as both a CLI and a Claude Code Skill.",
   "type": "module",
   "license": "MIT",
   "author": "Addy Osmani",

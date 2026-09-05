@@ -1,5 +1,9 @@
-// Deterministic synthesis: turn 3 round-1 reviews + 3 round-2 cross-reviews
+// Deterministic synthesis: turn 4 round-1 reviews + 3 round-2 cross-reviews
 // into a single ranked report.
+//
+// 4 and 3, not 4 and 4: the Pragmatist reports only advisory findings, and
+// cross-validation exists to decide what BLOCKS, so there is nothing for it to
+// cross-review. Its skipped round 2 is what pays for the Steward's round 1.
 //
 // Why deterministic (not another LLM call): a fourth model invocation costs
 // more, adds another failure mode, and would itself be subject to the same

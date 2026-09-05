@@ -29,6 +29,8 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
+import { ADVISORY_KINDS } from './prompts.mjs';
+
 export const LEDGER_VERSION = 1;
 
 // How far a traced anchor may drift and still be the same finding. Tighter
@@ -36,6 +38,9 @@ export const LEDGER_VERSION = 1;
 // related, this asserts that two findings ARE one, and a false match here
 // silently buries a real finding under an old decision.
 const MATCH_WINDOW_LINES = 5;
+
+// The weakest match that may settle a finding. Below it, annotate only.
+const SETTLING_SCORE = 2;
 
 export const DISPOSITIONS = Object.freeze(['fixed', 'declined', 'deferred']);
 const SETTLED = new Set(['declined', 'deferred']);
@@ -79,6 +84,14 @@ export function saveLedger(file, ledger) {
 //      reviewer who reports the same defect twice tends to name it the same way
 //   2  same kind, same file, and an anchor that lines up
 //   1  same kind and file, but one side has no line to compare
+//
+// Only a score of 2 or better may SETTLE a finding — see SETTLING_SCORE. A
+// score-1 match is file-wide by construction: an entry carrying `line: null`
+// matches every finding of its kind anywhere in that file, so honoring it as a
+// settlement turns one `declined` entry into a blanket amnesty for the file.
+// The ledger is a JSON file the loop reads back from disk, so that is a way to
+// make the panel report a clean review it never performed. Score 1 still
+// annotates, because a prior decision nearby is worth showing a reviewer.
 export function scoreMatch(entry, finding, traced = null) {
   if (normalizeTitle(entry.title) && normalizeTitle(entry.title) === normalizeTitle(finding.title)) {
     return { score: 3, why: 'identical title' };
@@ -95,9 +108,9 @@ export function scoreMatch(entry, finding, traced = null) {
     return null;
   }
 
-  // `design` is advisory and never blocks, so a positional match buys nothing
-  // and a wrong one buries real feedback. Title equality above is its only path.
-  if (entry.kind === 'design') return null;
+  // An advisory kind never blocks, so a positional match buys nothing and a
+  // wrong one buries real feedback. Title equality above is its only path.
+  if (ADVISORY_KINDS.has(entry.kind)) return null;
 
   const entryLine = traced?.line ?? entry.line;
   if (entryLine === null || entryLine === undefined
@@ -134,7 +147,8 @@ export function annotate(findings, ledger, traceFor = () => null) {
   return findings.map((f) => {
     const m = matchFinding(ledger, f, traceFor);
     if (!m) return f;
-    const settled = isSettled(m.entry.disposition);
+    const settled = isSettled(m.entry.disposition) && m.score >= SETTLING_SCORE;
+    const tooWeak = isSettled(m.entry.disposition) && m.score < SETTLING_SCORE;
     return {
       ...f,
       adjudicated: {
@@ -149,9 +163,13 @@ export function annotate(findings, ledger, traceFor = () => null) {
         note: settled
           ? 'Already decided in an earlier iteration. Do not re-open it. Challenge '
             + 'only if that decision rested on something the fix has since changed.'
-          : 'This was recorded FIXED in an earlier iteration. If it is still real, '
-            + 'the fix did not work — say exactly what the fix missed. That is more '
-            + 'important than any new finding on this pass.',
+          : tooWeak
+            ? 'An earlier decision covers this file, but it names no line, so it is '
+              + 'too weak to settle this finding. Judge the finding on its merits; '
+              + 'the earlier reason is shown only as context.'
+            : 'This was recorded FIXED in an earlier iteration. If it is still real, '
+              + 'the fix did not work — say exactly what the fix missed. That is more '
+              + 'important than any new finding on this pass.',
       },
     };
   });

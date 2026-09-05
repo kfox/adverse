@@ -90,3 +90,35 @@ test('security concepts named outright count, even without a sink', () => {
     assert.equal(assessScope({ files: ['x.js'], diff: diffOf(line) }).recommend, 'run', line);
   }
 });
+
+// --- what the signal scanner must not miss, and must not hang on -------------
+
+test('an added line beginning with ++ is scanned, not mistaken for a header', () => {
+  // `+++ b/path` is a header; `+++i;` is the added line `++i;`. Matching the
+  // bare `+++` prefix dropped every added line starting with `++` — a silent
+  // false negative, and the indentation an attacker would reach for.
+  const diff = [
+    '--- a/db.js', '+++ b/db.js', '@@ -1 +1,2 @@',
+    '+++i; const q = "SELECT " + name + " FROM users";',
+  ].join('\n');
+  const r = assessScope({ files: ['db.js'], diff });
+  assert.equal(r.recommend, 'run');
+  assert.ok(r.evidence.some((e) => e.sample.includes('++i;')),
+    'the ++ line must reach the scanner');
+});
+
+test('the SQL signal does not backtrack catastrophically', () => {
+  // `SELECT\s+.*\s+FROM` took 34s on 4,000 spaces and grew ~8x per doubling.
+  // The diff is unbounded and attacker-influenced, so this is a real stall.
+  const diff = `--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n+SELECT${' '.repeat(20000)}\n`;
+  const started = Date.now();
+  assessScope({ files: ['x.js'], diff });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 1000, `scan took ${elapsed}ms — the regex is backtracking again`);
+});
+
+test('the SQL signal still fires on a real query', () => {
+  const diff = '--- a/db.js\n+++ b/db.js\n@@ -1 +1 @@\n+  rows = q("SELECT id FROM users WHERE n=" + n)\n';
+  const r = assessScope({ files: ['db.js'], diff });
+  assert.equal(r.recommend, 'run');
+});

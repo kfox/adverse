@@ -45,7 +45,13 @@ const CONTENT_SIGNALS = [
   /\beval\s*\(/, /\bnew\s+Function\b/, /\bvm\.run/,
   /\bpickle\b/i, /yaml\.(unsafe_)?load\b/, /\bObjectInputStream\b/, /\bMarshal\.load\b/,
   /innerHTML/, /dangerouslySetInnerHTML/, /document\.write/, /\bv-html\b/,
-  /\b(SELECT\s+.*\s+FROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE)\b/i,
+  // `SELECT\s+.*\s+FROM` backtracks catastrophically: three adjacent
+  // quantifiers over overlapping classes, so a line of 4,000 spaces after
+  // SELECT (and no FROM) took 34 seconds, growing ~8x per doubling. The diff
+  // this scans is attacker-influenced and unbounded, so the shape is the bug.
+  // A bounded, non-overlapping span between two literals is linear enough.
+  /\bSELECT\b.{0,200}?\bFROM\b/is,
+  /\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE)\b/i,
   /\bcursor\.execute\b/, /\bdb\.(query|execute)\b/, /\braw\s*\(/,
   /\burlopen\b/, /\brequests\.(get|post|put|delete|patch)\b/, /\baxios\./,
   /\bsocket\.(socket|connect|accept)\b/, /\bcreateServer\b/,
@@ -60,11 +66,20 @@ const CONTENT_SIGNALS = [
   /authenticat/i, /authoriz/i, /permission/i, /sanitiz/i, /credential/i,
 ];
 
-// Lines a unified diff adds. The `+++` header is not an added line.
+// Longest line handed to the signal regexes. A minified bundle or a base64
+// blob in a diff is not something a signal can say anything useful about, and
+// scanning it is where any remaining super-linear regex would be felt. The
+// second guard behind the SQL rewrite above, not a substitute for it.
+const MAX_SCAN_LINE = 2000;
+
+// Lines a unified diff adds. The `+++ b/path` header is not an added line —
+// but `+++i;` IS, and matching the bare `+++` prefix silently dropped every
+// added line starting with `++`, which is exactly what an attacker would
+// indent their payload with. The header always has the trailing space.
 function addedLines(diffText) {
   return String(diffText).split('\n')
-    .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
-    .map((l) => l.slice(1));
+    .filter((l) => l.startsWith('+') && !l.startsWith('+++ '))
+    .map((l) => l.slice(1, 1 + MAX_SCAN_LINE));
 }
 
 export function assessScope({ files = [], diff = '' } = {}) {

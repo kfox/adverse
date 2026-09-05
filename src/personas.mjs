@@ -2,15 +2,26 @@
 //
 // The differentiation is the lever that lets adverse run on a single model, so
 // a persona earns its slot only by owning ground no other persona covers. The
-// test is the `kind` axis in src/prompts.mjs: every kind must have exactly one
-// owner, and no territory may be unclaimed. A persona may own more than one
-// kind — security genuinely cuts across all of them — but two personas may
-// never own the same one.
+// axis is `kind`, from src/prompts.mjs, and the rule is that no kind may be
+// unclaimed — NOT that each has a single owner. Kinds are shared, deliberately:
 //
-//   defect      Auditor
+//   defect      Auditor · Adversary (only with a working attack)
 //   behavioral  Auditor (mechanism) · Steward (tests) · Adversary (with an attack)
 //   contract    Steward
 //   design      Pragmatist
+//
+// What keeps shared kinds from collapsing into duplicate findings is not the
+// kind but the EVIDENCE each lane must bring. Two personas may report a
+// `defect` in the same function; the Adversary's only counts if it comes with
+// an attack the Auditor's does not need, and the Steward's `behavioral` finding
+// has to cite a test or a documented claim. That is what the exclusion lists in
+// each system prompt enforce, and `tests/personas.test.mjs` pins the ownership
+// map below so a lane cannot quietly widen into a neighbor's ground.
+//
+// The distinction matters because "one owner per kind" is what the code used to
+// claim three lines above arrays that plainly shared them — and a reader who
+// believed the prose would conclude the partition was broken and go "fix" it by
+// narrowing a lane, which is the one change that actually does cost findings.
 //
 // The Steward exists because `contract` had no owner. Code-vs-documentation
 // drift sat as one bullet in the Auditor's list and one in the Pragmatist's,

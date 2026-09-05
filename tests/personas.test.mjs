@@ -71,20 +71,37 @@ test('every persona names the kinds it emits', () => {
   }
 });
 
-test('no persona claims a kind another persona excludes it from', () => {
-  // A crude but load-bearing consistency check: if A's exclusions name B's
-  // title, A must not also declare a kind that B alone owns.
-  const soleOwner = new Map();
-  for (const k of KINDS) {
-    const owners = all.filter((p) => p.kinds.includes(k));
-    if (owners.length === 1) soleOwner.set(k, owners[0].name);
+// The ownership map, pinned. The previous version of this test derived
+// `soleOwner` from the very arrays it then asserted against, so its conclusion
+// was true by construction and it could not fail for any input — including the
+// input it existed to catch, a lane widened into a neighbor's ground. The
+// fixture has to be written down independently of the code to be a test at all.
+const OWNERSHIP = {
+  defect:     ['auditor', 'adversary'],
+  behavioral: ['auditor', 'adversary', 'steward'],
+  contract:   ['steward'],
+  design:     ['pragmatist'],
+};
+
+test('each kind is owned by exactly the personas the design assigns it', () => {
+  for (const kind of KINDS) {
+    const actual = all.filter((p) => p.kinds.includes(kind)).map((p) => p.name).sort();
+    const expected = [...(OWNERSHIP[kind] ?? [])].sort();
+    assert.deepEqual(actual, expected,
+      `'${kind}' is owned by [${actual}], but the design assigns it to [${expected}]. `
+      + 'Widening a lane costs findings; narrowing one leaves a kind unclaimed. '
+      + 'If this is deliberate, change OWNERSHIP here and the table in personas.mjs.');
   }
-  for (const p of all) {
-    for (const [kind, owner] of soleOwner) {
-      if (owner === p.name) continue;
-      assert.ok(!p.kinds.includes(kind), `${p.name} claims '${kind}', sole-owned by ${owner}`);
-    }
-  }
+});
+
+test('the ownership fixture covers every kind, and invents none', () => {
+  assert.deepEqual(Object.keys(OWNERSHIP).sort(), [...KINDS].sort());
+});
+
+test('design is owned by exactly one persona, because it cannot block', () => {
+  // An advisory kind reported by two lanes would read as cross-validated
+  // consensus on a finding that is not allowed to block anything.
+  assert.equal(all.filter((p) => p.kinds.includes('design')).length, 1);
 });
 
 test('DEFAULT_PERSONAS matches the registry, in a stable order', () => {

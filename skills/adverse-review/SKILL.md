@@ -122,7 +122,12 @@ BASE=$(git merge-base HEAD origin/main)   # or the branch the user named
 `--record` creates it.
 
 ```bash
-LEDGER="$ADVERSE_RUN/ledger.json"
+# NOT inside $ADVERSE_RUN. The run directory is session-scoped scratch; the
+# ledger has to outlive it, because a later pass on the same branch is exactly
+# the thing that must start from these conclusions.
+LEDGER_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/adverse"
+mkdir -p "$LEDGER_DIR"
+LEDGER="$LEDGER_DIR/$(git rev-parse --abbrev-ref HEAD | tr / -).ledger.json"
 ```
 
 ## Phase 1 — file list and lane scoping
@@ -345,7 +350,7 @@ you decline. Then record every decision:
 
 ```bash
 node ${SKILL_DIR}/scripts/converge.mjs --ledger "$LEDGER" \
-    --record "$ADVERSE_RUN"/decisions.json --repo . --head "$(git rev-parse HEAD)"
+    --record "$ADVERSE_RUN"/decisions.json --repo . --at "$REVIEWED"
 ```
 
 `decisions.json` is `{"decisions": [{id, title, kind, severity, file, line,
@@ -354,9 +359,20 @@ or `deferred`. **Every decision needs a reason** — the script refuses one
 without it, because an unexplained decision cannot be reviewed later and is
 indistinguishable from an oversight.
 
-Record decisions *after* committing the fixes, and pass the commit as `--head`:
-the ledger stores each anchor against the commit it was decided at, and the
-tracer re-projects from there.
+`--at` is **the commit the panel read**, not the one your fixes produced. Pin
+it before you edit anything:
+
+```bash
+REVIEWED=$(git rev-parse HEAD)     # BEFORE the fixes are committed
+```
+
+The line numbers in `decisions.json` came from a report computed against that
+tree, and the next pass traces from `atCommit` to the new `HEAD` to find where
+each anchor moved. Recording the post-fix commit stores post-fix commit with
+pre-fix lines, which makes `from` and `to` the same commit: the trace becomes
+the identity and the whole re-projection layer silently does nothing — the
+no-op it was built to replace. The script warns on stderr when `--at` is
+missing; do not ignore that line.
 
 ## Phase 8 — check for convergence
 
@@ -401,11 +417,24 @@ ledger attached, and loop. Findings the ledger records as settled will not be
 re-litigated; anything recorded `fixed` that comes back is flagged `REGRESSED`
 and is the loudest thing in the run.
 
-## Phase 10 — clean up
+## Phase 10 — hand over
 
-Delete `$ADVERSE_RUN` and tell the user the run is complete. **Keep the ledger
-if the work is not merged yet** — a later pass on the same branch should start
-from these conclusions. Do not commit either.
+Tell the user the run is complete and where the artifacts are. **Leave them on
+disk. Do not delete the run directory**, and never `rm -rf` it:
+
+- `mktemp -d` with no template puts it under `$TMPDIR`, which macOS reaps on
+  its own (`com.apple.bsd.dirhelper`, ~3 days untouched). Cleanup is not your
+  job, and the artifacts are what the user reads when they want to check a
+  finding you summarized.
+- The hazard was never the command, it is the interpolated variable. `rm -rf
+  "$ADVERSE_RUN"` is a coin flip on a value *you* computed, in a shell where it
+  may have been reset, misspelled, or emptied by a failed subshell. There is no
+  version of that trade that is worth a few megabytes of scratch.
+
+The ledger lives outside the run directory (Phase 0) precisely so that nothing
+about cleaning up scratch can touch it. **Keep it if the work is not merged
+yet** — a later pass on the same branch starts from these conclusions. Do not
+commit either.
 
 ## Failure handling
 

@@ -29,6 +29,7 @@ const { values } = parseArgs({
     record:  { type: 'string' },
     repo:    { type: 'string' },
     head:    { type: 'string' },
+    at:      { type: 'string' },
     'max-iterations': { type: 'string' },
   },
   strict: true,
@@ -37,7 +38,7 @@ const { values } = parseArgs({
 if (!values.ledger) {
   process.stderr.write(
     'Usage:\n'
-    + '  converge.mjs --ledger L.json --record decisions.json --repo DIR [--head REF]\n'
+    + '  converge.mjs --ledger L.json --record decisions.json --repo DIR --at REVIEWED_REF\n'
     + '  converge.mjs --ledger L.json --report report.json --repo DIR [--head REF] [--max-iterations N]\n');
   process.exit(2);
 }
@@ -68,9 +69,24 @@ if (values.record) {
   const payload = readJson(values.record);
   const decisions = Array.isArray(payload) ? payload : payload.decisions ?? [];
   const iteration = (ledger.iterations ?? []).length + 1;
+
+  // `atCommit` means "the commit these line numbers are valid at", and that is
+  // the tree the panel READ — not the tree that exists after the fixes. Passing
+  // the post-fix HEAD stores post-fix commit + pre-fix lines, and since the
+  // next pass traces from atCommit to HEAD, from === to: the trace degrades to
+  // the identity and the whole re-projection layer silently does nothing.
+  const atCommit = values.at ?? head;
+  if (!values.at) {
+    process.stderr.write(
+      'converge: --at not given, so decisions are anchored at ' + head + '.\n'
+      + '  If fixes are already committed, these line numbers refer to the tree\n'
+      + '  BEFORE them and tracing to HEAD will be a no-op. Pass --at <the commit\n'
+      + '  the review read> to make re-projection work.\n');
+  }
+
   let next;
   try {
-    next = recordDecisions(ledger, decisions, { iteration, atCommit: head });
+    next = recordDecisions(ledger, decisions, { iteration, atCommit });
   } catch (e) {
     process.stderr.write(`converge: ${e.message}\n`);
     process.exit(2);
@@ -108,8 +124,26 @@ const traceFor = (entry) => {
   }
 };
 
-const maxIterations = Number(values['max-iterations'] ?? 3);
-const status = convergenceStatus(report, ledger ?? emptyLedger(), traceFor, { maxIterations });
+// Validate AFTER coercion, and pass the option only when it is real.
+//
+// Two failures meet here. `Number('lots')` is NaN, and `iteration > NaN` is
+// false forever, so a typo silently removes the cap the loop is bounded by —
+// exit 3 becomes unreachable and the run cannot stop. The obvious repair, to
+// drop the `?? 3` and let the module's own default stand, is worse: this call
+// passes the option object unconditionally, `Number(undefined)` is also NaN,
+// and a destructuring default fires only on `undefined` — so the cap would die
+// on EVERY run instead of only on a typo.
+const rawMax = values['max-iterations'];
+let capOption = {};
+if (rawMax !== undefined) {
+  const n = Number(rawMax);
+  if (!Number.isInteger(n) || n < 1) {
+    process.stderr.write(`converge: --max-iterations must be a positive integer, got ${JSON.stringify(rawMax)}\n`);
+    process.exit(2);
+  }
+  capOption = { maxIterations: n };
+}
+const status = convergenceStatus(report, ledger ?? emptyLedger(), traceFor, capOption);
 
 const list = (fs) => fs.map((f) => `    - [${f.severity}·${f.kind}] ${f.title}`
   + (f.file ? ` (${f.file}${f.line !== null && f.line !== undefined ? `:${f.line}` : ''})` : '')).join('\n');

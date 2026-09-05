@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, renameSync, unlinkSync } from 'node
 import os from 'node:os';
 import path from 'node:path';
 
-import { followRename, parseHunks, projectLine, traceAnchor } from '../src/trace.mjs';
+import { followRename, parseHunks, projectLine, resolveRef, traceAnchor } from '../src/trace.mjs';
 
 // --- pure arithmetic ---------------------------------------------------------
 
@@ -138,8 +138,16 @@ test('a renamed file is followed, and the new path is reported', () => {
 });
 
 test('followRename returns the new path directly', () => {
-  assert.equal(followRename(repo, 'v1', 'v2', 'keep.py'), 'moved.py');
-  assert.equal(followRename(repo, 'v1', 'v2', 'app.py'), 'app.py');
+  assert.deepEqual(followRename(repo, 'v1', 'v2', 'keep.py'), { status: 'ok', path: 'moved.py' });
+  assert.deepEqual(followRename(repo, 'v1', 'v2', 'app.py'), { status: 'ok', path: 'app.py' });
+});
+
+test('followRename separates a deleted file from a git failure', () => {
+  assert.deepEqual(followRename(repo, 'v1', 'v2', 'doomed.py'), { status: 'gone' });
+
+  const failed = followRename(repo, 'v1', 'no-such-ref-at-all', 'app.py');
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.why, /failed/);
 });
 
 test('a deleted file is file-gone', () => {
@@ -162,4 +170,40 @@ test('tracing is an identity when nothing changed between the refs', () => {
   const r = traceAnchor({ repo, from: 'v2', to: 'v2', file: 'app.py', line: 30 });
   assert.equal(r.status, 'untouched');
   assert.equal(r.line, 30);
+});
+
+// --- the states a caller must be able to tell apart --------------------------
+// Each of these used to come back as `file-gone`, which reads as "the file was
+// deleted" — evidence a finding was fixed. A tracer that cannot answer has to
+// say so.
+
+test('an unresolvable ref is trace-failed, not file-gone', () => {
+  const r = traceAnchor({ repo, from: 'v1', to: 'no-such-ref', file: 'app.py', line: 30 });
+  assert.equal(r.status, 'trace-failed');
+  assert.match(r.why, /not a resolvable commit: no-such-ref/);
+});
+
+test('a ref that could be read as a git flag is refused before it reaches git', () => {
+  // `git diff --output=FILE..HEAD` exits 0 and writes FILE. A ref arrives from
+  // a JSON ledger on disk, so it is untrusted input in an argument position.
+  for (const evil of ['--output=/tmp/pwned', '-x', '--upload-pack=touch /tmp/x']) {
+    assert.equal(resolveRef(repo, evil), null, `${evil} must not resolve`);
+    const r = traceAnchor({ repo, from: evil, to: 'v2', file: 'app.py', line: 1 });
+    assert.equal(r.status, 'trace-failed');
+  }
+});
+
+test('resolveRef accepts the ref spellings a ledger legitimately carries', () => {
+  assert.ok(resolveRef(repo, 'v2'));
+  assert.ok(resolveRef(repo, 'HEAD'));
+  assert.equal(resolveRef(repo, 'HEAD'), resolveRef(repo, resolveRef(repo, 'HEAD')));
+});
+
+test('projectLine never returns line 0 when a hunk deletes the top of the file', () => {
+  // `@@ -1,2 +0,0 @@` deletes the first two lines: newStart is the position
+  // *before* line 1. Line 0 is not a line, and the ledger's +/-5 match window
+  // would read it as an anchor five lines from lines 1-5.
+  const r = projectLine(parseHunks('@@ -1,2 +0,0 @@'), 1);
+  assert.equal(r.status, 'touched');
+  assert.equal(r.line, 1);
 });

@@ -44,10 +44,16 @@ import { importFromSrc } from './package-root.mjs';
 
 const { annotate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { traceAnchor } = await importFromSrc('trace.mjs');
+const { ADVISORY_KINDS } = await importFromSrc('prompts.mjs');
 
 const CLUSTER_WINDOW_LINES = 15;
 
-const { values } = parseArgs({
+// `allowPositionals` is not optional here. `--round1 run/round1-*.json` is the
+// documented invocation and the natural one to type; the shell expands it, and
+// with strict parsing the second and later paths arrive as positionals. Node
+// then throws ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL and Phase 3 aborts before
+// any round-2 work happens. combine.mjs has always accepted them; so does this.
+const { values, positionals } = parseArgs({
   options: {
     round1: { type: 'string', multiple: true },
     repo:   { type: 'string' },
@@ -57,9 +63,11 @@ const { values } = parseArgs({
     out:    { type: 'string' },
   },
   strict: true,
+  allowPositionals: true,
 });
 
-if (!values.round1 || !values.repo || !values.out) {
+values.round1 = [...(values.round1 ?? []), ...positionals];
+if (!values.round1.length || !values.repo || !values.out) {
   process.stderr.write('Usage: triage.mjs --round1 a.json [--round1 b.json …] --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>\n');
   process.exit(2);
 }
@@ -102,10 +110,27 @@ function lineCount(abs) {
   return lines.length;
 }
 
+// Resolve a model-supplied path against the repo root, or null if it escapes.
+//
+// `file` comes out of a reviewer's JSON, so `../../../etc/passwd` is a path a
+// reviewer can write. Both callers below go on to read the file and put a line
+// of it into `citedLine`, which is copied verbatim into the round-2 prompt —
+// so an unchecked join is a read-anything primitive with an exfiltration path
+// attached. `path.join` normalizes `..` away rather than rejecting it, which is
+// why the check has to be on the resolved result.
+function insideRepo(file) {
+  const abs = path.resolve(repo, file);
+  if (abs !== repo && !abs.startsWith(repo + path.sep)) return null;
+  return abs;
+}
+
 function checkClaim(file, line) {
   if (!file) return { status: 'not-file-bound' };
 
-  const abs = path.join(repo, file);
+  const abs = insideRepo(file);
+  if (abs === null) {
+    return { status: 'DISPROVED', why: `cited path escapes the checkout: ${file}` };
+  }
   if (!existsSync(abs) || !statSync(abs).isFile()) {
     return { status: 'DISPROVED', why: `cited file does not exist in the checkout: ${file}` };
   }
@@ -153,7 +178,10 @@ const KIND_REQUIREMENTS = {
 // just as surely as a missing primary file does.
 function checkCounterpart(file) {
   if (!file) return null;
-  const abs = path.join(repo, file);
+  const abs = insideRepo(file);
+  if (abs === null) {
+    return { status: 'DISPROVED', why: `cited counterpart escapes the checkout: ${file}` };
+  }
   if (existsSync(abs) && statSync(abs).isFile()) return { status: 'ok', file };
   return { status: 'DISPROVED', why: `cited counterpart does not exist in the checkout: ${file}` };
 }
@@ -179,7 +207,7 @@ function checkKind(kind, file, line, counterpart) {
          + 'The claim may still be real — judge the claim, not the label.',
     };
   }
-  return { status: 'ok', kind, advisory: kind === 'design' };
+  return { status: 'ok', kind, advisory: ADVISORY_KINDS.has(kind) };
 }
 
 const reviews = values.round1.map(readJson);
