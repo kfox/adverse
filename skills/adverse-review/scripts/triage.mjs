@@ -36,7 +36,9 @@
 // verdict.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'node:fs';
+import {
+  closeSync, existsSync, fstatSync, openSync, readFileSync, realpathSync, statSync, writeFileSync,
+} from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
@@ -112,12 +114,6 @@ function changedRanges(file) {
   return ranges;
 }
 
-function lineCount(abs) {
-  const lines = readFileSync(abs, 'utf-8').split('\n');
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  return lines.length;
-}
-
 // Resolve a model-supplied path against the repo root, or null if it escapes.
 //
 // `file` comes out of a reviewer's JSON, so `../../../etc/passwd` is a path a
@@ -161,11 +157,26 @@ function checkClaim(file, line) {
   if (abs === null) {
     return { status: 'DISPROVED', why: `cited path escapes the checkout: ${file}` };
   }
-  if (!existsSync(abs) || !statSync(abs).isFile()) {
+
+  // Open once and check/read through the same descriptor rather than the
+  // path — an exists-then-readFileSync-by-path pair leaves a window where
+  // the path could resolve to something else by the time it's read.
+  let lines;
+  try {
+    const fd = openSync(abs, 'r');
+    try {
+      if (!fstatSync(fd).isFile()) {
+        return { status: 'DISPROVED', why: `cited file does not exist in the checkout: ${file}` };
+      }
+      lines = readFileSync(fd, 'utf-8').split('\n');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
     return { status: 'DISPROVED', why: `cited file does not exist in the checkout: ${file}` };
   }
-
-  const total = lineCount(abs);
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const total = lines.length;
   const out = { status: 'ok', file, fileLines: total };
 
   if (line === null || line === undefined) {
@@ -190,7 +201,7 @@ function checkClaim(file, line) {
              + 'for a latent defect the diff newly makes reachable — but the finding '
              + 'must say why the diff is what puts it in play.';
   }
-  out.citedLine = readFileSync(abs, 'utf-8').split('\n')[line - 1] ?? null;
+  out.citedLine = lines[line - 1] ?? null;
   return out;
 }
 

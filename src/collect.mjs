@@ -1,7 +1,7 @@
 // Collect source code from a target directory or a git diff.
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
 export const DEFAULT_MAX_TOTAL_CHARS = 250_000;
@@ -66,17 +66,16 @@ function walkFiles(root) {
   return files;
 }
 
-function looksBinary(filePath) {
+function looksBinaryExt(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (EXCLUDE_EXTS.has(ext)) return true;
   if (filePath.endsWith('.min.js') || filePath.endsWith('.min.css')) return true;
-  try {
-    const fd = readFileSync(filePath);
-    const head = fd.subarray(0, Math.min(fd.length, 8192));
-    for (const b of head) if (b === 0) return true;
-  } catch {
-    return true;
-  }
+  return false;
+}
+
+function hasNullByte(buf) {
+  const head = buf.subarray(0, Math.min(buf.length, 8192));
+  for (const b of head) if (b === 0) return true;
   return false;
 }
 
@@ -92,19 +91,27 @@ export function collectDirectory(
   let total = 0;
 
   for (const filePath of candidates) {
-    let st;
+    if (looksBinaryExt(filePath)) continue;
+
+    // Open once and check/read through the same descriptor rather than a
+    // path — a stat-then-readFileSync-by-path pair leaves a window where the
+    // path could resolve to something else by the time it's read.
+    let fd;
     try {
-      st = statSync(filePath);
+      fd = openSync(filePath, 'r');
     } catch {
       continue;
     }
-    if (!st.isFile()) continue;
-    if (looksBinary(filePath)) continue;
     let text;
     try {
-      text = readFileSync(filePath, { encoding: 'utf-8' });
+      if (!fstatSync(fd).isFile()) continue;
+      const buf = readFileSync(fd);
+      if (hasNullByte(buf)) continue;
+      text = buf.toString('utf-8');
     } catch {
       continue;
+    } finally {
+      closeSync(fd);
     }
     if (!text.trim()) continue;
     let truncated = false;
