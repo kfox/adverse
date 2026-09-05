@@ -279,3 +279,20 @@ test('toJsonReport is structurally complete', () => {
   assert.equal(json.findings[0].confidence, 'solo');
   assert.equal(json.findings[0].title, 'B');
 });
+
+test('a skipped lane is named in the report, distinctly from a failed one', () => {
+  const r1 = { auditor: v('approve') };
+  const out = renderMarkdown(synthesize(r1, {}, {
+    skippedPersonas: [{ persona: 'adversary', reason: 'no trust boundary in the diff' }],
+  }));
+  assert.match(out, /Lane not run:\*\* adversary — no trust boundary in the diff/);
+  assert.match(out, /Nothing below reflects that perspective/);
+  assert.ok(!out.includes('Degraded run'), 'skipped is not the same as failed');
+});
+
+test('skipped lanes reach the JSON report', () => {
+  const json = toJsonReport(synthesize({ auditor: v('approve') }, {}, {
+    skippedPersonas: [{ persona: 'adversary', reason: 'r' }],
+  }));
+  assert.deepEqual(json.skipped, [{ persona: 'adversary', reason: 'r' }]);
+});

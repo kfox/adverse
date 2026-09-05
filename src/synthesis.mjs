@@ -88,7 +88,7 @@ function buildFinding(persona, raw) {
   };
 }
 
-export function synthesize(round1, round2 = {}, { failedPersonas = [] } = {}) {
+export function synthesize(round1, round2 = {}, { failedPersonas = [], skippedPersonas = [] } = {}) {
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
@@ -202,6 +202,10 @@ export function synthesize(round1, round2 = {}, { failedPersonas = [] } = {}) {
     consensusLabel: label,
     consensusScore: score,
     degraded: [...failedPersonas],
+    // Deliberately not run, as opposed to `degraded`, which means tried and
+    // failed. Both must appear in the report: a lane that was skipped and not
+    // mentioned reads exactly like a lane that looked and found nothing.
+    skipped: [...skippedPersonas],
   };
 }
 
@@ -279,6 +283,13 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
     lines.push('');
     lines.push(
       `> **Degraded run:** the following reviewers failed and were excluded: ${syn.degraded.join(', ')}.`,
+    );
+  }
+  if ((syn.skipped ?? []).length) {
+    lines.push('');
+    lines.push(
+      `> **Lane not run:** ${syn.skipped.map((s) => `${s.persona ?? s}${s.reason ? ` — ${s.reason}` : ''}`).join('; ')}. `
+      + 'Nothing below reflects that perspective.',
     );
   }
   lines.push('');
@@ -368,6 +379,7 @@ export function toJsonReport(syn) {
     verdicts: syn.verdicts,
     summaries: syn.summaries,
     degraded: syn.degraded,
+    skipped: syn.skipped ?? [],
     open_blocking: (syn.openBlocking ?? []).map((f) => f.title),
     findings: syn.findings.map((f) => ({
       severity: f.severity,

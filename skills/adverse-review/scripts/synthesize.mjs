@@ -20,12 +20,13 @@ const { values } = parseArgs({
     out:        { type: 'string' },
     'json-out': { type: 'string' },
     'html-out': { type: 'string' },
+    skipped:    { type: 'string', multiple: true },
   },
   strict: true,
 });
 
 if (!values.round1) {
-  process.stderr.write('Usage: synthesize.mjs --round1 <combined.json> [--round2 <combined.json>] [--out report.md] [--json-out report.json] [--html-out report.html]\n');
+  process.stderr.write('Usage: synthesize.mjs --round1 <combined.json> [--round2 <combined.json>] [--out report.md] [--json-out report.json] [--html-out report.html] [--skipped persona=reason]\n');
   process.exit(2);
 }
 
@@ -38,7 +39,16 @@ try {
   process.exit(1);
 }
 
-const syn = synthesize(round1, round2);
+// --skipped auditor="reason" records a lane that was deliberately not run, so
+// the report cannot present its silence as a clean bill of health.
+const skippedPersonas = (values.skipped ?? []).map((spec) => {
+  const at = spec.indexOf('=');
+  return at === -1
+    ? { persona: spec, reason: null }
+    : { persona: spec.slice(0, at), reason: spec.slice(at + 1) };
+});
+
+const syn = synthesize(round1, round2, { skippedPersonas });
 const md = renderMarkdown(syn);
 
 if (values.out) writeFileSync(values.out, md, 'utf-8');
