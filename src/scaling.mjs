@@ -108,11 +108,17 @@ export function parseNumstat(text) {
 
 // `numstat` is raw `git diff --numstat` text. Without it the size was never
 // measured, and unmeasured must not qualify for the cheap bucket — the same
-// rule that keeps an unscannable file out of `small`.
-export function diffSize({ files = [], numstat = null } = {}) {
+// rule that keeps an unscannable file out of `small`. `numstatMatchesFiles:
+// false` says the numstat measures a different change set than `files` (a
+// caller-supplied list): its counts can still FORCE (large, deletions,
+// unscannable rows — all of which only add review), but they can never
+// qualify the list as small, because an empty measurement of the wrong range
+// reads as small for arbitrarily large files.
+export function diffSize({ files = [], numstat = null, numstatMatchesFiles = true } = {}) {
   const fileCount = files.length;
-  const measured = numstat !== null && numstat !== undefined;
-  const { changed, deleted, unscannable } = parseNumstat(measured ? numstat : '');
+  const readable = numstat !== null && numstat !== undefined;
+  const measured = readable && numstatMatchesFiles;
+  const { changed, deleted, unscannable } = parseNumstat(readable ? numstat : '');
 
   let bucket = 'medium';
   if (fileCount >= LARGE_MIN_FILES || changed >= LARGE_MIN_CHANGED_LINES
@@ -139,17 +145,22 @@ function matchedPins(files, pins) {
   return hits;
 }
 
-function agentsFor(persona, run, bucket) {
+// A lane is never split more ways than it has files to partition: a one-file
+// large diff (a single binary asset, one huge module) split in two hands one
+// agent nothing, and combine.mjs then refuses the lane for having only one
+// real payload.
+function agentsFor(persona, run, bucket, fileCount) {
   if (!run) return 0;
-  return bucket === 'large' && PER_FILE_LANES.has(persona) ? SPLIT_AGENTS : 1;
+  return bucket === 'large' && PER_FILE_LANES.has(persona) && fileCount >= SPLIT_AGENTS
+    ? SPLIT_AGENTS : 1;
 }
 
 // `diff: null` means the diff could not be read — distinct from '', an empty
 // diff — and an unread diff forces the Adversary: assessScope saw nothing, so
 // "no trust-boundary signal" would be an assertion of absence about lines
 // nobody scanned.
-export function planReview({ files = [], diff = '', numstat = null, pins = [] } = {}) {
-  const size = diffSize({ files, numstat });
+export function planReview({ files = [], diff = '', numstat = null, numstatMatchesFiles = true, pins = [] } = {}) {
+  const size = diffSize({ files, numstat, numstatMatchesFiles });
   const pinned = matchedPins(files, pins);
   const forced = pinned.length > 0;
   const reasons = [];
@@ -158,7 +169,12 @@ export function planReview({ files = [], diff = '', numstat = null, pins = [] } 
   // the same as having looked and found nothing — full treatment.
   const blind = files.length === 0;
   if (blind) reasons.push('no file list to assess; defaulting to the full shape');
-  if (!size.measured && !blind) reasons.push('size not measured (no numstat); the small bucket is unreachable');
+  if (!size.measured && !blind) {
+    reasons.push(numstat === null || numstat === undefined
+      ? 'size not measured (no numstat); the small bucket is unreachable'
+      : 'size not measured (the numstat measures a different range than the supplied file list); '
+        + 'the small bucket is unreachable, but the measurement\'s forcing signals still apply');
+  }
   if (size.unscannable.length) {
     reasons.push(`${size.unscannable.length} file(s) unmeasurable (binary or diff-suppressed); `
       + 'unmeasured content could be any size, so the diff is sized large and the Adversary runs');
@@ -168,8 +184,10 @@ export function planReview({ files = [], diff = '', numstat = null, pins = [] } 
   }
 
   // assessScope already treats an empty file list as "run". Its signals scan
-  // only added lines, so content it never saw — suppressed files, deletions —
-  // must force the lane rather than count as evidence of absence.
+  // added AND removed lines, so what remains unscanned is content it never
+  // saw at all — suppressed/binary files, or a bulk deletion whose guard
+  // removal matches no pattern — and that must force the lane rather than
+  // count as evidence of absence.
   const diffUnread = diff === null;
   const adversary = assessScope({ files, diff: diffUnread ? '' : diff });
   const adversaryForced = forced
@@ -179,7 +197,7 @@ export function planReview({ files = [], diff = '', numstat = null, pins = [] } 
   const adversaryForcedReason = forced ? 'pinned path forces the lane'
     : diffUnread ? 'the diff could not be read; content signals saw nothing, which is not evidence of absence'
     : size.unscannable.length > 0 ? 'unmeasurable file content cannot prove the absence of a boundary'
-    : `${size.deletedLines} deleted lines are not signal-scanned; a deletion can remove a guard`;
+    : `${size.deletedLines} deleted lines; a bulk deletion can remove a guard without matching any signal`;
 
   const lanes = DEFAULT_PERSONAS.map((persona) => {
     if (GATED_LANES.has(persona)) {
@@ -187,7 +205,7 @@ export function planReview({ files = [], diff = '', numstat = null, pins = [] } 
       return {
         persona,
         run,
-        agents: agentsFor(persona, run, size.bucket),
+        agents: agentsFor(persona, run, size.bucket, size.fileCount),
         reason: adversaryForced && adversary.recommend !== 'run'
           ? adversaryForcedReason
           : adversary.reason,
@@ -198,7 +216,7 @@ export function planReview({ files = [], diff = '', numstat = null, pins = [] } 
       return {
         persona,
         run,
-        agents: agentsFor(persona, run, size.bucket),
+        agents: agentsFor(persona, run, size.bucket, size.fileCount),
         reason: run
           ? 'one agent — structure findings are cross-file, so partitioning harms them'
           : 'small diff; every kind this lane reports is advisory, so the skip costs a backlog item '
@@ -208,7 +226,7 @@ export function planReview({ files = [], diff = '', numstat = null, pins = [] } 
     return {
       persona,
       run: true,
-      agents: agentsFor(persona, true, size.bucket),
+      agents: agentsFor(persona, true, size.bucket, size.fileCount),
       reason: size.bucket === 'large' && PER_FILE_LANES.has(persona)
         ? 'always runs; split across two agents because a large diff exhausts one reviewer\'s budget'
         : persona === 'steward'

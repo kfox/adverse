@@ -115,36 +115,47 @@ if (values.files) {
   }
 }
 
-// A supplied --files list is not sized: the numstat of `base...HEAD` measures
-// a different change set, and an empty measurement of the wrong range would
-// read as `small` for arbitrarily large files. Unmeasured is the honest
-// answer, and unmeasured never qualifies for the cheap bucket. (The diff read
-// below still feeds assessScope; its signals only ever ADD evidence, so an
-// unrelated diff errs toward running a lane, never toward skipping one.)
+// The numstat is read even when the caller supplied --files, because its
+// forcing signals (unscannable rows, deleted lines) only ever ADD review —
+// the same reason the diff read below survives a --files run. What a
+// mismatched range must NOT do is size the list: an empty measurement of the
+// wrong range would read as `small` for arbitrarily large files, so
+// `numstatMatchesFiles: false` keeps the small bucket unreachable while the
+// forces stay live. Suppressing the read entirely re-opened both forces on
+// exactly the documented flow, where files.txt is written from the same range
+// two lines earlier.
 let numstat = null;
-if (!values.files) {
-  try {
-    numstat = git(['diff', '--numstat', `${base}...HEAD`]);
-  } catch (e) {
-    process.stderr.write(`plan: could not measure the diff (${e.message}); the small bucket is unreachable\n`);
-  }
+try {
+  numstat = git(['diff', '--numstat', `${base}...HEAD`]);
+} catch (e) {
+  process.stderr.write(`plan: could not measure the diff (${e.message}); the small bucket is unreachable\n`);
 }
 
-let diff = '';
+// null, not '': planReview treats null as "could not be read" and forces the
+// Adversary — an empty string would read as an empty diff and let the lane
+// skip on signals nobody scanned.
+let diff = null;
 try {
   diff = git(['diff', `${base}...HEAD`]);
 } catch (e) {
-  process.stderr.write(`plan: could not read the diff (${e.message}); content signals see nothing\n`);
+  process.stderr.write(`plan: could not read the diff (${e.message}); the Adversary lane is forced\n`);
 }
 
-const plan = planReview({ files, diff, numstat, pins: values.pin ?? [] });
+const plan = planReview({
+  files,
+  diff,
+  numstat,
+  numstatMatchesFiles: !values.files,
+  pins: values.pin ?? [],
+});
 
 const sizeLine = files.length === 0
   ? 'size: unknown (no file list)'
   : plan.size.measured
     ? `size: ${plan.size.bucket} (${plan.size.fileCount} files, ${plan.size.changedLines} changed lines`
       + (plan.size.unscannable.length ? `, ${plan.size.unscannable.length} unmeasurable` : '') + ')'
-    : `size: ${plan.size.bucket} (${plan.size.fileCount} files, unmeasured)`;
+    : `size: ${plan.size.bucket} (${plan.size.fileCount} files, unmeasured`
+      + (plan.size.unscannable.length ? `, ${plan.size.unscannable.length} unmeasurable` : '') + ')';
 const laneLine = (l) => `  ${l.persona.padEnd(11)} ${l.run ? `run   ${l.agents} agent${l.agents === 1 ? ' ' : 's'}` : 'skip          '} — ${l.reason}`;
 emit(plan,
   sizeLine + '\n'

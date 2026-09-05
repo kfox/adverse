@@ -48,6 +48,31 @@ test('a signal in a REMOVED line counts — a deleted guard is this change\'s do
   assert.equal(r.evidence[0].kind, 'content-removed');
 });
 
+test('a removed guard runs the lane on SHAPE, not vocabulary — the attacker picks the vocabulary', () => {
+  // The panel's live repros: none names a CONTENT_SIGNALS concept (`perm` is
+  // not `permission`), and the first fix's test was caught having been rewritten
+  // to fit the pattern list instead of the attack. Shape is what a guard's
+  // author cannot cheaply rename away.
+  const removedDiff = (...removed) =>
+    ['diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1 +1 @@', ...removed.map((l) => `-${l}`)].join('\n');
+  for (const line of [
+    'if (!u.perm[i]) throw new Error(i);',
+    'if (!isAdmin(req.user)) return res.status(403).end();',
+    'assertOwner(req.user, doc);',
+    'if (req.user.role !== "root") return deny();',
+    'if (!ok(x)) bail(x);',
+  ]) {
+    const r = assessScope({ files: ['src/render/widget.js'], diff: removedDiff(line) });
+    assert.equal(r.recommend, 'run', line);
+    assert.equal(r.evidence[0].kind, 'content-removed', line);
+  }
+});
+
+test('the guard shapes are minus-side only — added early returns are most of ordinary code', () => {
+  const r = assessScope({ files: ['src/render/widget.js'], diff: diffOf('if (!ok(x)) bail(x);') });
+  assert.equal(r.recommend, 'skip', JSON.stringify(r.evidence));
+});
+
 test('the --- header is not mistaken for a removed line', () => {
   const diff = ['diff --git a/x b/x', '--- a/subprocess.js', '+++ b/x',
                 '@@ -1 +1 @@', '-const x = 1;', '+const x = 2;'].join('\n');

@@ -69,6 +69,28 @@ const CONTENT_SIGNALS = [
   /authenticat/i, /authoriz/i, /permission/i, /sanitiz/i, /credential/i,
 ];
 
+// Signals scanned against REMOVED lines only. CONTENT_SIGNALS names sinks and
+// security vocabulary, but a deleted guard needs neither: `if (!u.perm[i])
+// throw` removes enforcement without naming a single concept on that list,
+// and the attacker picks the vocabulary. These match the SHAPE of enforcement
+// instead — a negated-condition check, a one-line guard, a thrown refusal, an
+// assertion, refusal words, HTTP deny codes — because removing enforcement is
+// exactly the Adversary's business regardless of what the guard was called.
+// They stay off the added-line scan, where `if (!x) return` is most of
+// ordinary code and the signal would launder "always run" into a decision.
+// No static list survives a determined author — the deleted-lines floor and
+// the pins are the backstops — but shape is what the author cannot cheaply
+// rename away.
+const REMOVED_LINE_SIGNALS = [
+  /\bif\s*\(\s*!/,
+  /\bif\s*\(.*\)\s*\{?\s*(throw|return)\b/,
+  /^\s*throw\b/,
+  /\bassert\w*\s*\(/i,
+  /\b(deny|denied|forbid|forbidden|reject)/i,
+  /\b40[13]\b/,
+  /\bperms?\b/i, /\brole\b/i, /\badmin/i, /\bowner/i,
+];
+
 // Lines a unified diff adds. The `+++ b/path` header is not an added line —
 // but `+++i;` IS, and matching the bare `+++` prefix silently dropped every
 // added line starting with `++`, which is exactly what an attacker would
@@ -110,9 +132,9 @@ export function assessScope({ files = [], diff = '' } = {}) {
   }
 
   const seen = new Set();
-  const scan = (lines, kind) => {
+  const scan = (lines, kind, signals) => {
     for (const line of lines) {
-      for (const re of CONTENT_SIGNALS) {
+      for (const re of signals) {
         const m = re.exec(line);
         if (!m || seen.has(re.source)) continue;
         seen.add(re.source);
@@ -120,8 +142,8 @@ export function assessScope({ files = [], diff = '' } = {}) {
       }
     }
   };
-  scan(addedLines(diff), 'content');
-  scan(removedLines(diff), 'content-removed');
+  scan(addedLines(diff), 'content', CONTENT_SIGNALS);
+  scan(removedLines(diff), 'content-removed', [...CONTENT_SIGNALS, ...REMOVED_LINE_SIGNALS]);
 
   // No files at all means we were handed nothing to reason about, which is not
   // the same as having looked and found nothing.
@@ -132,16 +154,17 @@ export function assessScope({ files = [], diff = '' } = {}) {
   if (evidence.length) {
     const paths = evidence.filter((e) => e.kind === 'path').length;
     const content = evidence.filter((e) => e.kind === 'content').length;
+    const removed = evidence.filter((e) => e.kind === 'content-removed').length;
     return {
       recommend: 'run',
-      reason: `trust-boundary signals present (${paths} in paths, ${content} in added code)`,
+      reason: `trust-boundary signals present (${paths} in paths, ${content} in added code, ${removed} in removed code)`,
       evidence,
     };
   }
 
   return {
     recommend: 'skip',
-    reason: 'no trust-boundary signal in the changed paths or the added lines',
+    reason: 'no trust-boundary signal in the changed paths, the added lines, or the removed lines',
     evidence: [],
   };
 }

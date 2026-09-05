@@ -186,6 +186,50 @@ test('only the per-file lanes split on a large diff, and only there', () => {
   assert.equal(lane(medium, 'auditor').agents, 1);
 });
 
+test('a one-file large diff is not split — a lane never gets more agents than files', () => {
+  // combine.mjs requires exactly 2 payloads for a merged lane, so a split with
+  // one file either reviews nothing twice or stalls the run at combine.
+  const plan = planReview({
+    files: ['assets/logo.png'],
+    numstat: '-\t-\tassets/logo.png\n',
+    diff: '',
+  });
+  assert.equal(plan.size.bucket, 'large');
+  assert.equal(lane(plan, 'auditor').agents, 1);
+  assert.equal(lane(plan, 'adversary').agents, 1);
+});
+
+test('a mismatched numstat cannot size the list small, but its forces stay live', () => {
+  // numstatMatchesFiles: false is the --files case: the measurement covers a
+  // different range, so it may only ADD review, never qualify the cheap bucket.
+  const quiet = planReview({
+    files: ['a.mjs', 'b.mjs'],
+    numstat: numstatOf([[2, 1, 'a.mjs']]),
+    numstatMatchesFiles: false,
+    diff: '',
+  });
+  assert.equal(quiet.size.measured, false);
+  assert.notEqual(quiet.size.bucket, 'small');
+
+  const deletions = planReview({
+    files: ['a.mjs', 'b.mjs'],
+    numstat: numstatOf([[0, DELETED_LINES_ADVERSARY_FLOOR, 'a.mjs']]),
+    numstatMatchesFiles: false,
+    diff: '',
+  });
+  assert.equal(lane(deletions, 'adversary').run, true);
+  assert.match(lane(deletions, 'adversary').reason, /deleted/i);
+
+  const hidden = planReview({
+    files: ['a.mjs', 'b.mjs'],
+    numstat: '-\t-\tpayload.xyz\n',
+    numstatMatchesFiles: false,
+    diff: '',
+  });
+  assert.equal(hidden.size.bucket, 'large');
+  assert.equal(lane(hidden, 'adversary').run, true);
+});
+
 // --- planReview: pins ------------------------------------------------------------
 
 test('a matched pin forces every lane on, whatever the size', () => {

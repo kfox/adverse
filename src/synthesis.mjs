@@ -62,10 +62,14 @@ export function worseVerdict(a, b) {
 // Union a split lane's two payloads: findings concatenate, the worse verdict
 // wins, and BOTH summaries survive — a verdict from one half rendered beside
 // the other half's summary reads as one reviewer's position, and is not.
-// Each half is bounded BEFORE the join: the renderer clips a summary cell at
-// 300 characters, and a long first half would otherwise amputate the second
-// half entirely, losing exactly the voice the merge exists to keep.
-const MERGED_SUMMARY_PART_MAX = 148;
+// Each half is bounded BEFORE the join, at the per-reviewer contract limit
+// (prompts.mjs promises "<= 200 chars"), so a half that honors the contract
+// loses nothing in the persisted payload — this merge feeds round1.json and
+// the triage briefing, not just a report cell — while a runaway half cannot
+// amputate the other, which is exactly the voice the merge exists to keep.
+// The summary cell cap below is derived from this bound for the same reason.
+const MERGED_SUMMARY_PART_MAX = 200;
+const SUMMARY_CELL_MAX = 2 * MERGED_SUMMARY_PART_MAX + ' · '.length;
 export function mergeSplitReviews(a, b) {
   const part = (s) => String(s ?? '').slice(0, MERGED_SUMMARY_PART_MAX);
   return {
@@ -243,7 +247,7 @@ export function synthesize(round1, round2 = {},
     // the same rule: an off-contract verdict scores as reject, never as a
     // neutral string that can dilute a real rejection out of the banner.
     verdicts[p] = normalizeVerdict(r?.verdict);
-    summaries[p] = String(r?.summary ?? '').slice(0, 300);
+    summaries[p] = String(r?.summary ?? '').slice(0, SUMMARY_CELL_MAX);
   }
   const verdictList = Object.values(verdicts);
   const score =

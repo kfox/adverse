@@ -179,7 +179,8 @@ rounds and iteration cap. The rules and their rationale live in
 - The Auditor and the Steward always run. The Adversary runs unless the
   trust-boundary gate (src/scope.mjs, which `plan.mjs` runs for it) says it
   has nothing to look at — and it is forced on regardless when the diff holds
-  unmeasurable content or heavy deletions, which the gate cannot scan. The
+  unmeasurable content (which the gate cannot scan) or heavy deletions (a
+  bulk removal can take a guard with it without matching any signal). The
   Pragmatist is skipped on a small diff: everything it reports is advisory, so
   the skip costs a backlog item and one potential second round-1 reporter (the
   duplicate that would promote a solo finding to cross-validated) — never a
@@ -188,6 +189,8 @@ rounds and iteration cap. The rules and their rationale live in
 - On a large diff the Auditor and the Adversary each get **two agents**,
   partitioned by file (Phase 2): a large diff exhausts one reviewer's
   attention budget, the documented cause of deterministic lane failures.
+  A lane is never split more ways than it has files to partition, so a
+  one-file large diff stays one agent.
 - Rounds and the cap start at 2 and 3 and are re-decided after round 1
   (Phase 4).
 

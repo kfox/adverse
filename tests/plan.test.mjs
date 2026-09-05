@@ -150,6 +150,24 @@ test('a supplied --files list survives a failed git read', () => {
   }
 });
 
+test('an unreadable diff forces the adversary with the truthful unread reason', () => {
+  // No pin here: a pin would win the reason string. '' in place of null was
+  // the fail-open the diff:null contract exists to close, and plan.mjs is the
+  // only production caller that can produce it.
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-nogit2-'));
+  try {
+    const list = path.join(dir, 'files.txt');
+    writeFileSync(list, 'src/render/palette.mjs\n');
+    const r = runPlan(['--repo', dir, '--files', list, '--json'], dir);
+    assert.equal(r.status, 0, r.stderr);
+    const adv = JSON.parse(r.stdout).lanes.find((l) => l.persona === 'adversary');
+    assert.equal(adv.run, true);
+    assert.match(adv.reason, /could not be read/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a --base that looks like a git option is refused', () => {
   const r = runPlan(['--repo', ROOT, '--base=--output=/tmp/x']);
   assert.equal(r.status, 2);
@@ -224,8 +242,10 @@ test('a supplied --files list is never sized by an unrelated numstat — unmeasu
 test('a sub-floor guard deletion still runs the adversary — removed lines are signal-scanned', () => {
   // 79 deleted lines of permission checks: below DELETED_LINES_ADVERSARY_FLOOR,
   // neutral path, nothing added — the near-miss that reproduced after the
-  // first fix. The signal now comes from the removed lines themselves.
-  const guards = Array.from({ length: 79 }, (_, i) => `if (!u.permission[${i}]) throw new Error(${i});`).join('\n') + '\n';
+  // first fix. `u.perm`, not `u.permission`: the panel caught this fixture
+  // having been rewritten to fit the vocabulary list, so it pins the SHAPE
+  // scan (a negated-condition guard), which no CONTENT_SIGNALS entry matches.
+  const guards = Array.from({ length: 79 }, (_, i) => `if (!u.perm[${i}]) throw new Error(${i});`).join('\n') + '\n';
   const dir = repoWith({
     base: { 'widget.js': guards + 'const keep = 1;\n' },
     change: { 'widget.js': 'const keep = 1;\n' },
@@ -234,6 +254,49 @@ test('a sub-floor guard deletion still runs the adversary — removed lines are 
     const r = runPlan(['--repo', dir, '--base', 'main']);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /adversary\s+run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--files does not surrender the forcing signals: hidden content still lands large', () => {
+  // The F10 fix suppressed the numstat read under --files, which quietly
+  // discarded the unscannable and deleted-lines forces — one flag away from
+  // the documented flow, which builds files.txt from the very same range.
+  const dir = repoWith({
+    base: { 'palette.mjs': lines(3, 'p') },
+    change: {
+      '.gitattributes': '*.xyz -diff\n',
+      'payload.xyz': lines(400, 'x'),
+    },
+  });
+  try {
+    const list = path.join(dir, 'files.txt');
+    writeFileSync(list, '.gitattributes\npayload.xyz\n');
+    const r = runPlan(['--repo', dir, '--base', 'main', '--files', list]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^size: large /);
+    assert.match(r.stdout, /unmeasurable/);
+    assert.match(r.stdout, /adversary\s+run\s+2 agents/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--files does not surrender the deletion floor', () => {
+  // Innocuous deleted lines — no guard shape — so only the numstat floor can
+  // force the lane, which pins the numstat read surviving --files.
+  const dir = repoWith({
+    base: { 'gate.mjs': lines(200, 'g'), 'keep.mjs': 'const k = 1;\n' },
+    change: { 'gate.mjs': null },
+  });
+  try {
+    const list = path.join(dir, 'files.txt');
+    writeFileSync(list, 'gate.mjs\n');
+    const r = runPlan(['--repo', dir, '--base', 'main', '--files', list]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /adversary\s+run/);
+    assert.match(r.stdout, /deleted/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -411,12 +411,29 @@ test('synthesize itself normalizes an off-contract verdict — the rule is not b
   assert.match(syn.consensusLabel, /HOLD|BLOCK/);
 });
 
-test('a merged summary bounds each half before the join, so the render clip cannot amputate half B', () => {
-  const longA = 'A'.repeat(258);
+test('a merged summary bounds each half at the reviewer contract limit, and the render cell fits the join', () => {
+  // The bound is prompts.mjs's "<= 200 chars" per-reviewer contract, because
+  // this merge feeds round1.json and the triage briefing, not just a report
+  // cell: a half that honors the contract must survive byte-for-byte in the
+  // persisted payload.
+  const contractA = 'A'.repeat(200);
   const merged = mergeSplitReviews(
-    { persona: 'auditor', verdict: 'approve', summary: longA, findings: [] },
+    { persona: 'auditor', verdict: 'approve', summary: contractA, findings: [] },
     { persona: 'auditor', verdict: 'reject', summary: 'half B found the injection', findings: [] },
   );
-  assert.ok(merged.summary.length <= 300);
-  assert.match(merged.summary, /half B found the injection/);
+  assert.match(merged.summary, /^A{200} · half B found the injection$/);
+
+  // A runaway half still cannot amputate the other, and the renderer's cell
+  // cap is derived from this bound, so the whole join survives rendering.
+  const runaway = mergeSplitReviews(
+    { persona: 'auditor', verdict: 'approve', summary: 'A'.repeat(1000), findings: [] },
+    { persona: 'auditor', verdict: 'reject', summary: 'B'.repeat(1000), findings: [] },
+  );
+  assert.equal(runaway.summary.length, 403);
+  assert.match(runaway.summary, /B{200}$/);
+
+  const syn = synthesize({
+    auditor: { persona: 'auditor', verdict: 'reject', summary: runaway.summary, findings: [] },
+  });
+  assert.equal(syn.summaries.auditor.length, 403);
 });
