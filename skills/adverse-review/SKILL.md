@@ -415,8 +415,13 @@ you decline. Then record every decision:
 ```bash
 node ${SKILL_DIR}/scripts/converge.mjs --ledger "$LEDGER" \
     --record "$ADVERSE_RUN"/decisions.json --report "$ADVERSE_RUN"/report.json \
-    --repo . --at "$REVIEWED"
+    --repo . --at "$REVIEWED" --base "$BASE"
 ```
+
+`--base` is optional but recommended: it is the only thing that binds the
+ledger to the branch's merge base once recorded (`checkBinding` then refuses a
+ledger whose `base` does not resolve in this repository). `decisions.json`
+carries no `base` field — see below.
 
 `--report` is not optional. It stamps each decision with the identity of the
 report it answered, which is the only thing that lets the next check tell "not

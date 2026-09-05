@@ -104,6 +104,34 @@ test('exit 3 at the iteration cap — a stop, not a pass', () => {
   assert.equal(r.status, 3, `expected the cap, got ${r.status}: ${r.stderr}`);
 });
 
+// --- base is recorded from --base, not from decisions.json -----------------
+
+test('--record --base populates ledger.base', () => {
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{ ...blockingFinding(), disposition: 'fixed', reason: 'patched' }],
+  });
+  const r = run(
+    ['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed, '--base', reviewed],
+    repo,
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(readFileSync(ledger, 'utf-8')).base, reviewed);
+});
+
+test('decisions.json has no documented `base` field, so one there is ignored', () => {
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    base: 'not-a-real-ref',
+    decisions: [{ ...blockingFinding(), disposition: 'fixed', reason: 'patched' }],
+  });
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(readFileSync(ledger, 'utf-8')).base, null);
+});
+
 test('exit 2 on a usage error', () => {
   const { repo } = repoWithTwoCommits();
   assert.equal(run([], repo).status, 2);
