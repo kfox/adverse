@@ -8,7 +8,7 @@ Token usage: 1234
   "findings": [
     {
       "severity": "critical",
-      "file": "auth.py",
+      "kind": "behavioral", "file": "auth.py",
       "line": 18,
       "title": "SQL injection via string concatenation",
       "detail": "check_user concatenates name into the WHERE clause.",

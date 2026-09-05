@@ -19,16 +19,21 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-const { values } = parseArgs({
+// Positionals are round-2 files, so `--round2 run/round2-*.json` works. Same
+// reason as triage.mjs: strict parsing without this throws on the second path
+// the shell expands, and the glob is the obvious thing to type.
+const { values, positionals } = parseArgs({
   options: {
     briefing: { type: 'string' },
     round2:   { type: 'string', multiple: true },
     outdir:   { type: 'string' },
   },
   strict: true,
+  allowPositionals: true,
 });
 
-if (!values.briefing || !values.round2 || !values.outdir) {
+values.round2 = [...(values.round2 ?? []), ...positionals];
+if (!values.briefing || !values.round2.length || !values.outdir) {
   process.stderr.write('Usage: repair.mjs --briefing <briefing.json> --round2 a.json [--round2 b.json …] --outdir <dir>\n');
   process.exit(2);
 }

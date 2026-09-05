@@ -1,8 +1,8 @@
 # Adversarial Code Review — Round 1: Independent Review
 
-Two other reviewers, each with a different lens, are reviewing this code in parallel.
-You will NOT see their work in this round. Concentrate on what your lens uniquely
-catches and trust the others to cover their own ground.
+The other reviewers, each with a different lens, are reviewing this code in
+parallel. You will NOT see their work in this round. Concentrate on what your
+lens uniquely catches and trust the others to cover their own ground.
 
 ## Output schema
 
@@ -17,12 +17,14 @@ Any extra text outside the JSON causes you to be dropped from the consensus.
   "summary":   "<one sentence, <= 200 chars>",
   "findings": [
     {
-      "severity": "critical" | "warning" | "info",
-      "file":     "<repo-relative path, or null if not file-bound>",
-      "line":     <integer or null>,
-      "title":    "<short noun phrase, <= 80 chars>",
-      "detail":   "<2-6 sentences explaining the mechanism and impact>",
-      "fix":      "<concrete remediation, or null if you don't have one>"
+      "severity":    "critical" | "warning" | "info",
+      "kind":        "defect" | "behavioral" | "contract" | "design",
+      "file":        "<repo-relative path, or null if not file-bound>",
+      "line":        <integer or null>,
+      "counterpart": "<path this code contradicts (kind=contract), else null>",
+      "title":       "<short noun phrase, <= 80 chars>",
+      "detail":      "<2-6 sentences explaining the mechanism and impact>",
+      "fix":         "<concrete remediation, or null if you don't have one>"
     }
   ]
 }
@@ -35,12 +37,37 @@ Any extra text outside the JSON causes you to be dropped from the consensus.
 - `reject` — there is at least one `critical` finding in your lane, or the design is
   wrong enough that fixing the surface findings will not be sufficient.
 
+`kind` — what kind of claim this is. This selects how the finding gets
+verified and whether it can block the change, so choose it honestly rather
+than for emphasis:
+
+- `defect`     — the code is wrong as written. Settled by reading the cited
+                 line. Requires `file` AND `line`.
+- `behavioral` — the code is wrong when it runs: a race, an error path,
+                 resource lifetime, a real branch that no test covers. Settled
+                 by executing it or by an argument about execution, not by
+                 reading a single line. Requires `file`; `line` where one
+                 applies.
+- `contract`   — the code contradicts something that states what it does: a
+                 docstring, an architecture note, a schema, a changelog, a
+                 config default, a documented project rule. Requires `file`
+                 (the code) AND `counterpart` (the path that disagrees).
+- `design`     — structure, coupling, complexity, API shape, naming.
+                 ADVISORY: recorded and ranked, but it never blocks the change.
+
+If the only evidence you can offer is "this should have been done differently",
+it is `design`. If you cannot name the file the code disagrees with, it is not
+`contract`.
+
 `findings`:
 - Empty list `[]` is valid — emit it when your lens finds nothing.
 - Otherwise: 1 to 10 items, sorted by severity (critical → warning → info).
 - Every finding must be specific. Speculative concerns ("could have edge cases") are
   out. Concrete mechanisms ("returns NaN when input is empty because sum/len divides
   by zero on line 47") are in.
+- Anchor every finding as precisely as its kind demands. A `defect` with no line
+  and a `contract` with no counterpart are self-contradictory, get flagged as such
+  mechanically, and waste the panel's attention.
 
 ## Hard constraints
 

@@ -4,10 +4,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { renderMarkdown, synthesize, toJsonReport } from '../src/synthesis.mjs';
+import { isBlocking, renderMarkdown, synthesize, toJsonReport } from '../src/synthesis.mjs';
 
 const f = (title, severity = 'warning', file = null, line = null, detail = 'd', fix = null) =>
   ({ severity, file, line, title, detail, fix });
+
+// A finding of a given kind, for the tests that exercise the kind axis.
+const k = (title, kind, severity = 'warning', extra = {}) =>
+  ({ severity, kind, file: null, line: null, title, detail: 'd', fix: null, ...extra });
 
 const v = (verdict, findings = []) => ({ persona: 'x', verdict, summary: '', findings });
 
@@ -174,8 +178,78 @@ test('render: groups by confidence in correct order', () => {
   const out = renderMarkdown(synthesize(r1, r2));
   assert.ok(out.indexOf('Cross-validated findings') < out.indexOf('Disputed findings'),
     'cross-validated section must precede disputed');
-  assert.match(out, /\*\*\[CRITICAL\]\*\*/);
-  assert.match(out, /\*\*\[WARNING\]\*\*/);
+  assert.match(out, /\*\*\[CRITICAL·unclassified\]\*\*/);
+  assert.match(out, /\*\*\[WARNING·unclassified\]\*\*/);
+});
+
+// --- Finding kinds -----------------------------------------------------------
+
+test('kind: a finding with no kind is unclassified and still blocks', () => {
+  const s = synthesize({ auditor: v('conditional', [f('A', 'critical')]),
+                         adversary: v('reject', [f('A', 'critical')]) }, {});
+  assert.equal(s.findings[0].kind, 'unclassified');
+  assert.equal(isBlocking(s.findings[0]), true);
+  assert.deepEqual(s.openBlocking.map((x) => x.title), ['A']);
+});
+
+test('kind: design is advisory and never blocks, whatever its severity', () => {
+  const s = synthesize({ auditor: v('conditional', [k('Layering', 'design', 'critical')]),
+                         adversary: v('reject', [k('Layering', 'design', 'critical')]) }, {});
+  assert.equal(s.findings[0].confidence, 'cross-validated');
+  assert.equal(isBlocking(s.findings[0]), false);
+  assert.deepEqual(s.openBlocking, []);
+});
+
+test('kind: info never blocks even when it is a defect', () => {
+  const s = synthesize({ auditor: v('approve', [k('Nit', 'defect', 'info')]),
+                         adversary: v('approve', [k('Nit', 'defect', 'info')]) }, {});
+  assert.equal(isBlocking(s.findings[0]), false);
+});
+
+test('kind: solo findings stay out of openBlocking', () => {
+  const s = synthesize({ auditor: v('conditional', [k('Alone', 'defect', 'critical')]) }, {});
+  assert.equal(s.findings[0].confidence, 'solo');
+  assert.deepEqual(s.openBlocking, []);
+});
+
+test('kind: a disputed finding is not open — it needs adjudication, not a gate', () => {
+  const r1 = { auditor: v('conditional', [k('Contested', 'defect', 'critical')]) };
+  const r2 = { adversary: { persona: 'adversary', validate: [],
+    challenge: [{ from: 'auditor', title: 'Contested', reason: 'misread' }], added: [] } };
+  const s = synthesize(r1, r2);
+  assert.equal(s.findings[0].confidence, 'disputed');
+  assert.deepEqual(s.openBlocking, []);
+});
+
+test('kind: merging two reporters keeps the blocking kind over the advisory one', () => {
+  const s = synthesize({ auditor: v('conditional', [k('Same', 'design', 'warning')]),
+                         adversary: v('reject', [k('Same', 'defect', 'warning')]) }, {});
+  assert.equal(s.findings.length, 1);
+  assert.equal(s.findings[0].kind, 'defect');
+  assert.equal(s.openBlocking.length, 1);
+});
+
+test('kind: merging fills an unclassified kind from the reporter that gave one', () => {
+  const s = synthesize({ auditor: v('conditional', [f('Same', 'warning')]),
+                         adversary: v('reject', [k('Same', 'contract', 'warning')]) }, {});
+  assert.equal(s.findings[0].kind, 'contract');
+});
+
+test('render: design findings go under the advisory heading, not a confidence one', () => {
+  const r1 = { auditor: v('conditional', [k('Shape', 'design', 'critical')]),
+               adversary: v('reject', [k('Shape', 'design', 'critical')]) };
+  const out = renderMarkdown(synthesize(r1, {}));
+  assert.match(out, /## Advisory \(design — recorded, never blocking\)/);
+  assert.ok(!out.includes('Cross-validated findings'),
+    'an advisory-only run has no blocking confidence section');
+  assert.match(out, /\*\*Open blocking:\*\* 0/);
+});
+
+test('render: a contract finding shows the path it contradicts', () => {
+  const r1 = { auditor: v('conditional',
+    [k('Docs drift', 'contract', 'warning', { file: 'a.py', counterpart: 'docs/a.md' })]) };
+  const out = renderMarkdown(synthesize(r1, {}));
+  assert.match(out, /_Contradicts:_ `docs\/a\.md`/);
 });
 
 test('render: degraded warning appears', () => {
@@ -197,8 +271,71 @@ test('toJsonReport is structurally complete', () => {
   const s = synthesize(r1, {});
   const json = toJsonReport(s);
   assert.equal(typeof json.consensus_label, 'string');
+  assert.ok(Array.isArray(json.open_blocking));
+  assert.equal(json.findings[0].kind, 'unclassified');
+  assert.equal(typeof json.findings[0].blocking, 'boolean');
   assert.equal(typeof json.consensus_score, 'number');
   assert.deepEqual(Object.keys(json.verdicts), ['auditor']);
   assert.equal(json.findings[0].confidence, 'solo');
   assert.equal(json.findings[0].title, 'B');
+});
+
+test('a skipped lane is named in the report, distinctly from a failed one', () => {
+  const r1 = { auditor: v('approve') };
+  const out = renderMarkdown(synthesize(r1, {}, {
+    skippedPersonas: [{ persona: 'adversary', reason: 'no trust boundary in the diff' }],
+  }));
+  assert.match(out, /Lane not run:\*\* adversary — no trust boundary in the diff/);
+  assert.match(out, /Nothing below reflects that perspective/);
+  assert.ok(!out.includes('Degraded run'), 'skipped is not the same as failed');
+});
+
+test('skipped lanes reach the JSON report', () => {
+  const json = toJsonReport(synthesize({ auditor: v('approve') }, {}, {
+    skippedPersonas: [{ persona: 'adversary', reason: 'r' }],
+  }));
+  assert.deepEqual(json.skipped, [{ persona: 'adversary', reason: 'r' }]);
+});
+
+// --- the stop condition's producer side --------------------------------------
+// Every test of the `unexamined` gate lives on the consumer side and hand-builds
+// a report object, so replacing this expression with a literal `true` left the
+// whole suite green — and that mutation is exactly the false convergence the
+// gate exists to prevent.
+
+test('cross_examined is false per finding until someone goes on record about it', () => {
+  const round1 = {
+    auditor: { persona: 'auditor', verdict: 'reject', summary: '', findings: [
+      { severity: 'critical', kind: 'defect', file: 'a.js', line: 1, title: 'boom', detail: 'd' }] },
+  };
+  const soloReport = toJsonReport(synthesize(round1));
+  assert.equal(soloReport.cross_examined, false, 'round-1 only: nothing was cross-examined');
+  assert.equal(soloReport.findings[0].cross_examined, false);
+
+  const round2 = { steward: { persona: 'steward',
+    validate: [{ from: 'auditor', title: 'boom', reason: 'confirmed' }], challenge: [], added: [] } };
+  const examined = toJsonReport(synthesize(round1, round2));
+  assert.equal(examined.cross_examined, true);
+  assert.equal(examined.findings[0].cross_examined, true);
+});
+
+test("a round-2 reviewer's own added finding is not cross-examined", () => {
+  // This is the shape that leaked: surfacing what round 1 missed is the whole
+  // point of a cross-review, so an added finding has no validators by
+  // construction — it is `solo`, and the confidence gate drops it. A
+  // report-wide flag reads `true` here because of the OTHER finding's edge.
+  const round1 = {
+    auditor: { persona: 'auditor', verdict: 'approve', summary: '', findings: [
+      { severity: 'info', kind: 'design', file: 'a.js', line: 1, title: 'nit', detail: 'd' }] },
+  };
+  const round2 = { steward: { persona: 'steward',
+    validate: [{ from: 'auditor', title: 'nit', reason: 'agreed' }], challenge: [],
+    added: [{ severity: 'critical', kind: 'defect', file: 'auth.js', line: 42,
+              title: 'Auth bypass', detail: 'd', fix: 'f' }] } };
+
+  const rep = toJsonReport(synthesize(round1, round2));
+  assert.equal(rep.cross_examined, true, 'the report-wide flag is satisfied by the nit');
+  const crit = rep.findings.find((f) => f.severity === 'critical');
+  assert.equal(crit.blocking, true);
+  assert.equal(crit.cross_examined, false, 'but nobody went on record about the critical');
 });
