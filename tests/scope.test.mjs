@@ -64,6 +64,8 @@ test('a removed guard runs the lane on SHAPE, not vocabulary — the attacker pi
     'if not user.can_edit(doc):',
     '    raise Nope()',
     'if !ok { return errNo }',
+    'return unless user.can_edit?(doc)',
+    'guard user.canEdit(doc) else { throw Nope() }',
   ]) {
     const r = assessScope({ files: ['src/render/widget.js'], diff: removedDiff(line) });
     assert.equal(r.recommend, 'run', line);
