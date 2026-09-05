@@ -42,6 +42,17 @@ const MATCH_WINDOW_LINES = 5;
 // The weakest match that may settle a finding. Below it, annotate only.
 const SETTLING_SCORE = 2;
 
+// Longest ledger `reason` copied into a briefing. The ledger is a JSON file on
+// disk, and its text is rendered into the round-2 prompt, so it is a channel
+// for whoever can write that file. Clipping bounds the payload; labeling it in
+// the briefing is what tells a reviewer it is data, not instruction.
+const MAX_REASON_CHARS = 500;
+
+function clipReason(text) {
+  const flat = String(text ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ');
+  return flat.length > MAX_REASON_CHARS ? `${flat.slice(0, MAX_REASON_CHARS)}… [clipped]` : flat;
+}
+
 export const DISPOSITIONS = Object.freeze(['fixed', 'declined', 'deferred']);
 const SETTLED = new Set(['declined', 'deferred']);
 
@@ -68,6 +79,26 @@ export function loadLedger(file) {
   raw.entries ??= [];
   raw.iterations ??= [];
   return raw;
+}
+
+// Refuse a ledger that does not belong to this repository.
+//
+// `loadLedger` checks only `version`, so a ledger naming another repo entirely
+// loaded fine and its entries adjudicated findings they had never seen. Commits
+// are the one field that cannot be faked across repositories: if `base` or an
+// entry's `atCommit` does not resolve here, this ledger is not about this tree.
+// `resolve` is injected rather than imported so this module stays pure.
+export function checkBinding(ledger, resolve) {
+  const problems = [];
+  if (ledger.base && !resolve(ledger.base)) {
+    problems.push(`base ${ledger.base} is not a commit in this repository`);
+  }
+  for (const e of ledger.entries ?? []) {
+    if (e.atCommit && !resolve(e.atCommit)) {
+      problems.push(`entry ${JSON.stringify(e.title)} is anchored at ${e.atCommit}, which is not a commit in this repository`);
+    }
+  }
+  return problems;
 }
 
 export function saveLedger(file, ledger) {
@@ -101,11 +132,21 @@ export function scoreMatch(entry, finding, traced = null) {
   const entryFile = traced?.file ?? entry.file;
   if (!entryFile || !finding.file || entryFile !== finding.file) return null;
 
+  const entryLineFor = (t, e) => t?.line ?? e.line;
+
   if (entry.kind === 'contract') {
-    if (entry.counterpart && entry.counterpart === finding.counterpart) {
-      return { score: 2, why: `same code/counterpart pair (${entryFile} vs ${entry.counterpart})` };
+    if (!entry.counterpart || entry.counterpart !== finding.counterpart) return null;
+    // A code/counterpart pair with no line is file-wide, exactly the shape
+    // SETTLING_SCORE exists to refuse. It used to score 2 here — one planted
+    // entry settled every contract finding in a file, and the loop reported
+    // itself converged. It annotates; only an anchor that lines up settles.
+    const cl = entryLineFor(traced, entry);
+    if (cl === null || cl === undefined || finding.line === null || finding.line === undefined) {
+      return { score: 1, why: `same code/counterpart pair (${entryFile} vs ${entry.counterpart}), but no line on one side` };
     }
-    return null;
+    const cdrift = Math.abs(cl - finding.line);
+    if (cdrift > MATCH_WINDOW_LINES) return null;
+    return { score: 2, why: `same code/counterpart pair at ${entryFile}:${cl} (drift ${cdrift})` };
   }
 
   // An advisory kind never blocks, so a positional match buys nothing and a
@@ -157,7 +198,8 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
       adjudicated: {
         matchedId: m.entry.id ?? null,
         disposition: m.entry.disposition,
-        reason: m.entry.reason ?? null,
+        reason: m.entry.reason ? clipReason(m.entry.reason) : null,
+        reasonIsUntrusted: true,
         iteration: m.entry.iteration ?? null,
         atCommit: m.entry.atCommit ?? null,
         matchedBy: m.why,
@@ -238,7 +280,12 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
   // the loop trusts most would be noise by construction.
   const regressed = annotated.filter((f) => f.adjudicated && !f.adjudicated.settled
     && !f.adjudicated.sameReport);
-  const unverified = annotated.filter((f) => f.adjudicated?.sameReport);
+  // Mirror the `regressed` conjunct. Without `!settled`, a `declined` entry
+  // recorded against this report landed in BOTH buckets, and the unverified
+  // heading ("recorded fixed … verify these") is false for a decision that was
+  // never a fix and that the ledger's own doctrine says not to re-open.
+  const unverified = annotated.filter((f) => f.adjudicated?.sameReport
+    && !f.adjudicated.settled);
   const remaining = annotated.filter((f) => !f.adjudicated?.settled);
 
   const iteration = (ledger.iterations ?? []).length + 1;

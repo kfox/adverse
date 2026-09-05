@@ -122,3 +122,25 @@ test('the SQL signal still fires on a real query', () => {
   const r = assessScope({ files: ['db.js'], diff });
   assert.equal(r.recommend, 'run');
 });
+
+test('a sink past column 2000 is still found', () => {
+  // The ReDoS fix briefly truncated each scanned line at 2,000 characters,
+  // which recreated exactly the false-negative class the `++` fix had just
+  // closed: a minified or bundled line is where a payload would sit, and this
+  // module's bias is one-directional on purpose — a false positive costs two
+  // model calls, a false negative ships a vulnerability nobody looked for.
+  const line = 'x'.repeat(3000) + ' child_process.exec(userInput)';
+  const diff = `--- a/b.js\n+++ b/b.js\n@@ -1 +1 @@\n+${line}\n`;
+  const r = assessScope({ files: ['b.js'], diff });
+  assert.equal(r.recommend, 'run');
+  assert.ok(r.evidence.length > 0);
+  assert.ok(r.evidence[0].sample.length <= 130, 'the recorded sample is still clipped');
+});
+
+test('scanning a very long line is still fast', () => {
+  // Cost control belongs in the patterns, not in dropping input.
+  const diff = `--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n+SELECT${' '.repeat(200000)}\n`;
+  const started = Date.now();
+  assessScope({ files: ['x.js'], diff });
+  assert.ok(Date.now() - started < 1000, 'a 200k-character line must not stall the scan');
+});

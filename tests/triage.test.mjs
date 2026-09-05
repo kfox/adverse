@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -264,4 +264,73 @@ test('with no ledger, nothing is adjudicated', () => {
 test('a ledger from a future version fails the run rather than being ignored', () => {
   assert.throws(() => runTriageWithLedger(repo, [review('auditor', [finding()])],
     { version: 99, entries: [] }), /status 1|Command failed/);
+});
+
+// --- the invocation the documentation actually tells you to type -------------
+// F12 happened because SKILL.md documented `--round1 run/round1-*.json` while
+// every test built args with a repeated `--round1` flag. The documented form
+// and the tested form were different, so the break was invisible: the shell
+// expands the glob, the extra paths arrive as positionals, and strict parseArgs
+// aborts. Reverting `allowPositionals` must fail a test, not pass 263 of them.
+
+test('round-1 paths given as positionals are read, like the documented glob', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-glob-'));
+  const files = [
+    review('auditor', [finding({ title: 'a' })]),
+    review('adversary', [finding({ title: 'b' })]),
+    review('steward', [finding({ title: 'c', kind: 'contract', counterpart: 'docs/app.md' })]),
+  ].map((r, i) => {
+    const p = path.join(dir, `round1-${i}.json`);
+    writeFileSync(p, JSON.stringify(r), 'utf-8');
+    return p;
+  });
+  const out = path.join(dir, 'briefing.json');
+
+  // Exactly what `--round1 "$RUN"/round1-*.json` becomes after the shell:
+  // one flag, then bare paths.
+  const args = [TRIAGE, '--round1', files[0], files[1], files[2],
+                '--repo', repo, '--base', 'base', '--out', out];
+  execFileSync(process.execPath, args, { encoding: 'utf-8' });
+
+  const briefing = JSON.parse(readFileSync(out, 'utf-8'));
+  assert.equal(briefing.findings.length, 3, 'every globbed file must be read, not just the first');
+  assert.deepEqual(briefing.findings.map((f) => f.reporter), ['auditor', 'adversary', 'steward']);
+});
+
+test('a path escaping the checkout is disproved, not read', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-escape-'));
+  const secret = path.join(dir, 'secret.txt');
+  writeFileSync(secret, 'SENTINEL-DO-NOT-EXFILTRATE\n', 'utf-8');
+
+  const rel = path.relative(repo, secret);
+  const { briefing } = runTriage(repo, [review('auditor', [finding({ file: rel, line: 1 })])]);
+  assert.equal(briefing.findings[0].claimCheck.status, 'DISPROVED');
+  assert.match(briefing.findings[0].claimCheck.why, /escapes the checkout/);
+  assert.ok(!JSON.stringify(briefing).includes('SENTINEL'), 'no out-of-tree content may reach the briefing');
+});
+
+test('an in-tree symlink pointing out of the tree is disproved, not followed', () => {
+  // path.resolve normalizes `..` but knows nothing about symlinks, while
+  // statSync and readFileSync both follow them — so a symlink committed inside
+  // the checkout (git stores mode 120000) kept the path under the repo prefix
+  // while the read landed wherever it pointed.
+  const outside = mkdtempSync(path.join(os.tmpdir(), 'adverse-outside-'));
+  const secret = path.join(outside, 'id_rsa');
+  writeFileSync(secret, 'line one\nSSH-SENTINEL-DO-NOT-EXFILTRATE\n', 'utf-8');
+
+  const link = path.join(repo, 'docs_link');
+  try {
+    symlinkSync(secret, link);
+  } catch {
+    return; // no symlink support; nothing to assert
+  }
+
+  const { briefing } = runTriage(repo, [review('auditor', [
+    finding({ file: 'docs_link', line: 2, kind: 'contract', counterpart: 'docs/app.md' }),
+  ])]);
+  unlinkSync(link);
+
+  assert.equal(briefing.findings[0].claimCheck.status, 'DISPROVED');
+  assert.ok(!JSON.stringify(briefing).includes('SSH-SENTINEL'),
+    'the symlink target must never reach the briefing, which becomes the round-2 prompt');
 });

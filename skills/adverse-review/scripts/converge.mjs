@@ -19,9 +19,9 @@ import { readFileSync } from 'node:fs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
-  convergenceStatus, emptyLedger, loadLedger, recordDecisions, saveLedger,
+  checkBinding, convergenceStatus, emptyLedger, loadLedger, recordDecisions, saveLedger,
 } = await importFromSrc('ledger.mjs');
-const { traceAnchor } = await importFromSrc('trace.mjs');
+const { resolveRef, traceAnchor } = await importFromSrc('trace.mjs');
 
 const { values } = parseArgs({
   options: {
@@ -73,6 +73,16 @@ try {
   ledger = loadLedger(values.ledger);
 } catch (e) {
   process.stderr.write(`converge: ${e.message}\n`);
+  process.exit(2);
+}
+
+// A ledger naming another repository used to load and adjudicate findings it
+// had never seen — loadLedger checks only `version`. Commits cannot be faked
+// across repositories, so they are the binding.
+const bindingProblems = checkBinding(ledger, (ref) => resolveRef(repo, ref));
+if (bindingProblems.length) {
+  process.stderr.write(`converge: this ledger does not belong to this repository:\n`
+    + bindingProblems.map((p) => `  - ${p}\n`).join(''));
   process.exit(2);
 }
 

@@ -1,9 +1,14 @@
-// Deterministic synthesis: turn 4 round-1 reviews + 3 round-2 cross-reviews
-// into a single ranked report.
+// Deterministic synthesis: turn a set of round-1 reviews and a set of round-2
+// cross-reviews into a single ranked report.
 //
-// 4 and 3, not 4 and 4: the Pragmatist reports only advisory findings, and
-// cross-validation exists to decide what BLOCKS, so there is nothing for it to
-// cross-review. Its skipped round 2 is what pays for the Steward's round 1.
+// Deliberately no fixed counts here, because the two callers differ and a
+// number written down in this header has now been wrong twice. `src/cli.mjs`
+// builds round 2 from every persona that produced a round-1 review, so it runs
+// four and four. The Skill (`skills/adverse-review/SKILL.md`) skips the
+// Pragmatist in round 2 — cross-validation exists to decide what BLOCKS and
+// nothing advisory can, so its skipped call pays for the Steward's round 1 —
+// and runs four and three. Synthesis does not care: it reads whatever reviews
+// it is given and treats a missing round 2 as an empty cross-review.
 //
 // Why deterministic (not another LLM call): a fourth model invocation costs
 // more, adds another failure mode, and would itself be subject to the same

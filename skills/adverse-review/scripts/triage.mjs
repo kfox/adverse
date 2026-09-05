@@ -36,7 +36,7 @@
 // verdict.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
@@ -118,10 +118,32 @@ function lineCount(abs) {
 // so an unchecked join is a read-anything primitive with an exfiltration path
 // attached. `path.join` normalizes `..` away rather than rejecting it, which is
 // why the check has to be on the resolved result.
+// Note `realpathSync`, not just `resolve`. `path.resolve` normalizes `..` but
+// knows nothing about symlinks, while `existsSync`/`statSync`/`readFileSync`
+// all follow them — so a symlink committed inside the checkout (git stores
+// mode 120000) kept the path under the repo prefix while the read landed
+// wherever it pointed. That is the same exfiltration channel this function was
+// written to close, reached by a path the string check could not see.
+const repoReal = (() => {
+  try {
+    return realpathSync(repo);
+  } catch {
+    return repo;
+  }
+})();
+
 function insideRepo(file) {
   const abs = path.resolve(repo, file);
   if (abs !== repo && !abs.startsWith(repo + path.sep)) return null;
-  return abs;
+
+  let real;
+  try {
+    real = realpathSync(abs);
+  } catch {
+    return abs; // does not exist yet; the caller's existsSync check rejects it
+  }
+  if (real !== repoReal && !real.startsWith(repoReal + path.sep)) return null;
+  return real;
 }
 
 function checkClaim(file, line) {

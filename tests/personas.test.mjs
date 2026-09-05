@@ -1,11 +1,15 @@
 // Tests for the persona set as a SET, not as four independent prompts.
 //
-// The design rests on one invariant: every `kind` is owned, and no two
-// personas own the same ground. Nothing at runtime enforces that — two
-// personas who both think documentation drift is theirs will each report it,
-// and synthesis will read two independent reports of one issue as
+// The design rests on one invariant: every `kind` is owned by someone. Kinds
+// are deliberately SHARED — `defect` by the Auditor and the Adversary,
+// `behavioral` by three — so what keeps a shared kind from producing duplicate
+// findings is not the kind but the EVIDENCE each lane must bring, enforced by
+// the exclusion lists in each system prompt. Nothing at runtime checks any of
+// it: two personas who both think documentation drift is theirs will each
+// report it, and synthesis will read two independent reports of one issue as
 // cross-validated consensus. That is the strongest signal the panel produces
-// and the easiest to counterfeit, so the partition is checked here instead.
+// and the easiest to counterfeit, so the map is pinned here instead —
+// src/personas.mjs sends a maintainer to OWNERSHIP below to change it.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

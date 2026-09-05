@@ -66,20 +66,23 @@ const CONTENT_SIGNALS = [
   /authenticat/i, /authoriz/i, /permission/i, /sanitiz/i, /credential/i,
 ];
 
-// Longest line handed to the signal regexes. A minified bundle or a base64
-// blob in a diff is not something a signal can say anything useful about, and
-// scanning it is where any remaining super-linear regex would be felt. The
-// second guard behind the SQL rewrite above, not a substitute for it.
-const MAX_SCAN_LINE = 2000;
-
 // Lines a unified diff adds. The `+++ b/path` header is not an added line —
 // but `+++i;` IS, and matching the bare `+++` prefix silently dropped every
 // added line starting with `++`, which is exactly what an attacker would
 // indent their payload with. The header always has the trailing space.
+//
+// The whole line is scanned. An earlier version truncated here at 2,000
+// characters, which quietly recreated the same class of false negative it was
+// added alongside: a dangerous sink past column 2,000 of a minified or bundled
+// line — precisely where a payload would sit — was never shown to the Adversary
+// lane. This module's bias is one-directional on purpose (a false positive
+// costs two model calls; a false negative ships a vulnerability nobody looked
+// for), so cost control belongs in the patterns, not in dropping input. The SQL
+// signal, the one that was actually super-linear, is bounded by shape now.
 function addedLines(diffText) {
   return String(diffText).split('\n')
     .filter((l) => l.startsWith('+') && !l.startsWith('+++ '))
-    .map((l) => l.slice(1, 1 + MAX_SCAN_LINE));
+    .map((l) => l.slice(1));
 }
 
 export function assessScope({ files = [], diff = '' } = {}) {

@@ -350,8 +350,18 @@ you decline. Then record every decision:
 
 ```bash
 node ${SKILL_DIR}/scripts/converge.mjs --ledger "$LEDGER" \
-    --record "$ADVERSE_RUN"/decisions.json --repo . --at "$REVIEWED"
+    --record "$ADVERSE_RUN"/decisions.json --report "$ADVERSE_RUN"/report.json \
+    --repo . --at "$REVIEWED"
 ```
+
+`--report` is not optional. It stamps each decision with the identity of the
+report it answered, which is the only thing that lets the next check tell "not
+yet verified" from "the fix did not take". Omit it and every finding you just
+recorded `fixed` comes back flagged **REGRESSED** on the very next check —
+because it is the same report, and of course it still contains them. Phase 3
+calls a `REGRESSED` count the most important line in the run, so a playbook
+that makes it fire falsely after every fix batch destroys the one signal the
+loop trusts most.
 
 `decisions.json` is `{"decisions": [{id, title, kind, severity, file, line,
 citedLine, disposition, reason}]}` where `disposition` is `fixed`, `declined`,
