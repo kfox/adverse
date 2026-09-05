@@ -61,11 +61,21 @@ test('a removed guard runs the lane on SHAPE, not vocabulary — the attacker pi
     'assertOwner(req.user, doc);',
     'if (req.user.role !== "root") return deny();',
     'if (!ok(x)) bail(x);',
+    'if not user.can_edit(doc):',
+    '    raise Nope()',
+    'if !ok { return errNo }',
   ]) {
     const r = assessScope({ files: ['src/render/widget.js'], diff: removedDiff(line) });
     assert.equal(r.recommend, 'run', line);
     assert.equal(r.evidence[0].kind, 'content-removed', line);
   }
+});
+
+test('a removed plain comparison is not a negated guard — `!=` does not read as `!`', () => {
+  const removedDiff = (l) =>
+    ['diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1 +1 @@', `-${l}`].join('\n');
+  const r = assessScope({ files: ['src/render/widget.js'], diff: removedDiff('if (a != b) recompute(a);') });
+  assert.equal(r.recommend, 'skip', JSON.stringify(r.evidence));
 });
 
 test('the guard shapes are minus-side only — added early returns are most of ordinary code', () => {

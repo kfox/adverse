@@ -82,9 +82,13 @@ const CONTENT_SIGNALS = [
 // the pins are the backstops — but shape is what the author cannot cheaply
 // rename away.
 const REMOVED_LINE_SIGNALS = [
-  /\bif\s*\(\s*!/,
-  /\bif\s*\(.*\)\s*\{?\s*(throw|return)\b/,
-  /^\s*throw\b/,
+  // Negated-condition check, in the three mainstream spellings: `if (!x`
+  // (C family), `if !ok` (Go, no parens), `if not x` (Python). `(?!=)` keeps
+  // a plain `if (a != b)` comparison from reading as a negated guard, and the
+  // paren-required version alone missed the Python and Go guards verbatim.
+  /\bif\s*\(?\s*(!(?!=)|not\b)/,
+  /\bif\s*\(.*\)\s*\{?\s*(throw|return|raise)\b/,
+  /^\s*(throw|raise)\b/,
   /\bassert\w*\s*\(/i,
   /\b(deny|denied|forbid|forbidden|reject)/i,
   /\b40[13]\b/,

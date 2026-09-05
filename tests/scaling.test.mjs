@@ -197,6 +197,9 @@ test('a one-file large diff is not split — a lane never gets more agents than 
   assert.equal(plan.size.bucket, 'large');
   assert.equal(lane(plan, 'auditor').agents, 1);
   assert.equal(lane(plan, 'adversary').agents, 1);
+  // The prose must agree with the agents field: a reason claiming a two-agent
+  // split beside agents: 1 invites the impossible one-file partition.
+  assert.doesNotMatch(lane(plan, 'auditor').reason, /two agents/);
 });
 
 test('a mismatched numstat cannot size the list small, but its forces stay live', () => {

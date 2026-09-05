@@ -67,9 +67,9 @@ export const SMALL_MAX_CHANGED_LINES = 80;
 export const LARGE_MIN_FILES = 15;
 export const LARGE_MIN_CHANGED_LINES = 600;
 
-// Deletions carry no added line for assessScope to scan, and a deletion can
-// remove a guard as easily as an addition can add a sink — so past this many
-// deleted lines the Adversary runs regardless of what the signals say.
+// assessScope scans removed lines, but its signal lists are static and no
+// list survives a determined author — so past this many deleted lines the
+// Adversary runs regardless of what the signals say.
 export const DELETED_LINES_ADVERSARY_FLOOR = 80;
 
 export const SPLIT_AGENTS = 2;
@@ -223,15 +223,22 @@ export function planReview({ files = [], diff = '', numstat = null, numstatMatch
             + 'and a potential second reporter, never a finding that could block on its own',
       };
     }
+    // The reason branches on the COMPUTED agent count, not on the bucket, so
+    // the prose can never contradict the `agents` field: a one-file large
+    // diff caps the split at one agent, and a reason still claiming two
+    // invites the orchestrator to partition a file list that cannot be.
+    const agents = agentsFor(persona, true, size.bucket, size.fileCount);
     return {
       persona,
       run: true,
-      agents: agentsFor(persona, true, size.bucket, size.fileCount),
-      reason: size.bucket === 'large' && PER_FILE_LANES.has(persona)
+      agents,
+      reason: agents === SPLIT_AGENTS
         ? 'always runs; split across two agents because a large diff exhausts one reviewer\'s budget'
         : persona === 'steward'
           ? 'always runs, one agent — its unit of work is a claim, and partitioning files does not partition claims'
-          : 'always runs — correctness has no skippable case',
+          : size.bucket === 'large' && PER_FILE_LANES.has(persona)
+            ? 'always runs; one agent — a single changed file cannot be partitioned'
+            : 'always runs — correctness has no skippable case',
     };
   });
 
