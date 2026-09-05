@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege. Nothing here writes to the repository, comments on a PR, or
+# uploads security events — it reads the checkout and runs Node.
+permissions:
+  contents: read
+
+# Cancel a superseded run when new commits land on the same ref instead of
+# letting a stale matrix run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The matrix floor is whatever package.json's `engines.node` claims, because
+  # a claim nothing runs is a guess. `parseArgs({strict:true})` and the
+  # `node --test` runner are the two features that set that floor.
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The ledger's repository binding resolves recorded commits with
+          # `git rev-parse`, and several tests build throwaway repos and trace
+          # anchors across them. A depth-1 checkout is fine for those (they
+          # create their own history), but `fetch-depth: 0` keeps a future test
+          # that reads this repo's own history from failing mysteriously.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+      # There are no dependencies to install — this package has none, by
+      # design, so there is no `npm ci` step and nothing to cache. If that ever
+      # changes, add `npm ci` here and a lockfile to the repo.
+      - name: The suite has no dependencies to install
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "A lockfile appeared. Add 'npm ci' to this workflow." >&2
+            exit 1
+          fi
+      - run: npm test
+
+  # Syntax-checks every .mjs in the tree. This is not a style linter; it is the
+  # gate that catches a file that cannot be parsed at all — which matters more
+  # than usual here, because most modules are only ever loaded by a subprocess
+  # the orchestrating agent spawns, where a parse error surfaces as an opaque
+  # non-zero exit rather than a stack trace.
+  lint:
+    name: lint (parse every module)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: npm run lint
+
+  # package.json's `files` array decides what a `npm install adverse` actually
+  # gets. Nothing else checks it, so a new top-level directory — another
+  # `skills/` sibling, say — ships as an empty install with no error anywhere.
+  # This job fails when a tracked directory is absent from the tarball.
+  package:
+    name: package (the tarball carries the skill)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: The tarball carries bin, src, and the whole skill
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            // npm 10 (Node 20) emits an array of results; npm 11 (Node 22+)
+            // emits an object keyed by package name. The matrix spans both.
+            const raw = require("/tmp/pack.json");
+            const result = Array.isArray(raw) ? raw[0] : Object.values(raw)[0];
+            const files = result.files.map((f) => f.path);
+            const required = [
+              "bin/adverse.mjs",
+              "src/ledger.mjs",
+              "src/synthesis.mjs",
+              "skills/adverse-review/SKILL.md",
+              "skills/adverse-review/scripts/converge.mjs",
+              "LICENSE",
+            ];
+            const missing = required.filter((f) => !files.includes(f));
+            if (missing.length) {
+              console.error("Not in the published tarball:\n  " + missing.join("\n  "));
+              console.error("\nCheck package.json `files`.");
+              process.exit(1);
+            }
+            console.log(`${files.length} files in the tarball, all required paths present.`);
+          '
+
+  # One required status check, so the branch protection rule does not have to be
+  # edited every time a Node version joins or leaves the matrix. `needs` fails
+  # this job when any upstream job fails; the explicit `result` check is what
+  # catches a SKIPPED or CANCELLED upstream, which `needs` alone treats as fine.
+  ci:
+    name: ci
+    if: always()
+    needs: [test, lint, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job succeeded
+        run: |
+          results='${{ join(needs.*.result, " ") }}'
+          echo "upstream: $results"
+          for r in $results; do
+            [ "$r" = "success" ] || { echo "A required job did not succeed." >&2; exit 1; }
+          done

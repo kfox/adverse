@@ -1,0 +1,48 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # A weekly scan catches new query-pack rules against unchanged code; the
+    # push/PR runs only ever see what the diff touched. Off-peak slot.
+    - cron: "37 4 * * 2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL (javascript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: javascript-typescript
+          # security-extended over the default suite. This tool reads
+          # model-authored JSON off disk and interpolates it into prose that
+          # another model acts on, and it spawns git with values that came out
+          # of those files — so the taint queries the default suite leaves out
+          # are the ones most worth running here.
+          queries: security-extended
+
+      # JavaScript needs no build step; the autobuild action is for compiled
+      # languages and would no-op.
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: "/language:javascript"
