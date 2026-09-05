@@ -335,6 +335,31 @@ test('an in-tree symlink pointing out of the tree is disproved, not followed', (
     'the symlink target must never reach the briefing, which becomes the round-2 prompt');
 });
 
+test('a counterpart that is an in-tree symlink pointing out of the tree is disproved', () => {
+  // checkCounterpart answers the same "is this really a file in the checkout"
+  // question as claimCheck, for the second path a `contract` finding names —
+  // it must reject an escaping symlink exactly the same way.
+  const outside = mkdtempSync(path.join(os.tmpdir(), 'adverse-outside-'));
+  const secret = path.join(outside, 'id_rsa');
+  writeFileSync(secret, 'SSH-SENTINEL-DO-NOT-EXFILTRATE\n', 'utf-8');
+
+  const link = path.join(repo, 'counterpart_link');
+  try {
+    symlinkSync(secret, link);
+  } catch {
+    return; // no symlink support; nothing to assert
+  }
+
+  const { briefing } = runTriage(repo, [review('auditor', [
+    finding({ kind: 'contract', counterpart: 'counterpart_link' }),
+  ])]);
+  unlinkSync(link);
+
+  assert.equal(briefing.findings[0].counterpartCheck.status, 'DISPROVED');
+  assert.ok(!JSON.stringify(briefing).includes('SSH-SENTINEL'),
+    'the symlink target must never reach the briefing, which becomes the round-2 prompt');
+});
+
 test('a ledger that does not belong to this repository is refused', () => {
   // triage.mjs writes briefing.json, which IS the round-2 prompt, so a foreign
   // ledger accepted here marks findings settled with "Do not re-open it" in

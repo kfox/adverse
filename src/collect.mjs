@@ -1,8 +1,10 @@
 // Collect source code from a target directory or a git diff.
 
 import { execFileSync } from 'node:child_process';
-import { closeSync, fstatSync, openSync, readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+
+import { closeQuietly, openRegularFileSync } from './fsSafe.mjs';
 
 export const DEFAULT_MAX_TOTAL_CHARS = 250_000;
 export const DEFAULT_MAX_FILE_CHARS = 30_000;
@@ -93,25 +95,30 @@ export function collectDirectory(
   for (const filePath of candidates) {
     if (looksBinaryExt(filePath)) continue;
 
-    // Open once and check/read through the same descriptor rather than a
+    // Open once and check/read through the same descriptor rather than the
     // path — a stat-then-readFileSync-by-path pair leaves a window where the
-    // path could resolve to something else by the time it's read.
-    let fd;
+    // path could resolve to something else by the time it's read, and
+    // rejects a symlink outright rather than following it: `git ls-files`
+    // lists a committed symlink (mode 120000) the same as a regular file, and
+    // one pointing outside the checkout would otherwise have its target's
+    // contents read and inlined into the review block.
+    let fd = null;
     try {
-      fd = openSync(filePath, 'r');
+      fd = openRegularFileSync(filePath);
     } catch {
       continue;
     }
+    if (fd === null) continue;
+
     let text;
     try {
-      if (!fstatSync(fd).isFile()) continue;
       const buf = readFileSync(fd);
       if (hasNullByte(buf)) continue;
       text = buf.toString('utf-8');
     } catch {
       continue;
     } finally {
-      closeSync(fd);
+      closeQuietly(fd);
     }
     if (!text.trim()) continue;
     let truncated = false;

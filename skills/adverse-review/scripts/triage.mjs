@@ -36,9 +36,7 @@
 // verdict.
 
 import { execFileSync } from 'node:child_process';
-import {
-  closeSync, existsSync, fstatSync, openSync, readFileSync, realpathSync, statSync, writeFileSync,
-} from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
@@ -49,6 +47,7 @@ const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('prompts.mjs');
 const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
+const { closeQuietly, openRegularFileSync } = await importFromSrc('fsSafe.mjs');
 
 const CLUSTER_WINDOW_LINES = 15;
 
@@ -123,11 +122,12 @@ function changedRanges(file) {
 // attached. `path.join` normalizes `..` away rather than rejecting it, which is
 // why the check has to be on the resolved result.
 // Note `realpathSync`, not just `resolve`. `path.resolve` normalizes `..` but
-// knows nothing about symlinks, while `existsSync`/`statSync`/`readFileSync`
-// all follow them — so a symlink committed inside the checkout (git stores
-// mode 120000) kept the path under the repo prefix while the read landed
-// wherever it pointed. That is the same exfiltration channel this function was
-// written to close, reached by a path the string check could not see.
+// knows nothing about symlinks, while a plain existence check and a read by
+// path both follow them — so a symlink committed inside the checkout (git
+// stores mode 120000) kept the path under the repo prefix while the read
+// landed wherever it pointed. That is the same exfiltration channel this
+// function was written to close, reached by a path the string check could
+// not see.
 const repoReal = (() => {
   try {
     return realpathSync(repo);
@@ -144,7 +144,7 @@ function insideRepo(file) {
   try {
     real = realpathSync(abs);
   } catch {
-    return abs; // does not exist yet; the caller's existsSync check rejects it
+    return abs; // does not exist yet; the caller's open attempt rejects it
   }
   if (real !== repoReal && !real.startsWith(repoReal + path.sep)) return null;
   return real;
@@ -160,20 +160,23 @@ function checkClaim(file, line) {
 
   // Open once and check/read through the same descriptor rather than the
   // path — an exists-then-readFileSync-by-path pair leaves a window where
-  // the path could resolve to something else by the time it's read.
+  // the path could resolve to something else by the time it's read, and
+  // `insideRepo`'s realpath check above only proves the path was clean at
+  // that moment.
+  let fd = null;
+  try {
+    fd = openRegularFileSync(abs);
+  } catch {
+    // ENOENT, ELOOP (a symlink slipped in after the realpath check), EACCES…
+  }
+  if (fd === null) {
+    return { status: 'DISPROVED', why: `cited file does not exist in the checkout: ${file}` };
+  }
   let lines;
   try {
-    const fd = openSync(abs, 'r');
-    try {
-      if (!fstatSync(fd).isFile()) {
-        return { status: 'DISPROVED', why: `cited file does not exist in the checkout: ${file}` };
-      }
-      lines = readFileSync(fd, 'utf-8').split('\n');
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return { status: 'DISPROVED', why: `cited file does not exist in the checkout: ${file}` };
+    lines = readFileSync(fd, 'utf-8').split('\n');
+  } finally {
+    closeQuietly(fd);
   }
   if (lines.length && lines[lines.length - 1] === '') lines.pop();
   const total = lines.length;
@@ -223,8 +226,17 @@ function checkCounterpart(file) {
   if (abs === null) {
     return { status: 'DISPROVED', why: `cited counterpart escapes the checkout: ${file}` };
   }
-  if (existsSync(abs) && statSync(abs).isFile()) return { status: 'ok', file };
-  return { status: 'DISPROVED', why: `cited counterpart does not exist in the checkout: ${file}` };
+  let fd = null;
+  try {
+    fd = openRegularFileSync(abs);
+  } catch {
+    // not a usable file at this path
+  }
+  if (fd === null) {
+    return { status: 'DISPROVED', why: `cited counterpart does not exist in the checkout: ${file}` };
+  }
+  closeQuietly(fd);
+  return { status: 'ok', file };
 }
 
 function checkKind(kind, file, line, counterpart) {
