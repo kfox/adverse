@@ -30,7 +30,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 import { ADVISORY_KINDS } from './prompts.mjs';
-import { isBlocking } from './synthesis.mjs';
+import { isBlocking, isOpenBlocking } from './synthesis.mjs';
 
 export const LEDGER_VERSION = 1;
 
@@ -514,7 +514,10 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
   const unverified = unsettled.filter((f) => isRegressionCandidate(f)
     && f.adjudicated.sameReport);
 
-  const credible = (f) => f.confidence === 'cross-validated' || f.confidence === 'consensus';
+  // "Credible enough to hold the loop open" is the same question synthesis.mjs
+  // answers for the report's headline number — `isOpenBlocking` imported
+  // rather than restated here, so the two cannot drift the way they used to.
+  const credible = isOpenBlocking;
 
   // Absence is not evidence of cross-examination.
   //
