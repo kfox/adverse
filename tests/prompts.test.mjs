@@ -2,15 +2,22 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { AUDITOR, PERSONAS } from '../src/personas.mjs';
 import {
+  KINDS,
+  PHASE1_INSTRUCTIONS,
   buildPhase1Prompt,
   buildPhase2Prompt,
   knownTitles,
   validatePhase1,
   validatePhase2,
 } from '../src/prompts.mjs';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 const goodPhase1 = (persona = 'auditor') => ({
   persona, verdict: 'approve', summary: 'ok', findings: [],
@@ -23,7 +30,7 @@ test('phase1: valid with no findings', () => {
 test('phase1: valid with findings', () => {
   const p = goodPhase1();
   p.verdict = 'conditional';
-  p.findings = [{ severity: 'critical', file: 'x.py', line: 10, title: 'bug', detail: 'broken', fix: 'fix it' }];
+  p.findings = [{ severity: 'critical', kind: 'defect', file: 'x.py', line: 10, title: 'bug', detail: 'broken', fix: 'fix it' }];
   assert.equal(validatePhase1(p, 'auditor'), null);
 });
 
@@ -61,13 +68,13 @@ test('phase1: rejects findings not list', () => {
 
 test('phase1: rejects finding with missing required field', () => {
   const p = goodPhase1();
-  p.findings = [{ severity: 'critical', title: 'x' }]; // missing detail
+  p.findings = [{ severity: 'critical', kind: 'defect', title: 'x' }]; // missing detail
   assert.match(validatePhase1(p, 'auditor'), /detail/);
 });
 
 test('phase1: rejects invalid severity', () => {
   const p = goodPhase1();
-  p.findings = [{ severity: 'huge', title: 'x', detail: 'y' }];
+  p.findings = [{ severity: 'huge', kind: 'defect', title: 'x', detail: 'y' }];
   assert.match(validatePhase1(p, 'auditor'), /severity/);
 });
 
@@ -83,7 +90,7 @@ test('phase2: valid populated', () => {
   const p = goodPhase2();
   p.validate = [{ from: 'adversary', title: 'SQLi', reason: 'yes' }];
   p.challenge = [{ from: 'pragmatist', title: 'Style nit', reason: 'out of scope' }];
-  p.added = [{ severity: 'warning', title: 'extra', detail: 'more', file: null, line: null }];
+  p.added = [{ severity: 'warning', kind: 'design', title: 'extra', detail: 'more', file: null, line: null }];
   assert.equal(validatePhase2(p, 'auditor'), null);
 });
 
@@ -95,7 +102,7 @@ test('phase2: rejects validate entry missing reason', () => {
 
 test('phase2: rejects added missing severity', () => {
   const p = goodPhase2();
-  p.added = [{ title: 'x', detail: 'y' }];
+  p.added = [{ title: 'x', kind: 'defect', detail: 'y' }];
   assert.match(validatePhase2(p, 'auditor'), /severity/);
 });
 
@@ -141,3 +148,51 @@ for (const name of Object.keys(PERSONAS)) {
     assert.ok(p.system.includes(p.title), 'system must reference its own title');
   });
 }
+
+// --- Skill prompt drift ------------------------------------------------------
+// The Skill reads prompts from scripts/prompts/*.txt, generated from the
+// canonical definitions here by dump-prompts.mjs. Nothing at runtime notices
+// when the two disagree: the CLI would use the new text and the Skill the
+// stale copy, and the panel would quietly run two different reviews. This is
+// the check that makes forgetting to regenerate a build failure instead.
+
+test('skill prompt files match their generators', async () => {
+  const skillPrompts = path.join(here, '..', 'skills', 'adverse-review', 'scripts', 'prompts');
+  const { PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS } =
+    await import('../src/prompts.mjs');
+
+  const expected = new Map([
+    ['round1.txt', PHASE1_INSTRUCTIONS],
+    ['round2.txt', PHASE2_BRIEFING_INSTRUCTIONS],
+  ]);
+  for (const p of Object.values(PERSONAS)) expected.set(`${p.name}.txt`, p.system + '\n');
+
+  for (const [name, want] of expected) {
+    const got = readFileSync(path.join(skillPrompts, name), 'utf-8');
+    assert.equal(got, want,
+      `${name} is stale — run: node skills/adverse-review/scripts/dump-prompts.mjs`);
+  }
+
+  const onDisk = readdirSync(skillPrompts).filter((n) => n.endsWith('.txt')).sort();
+  assert.deepEqual(onDisk, [...expected.keys()].sort(),
+    'prompts/ has a file no generator writes (or is missing one)');
+});
+
+test('round-1 schema documents every kind', () => {
+  for (const kind of KINDS) {
+    assert.ok(PHASE1_INSTRUCTIONS.includes(`\`${kind}\``), `round 1 must define ${kind}`);
+  }
+  assert.ok(PHASE1_INSTRUCTIONS.includes('ADVISORY'), 'the advisory rule must be stated');
+});
+
+test('validator rejects an unknown kind', () => {
+  const p = goodPhase1();
+  p.findings = [{ severity: 'warning', kind: 'vibes', title: 'x', detail: 'y' }];
+  assert.match(validatePhase1(p, 'auditor'), /kind/);
+});
+
+test('validator rejects a finding with no kind', () => {
+  const p = goodPhase1();
+  p.findings = [{ severity: 'warning', title: 'x', detail: 'y' }];
+  assert.match(validatePhase1(p, 'auditor'), /kind/);
+});

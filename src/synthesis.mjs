@@ -15,6 +15,16 @@
 // A finding can be both `consensus` (one validates) and `disputed` (another
 // challenges) — we mark it `disputed` because the dispute is the more
 // interesting signal to a human reader.
+//
+// Orthogonal to both severity and confidence is `kind` (see src/prompts.mjs),
+// which answers "what evidence would settle this". It is what makes an
+// automated stop condition possible: `design` findings are advisory, because a
+// reviewer can always want different structure and so a loop that counts them
+// never terminates. `openBlocking` is the resulting signal — the findings that
+// are both credible enough (cross-validated or consensus) and consequential
+// enough (not advisory, not `info`) to hold a change open.
+
+import { ADVISORY_KINDS } from './prompts.mjs';
 
 const SEVERITY_ORDER = { critical: 0, warning: 1, info: 2 };
 // Verdict → score mapping. The natural symmetric choice: approve and reject
@@ -44,16 +54,32 @@ function coerceStr(v) {
   return typeof v === 'string' && v.trim() ? v : null;
 }
 
+// A finding whose `kind` is missing or unrecognized is UNCLASSIFIED, and
+// unclassified blocks. Defaulting the other way would let a real finding slip
+// past the gate by arriving mislabeled, which is the one failure this axis must
+// not introduce.
+const UNCLASSIFIED = 'unclassified';
+
+function coerceKind(v) {
+  return typeof v === 'string' && v.trim() ? v.trim() : UNCLASSIFIED;
+}
+
+export function isBlocking(finding) {
+  return !ADVISORY_KINDS.has(finding.kind) && finding.severity !== 'info';
+}
+
 function buildFinding(persona, raw) {
   const title = coerceStr(raw?.title);
   const severity = raw?.severity;
   if (!title || !(severity in SEVERITY_ORDER)) return null;
   return {
     severity,
+    kind: coerceKind(raw?.kind),
     title: title.trim(),
     detail: (coerceStr(raw?.detail) ?? '').trim(),
     file: coerceStr(raw?.file),
     line: coerceInt(raw?.line),
+    counterpart: coerceStr(raw?.counterpart),
     fix: coerceStr(raw?.fix),
     reporters: [persona],
     validators: [], // Array<{persona, reason}>
@@ -81,6 +107,15 @@ export function synthesize(round1, round2 = {}, { failedPersonas = [] } = {}) {
       if (!existing.fix && f.fix) existing.fix = f.fix;
       if (existing.file === null && f.file) existing.file = f.file;
       if (existing.line === null && f.line !== null) existing.line = f.line;
+      if (!existing.counterpart && f.counterpart) existing.counterpart = f.counterpart;
+      // Two reporters who disagree on kind: the classified one wins over
+      // UNCLASSIFIED, and otherwise the blocking one wins over the advisory
+      // one, so a shared finding cannot be demoted out of the gate by whichever
+      // reporter happened to be merged second.
+      if (existing.kind === UNCLASSIFIED) existing.kind = f.kind;
+      else if (ADVISORY_KINDS.has(existing.kind) && !ADVISORY_KINDS.has(f.kind)) {
+        existing.kind = f.kind;
+      }
       return existing;
     }
     byKey.set(primaryKey, f);
@@ -155,8 +190,13 @@ export function synthesize(round1, round2 = {}, { failedPersonas = [] } = {}) {
       : 0;
   const label = consensusLabel(score, verdictList);
 
+  const openBlocking = findings.filter(
+    (f) => isBlocking(f) && (f.confidence === 'cross-validated' || f.confidence === 'consensus'),
+  );
+
   return {
     findings,
+    openBlocking,
     verdicts,
     summaries,
     consensusLabel: label,
@@ -195,6 +235,17 @@ const SECTION_TITLES = {
   solo: '## Single-reviewer findings (one perspective only)',
 };
 
+const CONFIDENCE_ORDER = ['cross-validated', 'consensus', 'disputed', 'solo'];
+
+const ADVISORY_SECTION =
+  '## Advisory (design — recorded, never blocking)';
+
+const ADVISORY_PREAMBLE =
+  '_These are design opinions. They are real feedback and worth acting on, but '
+  + 'they cannot hold the change open: a reviewer can always want different '
+  + 'structure, so a loop that waits for them to run out never ends. Take them '
+  + 'or file them; do not let them gate the merge._';
+
 export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) {
   const lines = [];
   lines.push(`# ${title}`);
@@ -203,10 +254,16 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   const crit = syn.findings.filter((f) => f.severity === 'critical').length;
   const warn = syn.findings.filter((f) => f.severity === 'warning').length;
   const info = syn.findings.filter((f) => f.severity === 'info').length;
+  const open = syn.openBlocking ?? [];
   lines.push(`**Verdict:** ${syn.consensusLabel}  `);
   lines.push(
     `**Findings:** ${crit} critical · ${warn} warning · ${info} info ` +
-      `(${syn.findings.length} total across ${Object.keys(syn.verdicts).length} reviewers)`,
+      `(${syn.findings.length} total across ${Object.keys(syn.verdicts).length} reviewers)  `,
+  );
+  lines.push(
+    `**Open blocking:** ${open.length} `
+      + `(cross-validated or consensus, not advisory, not info)`
+      + (open.length ? ` — ${open.map((f) => f.title).join('; ')}` : ''),
   );
   lines.push('');
 
@@ -235,14 +292,29 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   }
 
   const groups = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
-  for (const f of syn.findings) groups[f.confidence].push(f);
+  const advisory = [];
+  for (const f of syn.findings) {
+    if (ADVISORY_KINDS.has(f.kind)) advisory.push(f);
+    else groups[f.confidence].push(f);
+  }
 
-  for (const conf of ['cross-validated', 'consensus', 'disputed', 'solo']) {
+  for (const conf of CONFIDENCE_ORDER) {
     const items = groups[conf];
     if (!items.length) continue;
     lines.push(SECTION_TITLES[conf]);
     lines.push('');
     for (const f of items) {
+      lines.push(...renderFinding(f));
+      lines.push('');
+    }
+  }
+
+  if (advisory.length) {
+    lines.push(ADVISORY_SECTION);
+    lines.push('');
+    lines.push(ADVISORY_PREAMBLE);
+    lines.push('');
+    for (const f of advisory) {
       lines.push(...renderFinding(f));
       lines.push('');
     }
@@ -259,9 +331,13 @@ function renderFinding(f) {
     if (f.line !== null) loc += `:${f.line}`;
     loc += '`';
   }
-  const out = [`### ${marker} **[${f.severity.toUpperCase()}]** ${f.title}${loc}`];
+  const out = [`### ${marker} **[${f.severity.toUpperCase()}·${f.kind}]** ${f.title}${loc}`];
   out.push('');
-  out.push(`_Reported by: ${f.reporters.join(', ')}_`);
+  out.push(`_Reported by: ${f.reporters.join(', ')} · confidence: ${f.confidence}_`);
+  if (f.counterpart) {
+    out.push('');
+    out.push(`_Contradicts:_ \`${f.counterpart}\``);
+  }
   out.push('');
   out.push(f.detail);
   if (f.fix) {
@@ -292,17 +368,21 @@ export function toJsonReport(syn) {
     verdicts: syn.verdicts,
     summaries: syn.summaries,
     degraded: syn.degraded,
+    open_blocking: (syn.openBlocking ?? []).map((f) => f.title),
     findings: syn.findings.map((f) => ({
       severity: f.severity,
+      kind: f.kind,
       title: f.title,
       detail: f.detail,
       file: f.file,
       line: f.line,
+      counterpart: f.counterpart,
       fix: f.fix,
       reporters: f.reporters,
       validators: f.validators,
       challengers: f.challengers,
       confidence: f.confidence,
+      blocking: isBlocking(f),
     })),
   };
 }

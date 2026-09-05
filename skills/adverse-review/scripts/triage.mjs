@@ -21,6 +21,13 @@
 //   3. A cited file that does not exist, or a line past end of file, is flagged
 //      before any model spends a token judging it.
 //
+// The same doctrine governs the kind check. A finding's `kind` promises a
+// certain anchoring — a `defect` is settled by reading a line, so it needs one;
+// a `contract` claims two files disagree, so it has to name both. A finding
+// that does not keep that promise is ANNOTATED as under-anchored, never
+// dropped: the reporter may have found something real and merely labeled it
+// carelessly, and only a reviewer can tell those apart.
+//
 // A finding citing a line OUTSIDE the diff's changed ranges is ANNOTATED, never
 // rejected. A latent bug that this change newly makes reachable lives in
 // unchanged lines by definition, and in the run that motivated this script that
@@ -126,6 +133,49 @@ function checkClaim(file, line) {
   return out;
 }
 
+// What each kind promises about its own anchoring. Checked, not enforced —
+// see the doctrine note at the top of this file.
+const KIND_REQUIREMENTS = {
+  defect:     { file: true, line: true,  counterpart: false },
+  behavioral: { file: true, line: false, counterpart: false },
+  contract:   { file: true, line: false, counterpart: true  },
+  design:     { file: false, line: false, counterpart: false },
+};
+
+// A `contract` finding names a second path, and that path is a claim like any
+// other: a counterpart that is not in the checkout disproves the contradiction
+// just as surely as a missing primary file does.
+function checkCounterpart(file) {
+  if (!file) return null;
+  const abs = path.join(repo, file);
+  if (existsSync(abs) && statSync(abs).isFile()) return { status: 'ok', file };
+  return { status: 'DISPROVED', why: `cited counterpart does not exist in the checkout: ${file}` };
+}
+
+function checkKind(kind, file, line, counterpart) {
+  if (kind === undefined || kind === null || kind === '') {
+    return { status: 'MISSING', why: 'no `kind` on this finding; it is treated as blocking' };
+  }
+  const req = KIND_REQUIREMENTS[kind];
+  if (!req) {
+    return { status: 'UNKNOWN', kind, why: `unrecognized kind ${JSON.stringify(kind)}; treated as blocking` };
+  }
+  const missing = [];
+  if (req.file && !file) missing.push('file');
+  if (req.line && (line === null || line === undefined)) missing.push('line');
+  if (req.counterpart && !counterpart) missing.push('counterpart');
+  if (missing.length) {
+    return {
+      status: 'UNDER-ANCHORED',
+      kind,
+      missing,
+      why: `kind \`${kind}\` requires ${missing.join(' and ')}, which this finding does not give. `
+         + 'The claim may still be real — judge the claim, not the label.',
+    };
+  }
+  return { status: 'ok', kind, advisory: kind === 'design' };
+}
+
 const reviews = values.round1.map(readJson);
 
 const findings = [];
@@ -137,12 +187,16 @@ for (const review of reviews) {
       id: `F${n}`,
       reporter: review.persona,
       severity: f.severity,
+      kind: f.kind ?? null,
       file: f.file ?? null,
       line: f.line ?? null,
+      counterpart: f.counterpart ?? null,
       title: f.title,
       detail: f.detail,
       fix: f.fix ?? null,
       claimCheck: checkClaim(f.file ?? null, f.line ?? null),
+      counterpartCheck: checkCounterpart(f.counterpart ?? null),
+      kindCheck: checkKind(f.kind, f.file ?? null, f.line ?? null, f.counterpart ?? null),
     });
   }
 }
@@ -217,7 +271,11 @@ const briefing = {
 
 writeFileSync(values.out, JSON.stringify(briefing, null, 2), 'utf-8');
 
-const disproved = findings.filter((f) => f.claimCheck.status === 'DISPROVED');
+const disproved = findings.filter(
+  (f) => f.claimCheck.status === 'DISPROVED' || f.counterpartCheck?.status === 'DISPROVED',
+);
+const underAnchored = findings.filter((f) => f.kindCheck.status !== 'ok');
+const advisory = findings.filter((f) => f.kindCheck.advisory === true);
 const outside = findings.filter((f) => f.claimCheck.inDiff === 'outside');
 const ids = (list) => (list.length ? ` (${list.map((f) => f.id ?? f).join(', ')})` : '');
 process.stdout.write(
@@ -226,4 +284,6 @@ process.stdout.write(
   + `  claim-check disproved: ${disproved.length}${ids(disproved)}\n`
   + `  cross-file co-citations (candidate shared root cause): ${crossReferences.length}`
   + `${crossReferences.length ? ` (${crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
-  + `  cited outside the diff (annotated, not rejected): ${outside.length}${ids(outside)}\n`);
+  + `  cited outside the diff (annotated, not rejected): ${outside.length}${ids(outside)}\n`
+  + `  under-anchored for their kind (annotated, not rejected): ${underAnchored.length}${ids(underAnchored)}\n`
+  + `  advisory (design — cannot block): ${advisory.length}${ids(advisory)}\n`);

@@ -2,6 +2,8 @@
 // works as an email/chat attachment, in CI artifacts, or pasted into a wiki.
 // Vanilla HTML + scoped CSS + a few lines of JS — no framework, no build step.
 
+import { ADVISORY_KINDS } from './prompts.mjs';
+
 const SEVERITY_BADGE = {
   critical: { label: 'CRITICAL', color: '#b91c1c', bg: '#fee2e2' },
   warning:  { label: 'WARNING',  color: '#92400e', bg: '#fef3c7' },
@@ -46,7 +48,11 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
   }).join('\n');
 
   const groups = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
-  for (const f of syn.findings) groups[f.confidence].push(f);
+  const advisory = [];
+  for (const f of syn.findings) {
+    if (ADVISORY_KINDS.has(f.kind)) advisory.push(f);
+    else groups[f.confidence].push(f);
+  }
 
   const sections = [];
   for (const conf of ['cross-validated', 'consensus', 'disputed', 'solo']) {
@@ -56,6 +62,13 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
       <section class="findings-group">
         <h2>${esc(CONFIDENCE_LABEL[conf])}</h2>
         ${items.map(renderCard).join('\n')}
+      </section>`);
+  }
+  if (advisory.length) {
+    sections.push(`
+      <section class="findings-group">
+        <h2>Advisory (design — recorded, never blocking)</h2>
+        ${advisory.map(renderCard).join('\n')}
       </section>`);
   }
 
@@ -106,6 +119,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     .card .loc { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; color: var(--fg-muted); }
     .card .body { padding: 0 16px 16px; }
     .card .reporters { font-size: 12px; color: var(--fg-muted); margin: 0 0 8px; }
+    .card .kind { font-size: 11px; color: var(--fg-muted); border: 1px solid currentColor; border-radius: 999px; padding: 1px 7px; }
     .card .detail { margin: 8px 0; }
     .card .fix { background: var(--bg-alt); padding: 8px 12px; border-radius: 6px; margin: 8px 0 0; }
     .card .fix strong { color: var(--accent); }
@@ -125,6 +139,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     <h1>${esc(title)}</h1>
     <div class="verdict">${esc(syn.consensusLabel)}</div>
     <p class="summary">${crit} critical · ${warn} warning · ${info} info — ${syn.findings.length} total across ${Object.keys(syn.verdicts).length} reviewers</p>
+    <p class="summary">Open blocking: <strong>${(syn.openBlocking ?? []).length}</strong> (cross-validated or consensus, not advisory, not info)</p>
 
     ${degraded}
 
@@ -168,10 +183,11 @@ function renderCard(f) {
     <summary>
       <span class="badge" style="color:${sev.color};background:${sev.bg}">${sev.label}</span>
       <span class="title">${esc(f.title)}</span>
+      <span class="kind">${esc(f.kind ?? 'unclassified')}</span>
       ${loc ? `<span class="loc">${esc(loc)}</span>` : ''}
     </summary>
     <div class="body">
-      <p class="reporters">Reported by: ${esc(f.reporters.join(', '))}</p>
+      <p class="reporters">Reported by: ${esc(f.reporters.join(', '))} · confidence: ${esc(f.confidence)}${f.counterpart ? ` · contradicts ${esc(f.counterpart)}` : ''}</p>
       <div class="detail">${esc(f.detail).replaceAll('\n', '<br>')}</div>
       ${f.fix ? `<div class="fix"><strong>Fix:</strong> ${esc(f.fix)}</div>` : ''}
       ${validates}
