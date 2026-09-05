@@ -77,6 +77,17 @@ export function isBlocking(finding) {
   return !ADVISORY_KINDS.has(finding.kind) && finding.severity !== 'info';
 }
 
+// The stop condition and the report's headline number are the same question —
+// "is this both blocking and credible enough to hold the change open?" —
+// asked on either side of the report.json serialization boundary. Defined
+// over `{kind, severity, confidence}` alone (not `.blocking`, which only the
+// serialized shape carries) so it works unchanged on an in-memory finding
+// here and on one `convergenceStatus` reads back out of a report.
+export function isOpenBlocking(finding) {
+  return isBlocking(finding)
+    && (finding.confidence === 'cross-validated' || finding.confidence === 'consensus');
+}
+
 function buildFinding(persona, raw) {
   const title = coerceStr(raw?.title);
   const severity = raw?.severity;
@@ -199,9 +210,7 @@ export function synthesize(round1, round2 = {}, { failedPersonas = [], skippedPe
       : 0;
   const label = consensusLabel(score, verdictList);
 
-  const openBlocking = findings.filter(
-    (f) => isBlocking(f) && (f.confidence === 'cross-validated' || f.confidence === 'consensus'),
-  );
+  const openBlocking = findings.filter(isOpenBlocking);
 
   return {
     findings,

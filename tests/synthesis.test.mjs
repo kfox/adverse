@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isBlocking, renderMarkdown, synthesize, toJsonReport } from '../src/synthesis.mjs';
+import { isBlocking, isOpenBlocking, renderMarkdown, synthesize, toJsonReport } from '../src/synthesis.mjs';
 
 const f = (title, severity = 'warning', file = null, line = null, detail = 'd', fix = null) =>
   ({ severity, file, line, title, detail, fix });
@@ -219,6 +219,20 @@ test('kind: a disputed finding is not open — it needs adjudication, not a gate
   const s = synthesize(r1, r2);
   assert.equal(s.findings[0].confidence, 'disputed');
   assert.deepEqual(s.openBlocking, []);
+});
+
+// `isOpenBlocking` is the shared predicate `convergenceStatus` (src/ledger.mjs)
+// imports rather than restating, so this is the one place that pins its
+// contract: blocking AND (cross-validated OR consensus), on the confidence
+// field alone — nothing else it is fed matters.
+test('isOpenBlocking: blocking and cross-validated or consensus, nothing else', () => {
+  const base = { kind: 'defect', severity: 'critical' };
+  assert.equal(isOpenBlocking({ ...base, confidence: 'cross-validated' }), true);
+  assert.equal(isOpenBlocking({ ...base, confidence: 'consensus' }), true);
+  assert.equal(isOpenBlocking({ ...base, confidence: 'solo' }), false);
+  assert.equal(isOpenBlocking({ ...base, confidence: 'disputed' }), false);
+  assert.equal(isOpenBlocking({ ...base, kind: 'design', confidence: 'cross-validated' }), false);
+  assert.equal(isOpenBlocking({ ...base, severity: 'info', confidence: 'cross-validated' }), false);
 });
 
 test('kind: merging two reporters keeps the blocking kind over the advisory one', () => {
