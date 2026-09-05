@@ -22,6 +22,7 @@ import { parseArgs } from 'node:util';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
+import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { escalate, planReview } = await importFromSrc('scaling.mjs');
@@ -53,19 +54,11 @@ if (values.escalate) {
     // never arrived is indistinguishable from a lane that found nothing, and
     // blind escalation reproduces the exact fail-open this mode was built to
     // close.
-    process.stderr.write('Usage: plan.mjs --escalate --expect auditor,steward,… [--json] round1-<persona>*.json …\n');
-    process.exit(2);
+    usage('Usage: plan.mjs --escalate --expect auditor,steward,… [--json] round1-<persona>*.json …');
   }
-  const payloads = positionals.map((path) => {
-    try {
-      return JSON.parse(readFileSync(path, 'utf-8'));
-    } catch (e) {
-      // Exit 2, not default advice: a typo'd path that silently yielded the
-      // default plan would hide the error behind a plausible answer.
-      process.stderr.write(`plan: ${path}: ${e.message}\n`);
-      process.exit(2);
-    }
-  });
+  // Exit 2, not default advice: a typo'd path that silently yielded the
+  // default plan would hide the error behind a plausible answer.
+  const payloads = positionals.map((path) => readJson(path, 'plan'));
   const result = escalate(payloads, { expected: expectList });
   emit(result,
     `round 2: ${result.rounds === 2 ? 'run' : 'skip'} — ${result.roundsReason}\n`

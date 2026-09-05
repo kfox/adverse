@@ -449,3 +449,14 @@ test('a --base that looks like a git option is refused', () => {
   assert.equal(r.status, 2);
   assert.match(r.stderr, /looks like an option/);
 });
+
+test('an unreadable round-1 file is exit 2, not exit 1 — this run could not read a review, it did not judge one', () => {
+  const bad = path.join(repo, 'round1-bad.json');
+  writeFileSync(bad, '{ not valid json');
+  const out = path.join(repo, 'briefing-bad.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', bad, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /triage:.*round1-bad\.json/);
+});

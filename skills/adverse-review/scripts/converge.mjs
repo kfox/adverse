@@ -16,6 +16,7 @@ import { parseArgs } from 'node:util';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
+import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
@@ -39,11 +40,10 @@ const { values } = parseArgs({
 });
 
 if (!values.ledger) {
-  process.stderr.write(
+  usage(
     'Usage:\n'
     + '  converge.mjs --ledger L.json --record decisions.json --report report.json --repo DIR --at REVIEWED_REF [--base REF]\n'
     + '  converge.mjs --ledger L.json --report report.json --repo DIR [--head REF] [--max-iterations N]\n');
-  process.exit(2);
 }
 
 // Identifies a report so a decision can say which observation it answered.
@@ -55,15 +55,6 @@ function digest(file) {
     return createHash('sha256').update(readFileSync(file)).digest('hex').slice(0, 16);
   } catch {
     return null;
-  }
-}
-
-function readJson(file) {
-  try {
-    return JSON.parse(readFileSync(file, 'utf-8'));
-  } catch (e) {
-    process.stderr.write(`converge: ${file}: ${e.message}\n`);
-    process.exit(2);
   }
 }
 
@@ -91,9 +82,8 @@ if (bindingProblems.length) {
 // --- record mode -------------------------------------------------------------
 
 if (values.record) {
-  const payload = readJson(values.record);
+  const payload = readJson(values.record, 'converge');
   const decisions = Array.isArray(payload) ? payload : payload.decisions ?? [];
-  const iteration = (ledger.iterations ?? []).length + 1;
 
   // `atCommit` means "the commit these line numbers are valid at", and that is
   // the tree the panel READ — not the tree that exists after the fixes. Passing
@@ -119,7 +109,7 @@ if (values.record) {
 
   let next;
   try {
-    next = recordDecisions(ledger, decisions, { iteration, atCommit, reportDigest });
+    next = recordDecisions(ledger, decisions, { atCommit, reportDigest });
   } catch (e) {
     process.stderr.write(`converge: ${e.message}\n`);
     process.exit(2);
@@ -128,6 +118,10 @@ if (values.record) {
   // pinned base comes from the CLI, the same way triage.mjs already takes it.
   next.base ??= values.base ?? null;
   saveLedger(values.ledger, next);
+  // recordDecisions derived the iteration number itself; read back what it
+  // used rather than computing (ledger.iterations ?? []).length + 1 a second
+  // time — the two copies had already drifted once.
+  const iteration = next.iterations.at(-1).n;
   const by = (d) => decisions.filter((x) => x.disposition === d).length;
   process.stdout.write(
     `iteration ${iteration}: recorded ${decisions.length} decision(s) -> ${values.ledger}\n`
@@ -142,7 +136,7 @@ if (!values.report) {
   process.exit(2);
 }
 
-const report = readJson(values.report);
+const report = readJson(values.report, 'converge');
 
 // Positions in the ledger were recorded against the commit the decision was
 // made at; re-project each one to `head` before matching, or a fix that shifted

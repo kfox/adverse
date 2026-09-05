@@ -28,6 +28,19 @@ function round1File(dir) {
   return p;
 }
 
+test('an unreadable --round1 file is exit 2, not exit 1 — this run could not read a review, it did not judge one', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-bad-'));
+  try {
+    const bad = path.join(dir, 'round1-bad.json');
+    writeFileSync(bad, '{ not valid json');
+    const r = runSynth(['--round1', bad, '--out', path.join(dir, 'r.md')]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /synthesize:.*round1-bad\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an empty --round2-skipped is a usage error, not a silent undeclared skip', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-'));
   try {

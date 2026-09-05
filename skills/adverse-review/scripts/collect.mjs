@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
+import { usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { collectDirectory, collectDiff } = await importFromSrc('collect.mjs');
@@ -21,8 +22,7 @@ const { values } = parseArgs({
 });
 
 if (!values.target || !values.out) {
-  process.stderr.write('Usage: collect.mjs --target <path> [--diff [base]] --out <file> [--files-out <file>]\n');
-  process.exit(2);
+  usage('Usage: collect.mjs --target <path> [--diff [base]] --out <file> [--files-out <file>]');
 }
 
 const target = path.resolve(values.target);

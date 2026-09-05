@@ -413,7 +413,9 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
 // Add this iteration's decisions. Entries are appended, never rewritten: the
 // ledger is the record of what was decided when, and a decision that gets
 // revisited is a second entry rather than an edit to the first.
-export function recordDecisions(ledger, decisions, { iteration, atCommit, reportDigest = null }) {
+export function recordDecisions(ledger, decisions, {
+  iteration = (ledger.iterations ?? []).length + 1, atCommit, reportDigest = null,
+} = {}) {
   const next = { ...ledger, entries: [...(ledger.entries ?? [])] };
   for (const d of decisions) {
     if (!DISPOSITIONS.includes(d.disposition)) {

@@ -16,8 +16,10 @@
 // The real fix belongs upstream in src/synthesis.mjs — join on ID, or on
 // file/line proximity — at which point this script becomes dead weight.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
+
+import { readJson, usage } from './bridge-io.mjs';
 
 // Positionals are round-2 files, so `--round2 run/round2-*.json` works. Same
 // reason as triage.mjs: strict parsing without this throws on the second path
@@ -34,27 +36,17 @@ const { values, positionals } = parseArgs({
 
 values.round2 = [...(values.round2 ?? []), ...positionals];
 if (!values.briefing || !values.round2.length || !values.outdir) {
-  process.stderr.write('Usage: repair.mjs --briefing <briefing.json> --round2 a.json [--round2 b.json …] --outdir <dir>\n');
-  process.exit(2);
+  usage('Usage: repair.mjs --briefing <briefing.json> --round2 a.json [--round2 b.json …] --outdir <dir>');
 }
 
-function readJson(file) {
-  try {
-    return JSON.parse(readFileSync(file, 'utf-8'));
-  } catch (e) {
-    process.stderr.write(`repair: ${file}: ${e.message}\n`);
-    process.exit(1);
-  }
-}
-
-const briefing = readJson(values.briefing);
+const briefing = readJson(values.briefing, 'repair');
 const titleById = new Map(briefing.findings.map((f) => [f.id, f.title]));
 const reporterById = new Map(briefing.findings.map((f) => [f.id, f.reporter]));
 
 let repaired = 0, unresolved = 0, checked = 0;
 
 for (const src of values.round2) {
-  const payload = readJson(src);
+  const payload = readJson(src, 'repair');
 
   for (const key of ['validate', 'challenge']) {
     for (const edge of payload[key] ?? []) {
