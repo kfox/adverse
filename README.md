@@ -243,7 +243,7 @@ The verification pass is not a re-review. It asks two questions — is this find
 ## Tests
 
 ```bash
-npm test                       # 231 unit + contract tests, no API calls. Fast (~2s).
+npm test                       # unit + contract tests, no API calls. Fast (~5s).
 npm run test:live              # Live tests against `claude -p`. Requires `claude` on
                                # PATH and auth — won't pass from inside a nested Claude
                                # Code session because subprocesses don't inherit auth.

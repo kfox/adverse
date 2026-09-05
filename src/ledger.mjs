@@ -30,6 +30,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 import { ADVISORY_KINDS } from './prompts.mjs';
+import { isBlocking } from './synthesis.mjs';
 
 export const LEDGER_VERSION = 1;
 
@@ -39,6 +40,12 @@ export const LEDGER_VERSION = 1;
 // silently buries a real finding under an old decision.
 const MATCH_WINDOW_LINES = 5;
 const MAX_BINDING_PROBLEMS = 20;
+// `SAFE_REF` admits unbounded distinct spellings of one commit — HEAD, HEAD~0,
+// HEAD~0~0 — so de-duplicating on the ref STRING still let 900 entries cost 900
+// spawns, and because they all resolved, no problem was recorded and the cap
+// never fired: the ledger was accepted after 11 seconds of forking. An honest
+// ledger names a handful of commits.
+const MAX_DISTINCT_REFS = 50;
 
 // The weakest match that may settle a finding. Below it, annotate only.
 const SETTLING_SCORE = 2;
@@ -101,8 +108,14 @@ export function checkBinding(ledger, resolve) {
   // refused. Measured at 26.1 s for 2000 entries, ~1100x per entry. This cache
   // lives for one call, so it cannot go stale.
   const seen = new Map();
+  let refBudgetSpent = false;
   const resolveOnce = (ref) => {
-    if (!seen.has(ref)) seen.set(ref, resolve(ref));
+    if (seen.has(ref)) return seen.get(ref);
+    if (seen.size >= MAX_DISTINCT_REFS) {
+      refBudgetSpent = true;
+      return null;
+    }
+    seen.set(ref, resolve(ref));
     return seen.get(ref);
   };
 
@@ -130,6 +143,10 @@ export function checkBinding(ledger, resolve) {
     if (e.disposition !== undefined && !DISPOSITIONS.includes(e.disposition)) {
       problems.push(`entry ${JSON.stringify(e.title)} has disposition ${JSON.stringify(e.disposition)}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
+  }
+  if (refBudgetSpent) {
+    problems.push(`ledger names more than ${MAX_DISTINCT_REFS} distinct commits; `
+      + 'a decision log for one branch names a handful');
   }
   return problems;
 }
@@ -171,13 +188,20 @@ function numericLine(value) {
 }
 
 export function scoreMatch(entry, finding, traced = null) {
-  if (normalizeTitle(entry.title) && normalizeTitle(entry.title) === normalizeTitle(finding.title)) {
-    return { score: 3, why: 'identical title' };
-  }
   if ((entry.kind ?? null) !== (finding.kind ?? null)) return null;
 
   const entryFile = traced?.file ?? entry.file;
   if (!entryFile || !finding.file || entryFile !== finding.file) return null;
+
+  // Title equality is checked HERE, below the file and kind guards, not above
+  // them. It used to return first, so a decision recorded in one file settled
+  // an identically-titled finding in another file, of any kind and any
+  // severity — and reviewers reuse titles ("off-by-one in the loop bound")
+  // across files precisely because the defect is the same shape.
+  if (normalizeTitle(entry.title)
+      && normalizeTitle(entry.title) === normalizeTitle(finding.title)) {
+    return { score: 3, why: `identical title in ${entryFile}` };
+  }
 
   const entryLine = numericLine(traced?.line ?? entry.line);
   const findingLine = numericLine(finding.line);
@@ -204,10 +228,34 @@ export function scoreMatch(entry, finding, traced = null) {
     return { score: 1, why: `same kind in ${entryFile}, but no line on one side` };
   }
   const drift = Math.abs(entryLine - findingLine);
-  if (drift <= MATCH_WINDOW_LINES) {
-    return { score: 2, why: `same kind at ${entryFile}:${entryLine} (drift ${drift})` };
+  if (drift > MATCH_WINDOW_LINES) return null;
+
+  // Proximity is not identity, and this is the difference between annotating a
+  // finding and DELETING it.
+  //
+  // A positional match compares kind, file and line drift. It never compared
+  // severity, so an ordinary `declined` warning about a noisy log line settled
+  // a brand-new cross-validated critical command injection five lines away,
+  // and the loop printed "converged" and exited 0. No crafted ledger was
+  // needed: declines are routine, the whole convergence story depends on them,
+  // and `traceFor` re-projects the old anchor as the file is edited, so the
+  // five-line amnesty follows the code around.
+  //
+  // The asymmetry decides the rule. A wrong settle is SILENT and drops a real
+  // finding; a missed settle is noisy and safe — the finding comes back with
+  // the earlier decision attached as context, and a reviewer re-declines it in
+  // one line. So a positional match settles only when the severity agrees too;
+  // anything else annotates. A missing severity does not equal anything, which
+  // fails in the safe direction.
+  if ((entry.severity ?? null) !== (finding.severity ?? null)) {
+    return {
+      score: 1,
+      why: `same kind at ${entryFile}:${entryLine} (drift ${drift}), but the `
+        + `decision was taken on a ${entry.severity ?? 'severity-less'} finding `
+        + `and this one is ${finding.severity ?? 'severity-less'}`,
+    };
   }
-  return null;
+  return { score: 2, why: `same kind and severity at ${entryFile}:${entryLine} (drift ${drift})` };
 }
 
 // The best-matching ledger entry for a finding, or null.
@@ -232,7 +280,14 @@ export function matchFinding(ledger, finding, traceFor = () => null) {
 // `reportDigest` identifies the report being checked. An entry recorded from
 // that same report is the SAME observation, not a new one — see `sameReport`.
 export function annotate(findings, ledger, traceFor = () => null, { reportDigest = null } = {}) {
-  return findings.map((f) => {
+  // Destructured away, not spread over: a finding arrives from report.json,
+  // which is read back off disk exactly like the ledger is, and `adjudicated`
+  // is the field the stop condition subtracts by. On the no-match path this
+  // used to return the finding untouched, so a report could declare its own
+  // blocking critical settled and converge the loop against an EMPTY ledger —
+  // the fail-open this file keeps closing, moved from the bucket side to the
+  // input side. Only an entry in the ledger may write this block.
+  return findings.map(({ adjudicated: _selfDeclared, ...f }) => {
     const m = matchFinding(ledger, f, traceFor);
     if (!m) return f;
     const settled = isSettled(m.entry.disposition) && m.score >= SETTLING_SCORE;
@@ -327,7 +382,27 @@ export function recordDecisions(ledger, decisions, { iteration, atCommit, report
 // input is data the panel already produced; no model judges this.
 export function convergenceStatus(report, ledger, traceFor = () => null,
                                   { maxIterations = 3, reportDigest = null } = {}) {
-  const blocking = (report.findings ?? []).filter((f) => f.blocking);
+  // `report.findings ?? []` read a missing array as an empty one, so any valid
+  // JSON that is not a synthesis report — a ledger, a decisions array, a
+  // briefing — converged the loop and exited 0, the success signal, on a review
+  // nobody read. A genuinely clean run writes `findings: []` and still
+  // converges; "I could not find the findings" must not be spelled the same way
+  // as "there were none".
+  if (!Array.isArray(report.findings)) {
+    throw new Error('report has no findings array; this is not a synthesis report');
+  }
+
+  // `blocking` is the gate everything below derives from, and it was a
+  // truthiness test on a field read out of a JSON file — so a report that
+  // simply omits it converged with a critical defect inside. That is the same
+  // fail-open `examined` was changed from `!== false` to `=== true` to close,
+  // twenty lines down, and the two must not disagree about what missing means.
+  //
+  // So the field can only ever ADD: a finding whose own shape is blocking
+  // blocks whatever the field says, which also stops a report from marking a
+  // critical defect non-blocking. `isBlocking` is imported rather than
+  // re-spelled here, because two definitions of blocking is how they drift.
+  const blocking = report.findings.filter((f) => f.blocking === true || isBlocking(f));
 
   // Annotate EVERY blocking finding, then bucket. Two things turn on this.
   //
@@ -353,8 +428,21 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
   // makes the first convergence check after every fix batch scream, and the
   // Skill tells the orchestrator to lead with REGRESSED, so the one signal
   // the loop trusts most would be noise by construction.
-  const regressed = unsettled.filter((f) => f.adjudicated && !f.adjudicated.sameReport);
-  const unverified = unsettled.filter((f) => f.adjudicated?.sameReport);
+  // Both headings speak of a fix — "recorded fixed, reported again" and
+  // "recorded fixed against THIS report" — so both have to key on the
+  // disposition that gives them that meaning. Keying on "has an adjudication
+  // and is unsettled" swept in a `declined` entry that matched too weakly to
+  // settle (score 1, file-wide), and announced a brand-new finding as REGRESSED
+  // in a file that merely carried one line-less declined entry. The Skill tells
+  // the orchestrator to lead with REGRESSED, so that is a manufactured alarm on
+  // the loop's loudest signal.
+  // The match must also be strong enough to be about this finding: a `fixed`
+  // entry with no line matches every finding of its kind in the file, and
+  // "the fix did not work" is too loud a claim to make on a file-wide guess.
+  const wasFixed = (f) => f.adjudicated?.disposition === 'fixed'
+    && f.adjudicated.confidence >= SETTLING_SCORE;
+  const regressed = unsettled.filter((f) => wasFixed(f) && !f.adjudicated.sameReport);
+  const unverified = unsettled.filter((f) => wasFixed(f) && f.adjudicated.sameReport);
 
   const credible = (f) => f.confidence === 'cross-validated' || f.confidence === 'consensus';
 
@@ -391,17 +479,36 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
 
   const open = unsettled.filter(credible);
 
-  // Whatever the named buckets did not describe. Should be empty: a
-  // non-credible finding is `solo` or `disputed`, and each has a bucket under
-  // either spelling of `cross_examined`. The stop condition no longer depends
-  // on that reasoning holding, which is the point — an unnamed blocking
-  // finding surfaces here instead of disappearing.
+  // Whatever the named buckets did not describe. Unreachable for a report this
+  // tool generated — `solo` means no validators and no challengers, so
+  // `toJsonReport` writes `cross_examined: false` — but reachable from a
+  // hand-edited one, where `solo` can arrive alongside `cross_examined: true`
+  // and match no bucket. That is why the stop condition does not depend on
+  // this being empty: such a finding is counted and blocks either way, and
+  // surfaces here instead of disappearing.
   const named = new Set([...open, ...unexamined, ...disputed]);
   const other = unsettled.filter((f) => !named.has(f));
 
+  // A lane that was TRIED and FAILED reviewed nothing, and "reviewed and found
+  // nothing" is the same input to this gate as "never looked": both contribute
+  // zero findings. `synthesis.mjs` states the doctrine where it builds these
+  // two lists — "a lane that was skipped and not mentioned reads exactly like a
+  // lane that looked and found nothing" — and the stop condition was the last
+  // place still reading it that way. The reviewers read the diff, so a file big
+  // enough to blow the Adversary's budget removed every security finding from
+  // the run and still exited 0, which the ship loop reads as "hand over a green
+  // PR".
+  //
+  // `degraded` holds the loop open; the remedy is to re-run the lane, and a
+  // lane that keeps failing reaches the cap, which is a stop that says so.
+  // `skipped` does not — it is a deliberate, recorded choice — but it is
+  // returned so the run can never render as a clean one.
+  const degraded = Array.isArray(report.degraded) ? report.degraded : [];
+  const skipped = Array.isArray(report.skipped) ? report.skipped : [];
+
   const iteration = (ledger.iterations ?? []).length + 1;
   const capped = iteration > maxIterations;
-  const done = unsettled.length === 0;
+  const done = unsettled.length === 0 && degraded.length === 0;
 
   return {
     iteration,
@@ -413,6 +520,8 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
     unexamined,
     disputed,
     other,
+    degraded,
+    skipped,
     done,
     capped,
     // The cap is a stop, not a pass. A run that ends here has open findings and
@@ -421,16 +530,17 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
       ? 'converged: no blocking finding is unsettled'
       : capped
         ? `iteration cap (${maxIterations}) reached with ${unsettled.length} still open`
-        : describeRemaining({ open, unexamined, disputed, other }),
+        : describeRemaining({ open, unexamined, disputed, other, degraded }),
   };
 }
 
 // Say what is actually holding the loop open, in the loop's own vocabulary.
-function describeRemaining({ open, unexamined, disputed, other }) {
+function describeRemaining({ open, unexamined, disputed, other, degraded }) {
   const parts = [];
   if (open.length) parts.push(`${open.length} still open`);
   if (unexamined.length) parts.push(`${unexamined.length} never cross-examined`);
   if (disputed.length) parts.push(`${disputed.length} disputed`);
   if (other.length) parts.push(`${other.length} unclassified`);
+  if (degraded.length) parts.push(`${degraded.length} lane(s) failed and reviewed nothing`);
   return parts.join(', ');
 }

@@ -38,16 +38,41 @@ test('normalizeTitle collapses whitespace, case, and trailing punctuation', () =
   assert.equal(normalizeTitle('  Off-By-One   In The Loop.  '), 'off-by-one in the loop');
 });
 
-test('an identical title matches regardless of kind or position', () => {
-  const m = scoreMatch(entry({ kind: 'design', file: 'other.py', line: 999 }), finding());
+test('an identical title matches regardless of position, but not across file or kind', () => {
+  // Position is what drifts, so the title carries identity past it.
+  const m = scoreMatch(entry({ line: 999 }), finding());
   assert.equal(m.score, 3);
+
+  // It does not carry identity past the file or the kind. Reviewers reuse
+  // titles ("off-by-one in the loop bound") precisely because the defect is
+  // the same SHAPE in a different place — which is a different finding.
+  assert.equal(scoreMatch(entry({ file: 'other.py', line: 999 }), finding()), null);
+  assert.equal(scoreMatch(entry({ kind: 'design', line: 999 }), finding()), null);
+});
+
+test('a decision on one severity cannot settle a finding of another', () => {
+  // The exploit this closes needed no crafted ledger. An honest `declined`
+  // WARNING about a noisy log line settled a brand-new cross-validated
+  // CRITICAL command injection five lines away, and the loop exited 0.
+  const nit = entry({ title: 'log line here is a bit noisy', severity: 'warning', line: 18 });
+  const vuln = finding({ title: 'command injection: user input reaches execFileSync', line: 20 });
+
+  const m = scoreMatch(nit, vuln);
+  assert.equal(m.score, 1, 'annotated as nearby context, not settled');
+  assert.match(m.why, /decision was taken on a warning finding/);
+
+  const [a] = annotate([{ ...vuln, blocking: true }], { entries: [nit] });
+  assert.notEqual(a.adjudicated.settled, true);
+
+  const s = convergenceStatus({ findings: [{ ...vuln, blocking: true }] }, { entries: [nit] });
+  assert.equal(s.done, false, 'a critical must not converge on a warning\'s decline');
 });
 
 test('a different kind at the same place does not match', () => {
   assert.equal(scoreMatch(entry({ title: 'x' }), finding({ kind: 'behavioral' })), null);
 });
 
-test('same kind and file within the drift window matches', () => {
+test('same kind, file and severity within the drift window matches', () => {
   const m = scoreMatch(entry({ title: 'x' }), finding({ line: 23 }));
   assert.equal(m.score, 2);
   assert.match(m.why, /drift 3/);
@@ -235,8 +260,7 @@ const report = (findings) => ({ findings });
 test('converged when nothing blocking is open', () => {
   const s = convergenceStatus(report([
     { ...finding(), blocking: false, kind: 'design' },
-    { ...finding(), title: 'examined and validated', confidence: 'consensus',
-      blocking: false, cross_examined: true },
+    { ...finding(), title: 'a note, not a defect', severity: 'info', blocking: false },
   ]), emptyLedger());
   assert.equal(s.done, true);
   assert.match(s.reason, /converged/);
@@ -555,4 +579,116 @@ test('every blocking unsettled finding is counted, whatever bucket it matches', 
   assert.equal(s.done, false, 'an unrecognized confidence label still blocks');
   assert.equal(s.other.length, 1);
   assert.match(s.reason, /unclassified/);
+});
+
+// --- the report is disk JSON too ---------------------------------------------
+
+test('a finding cannot declare itself settled', () => {
+  // `annotate` returned the finding untouched when no ledger entry matched,
+  // and `done` subtracts by `adjudicated.settled` — so a report could settle
+  // its own blocking critical against an empty ledger and converge.
+  const selfDeclared = {
+    ...finding(),
+    adjudicated: { settled: true, disposition: 'declined', reason: 'says so' },
+  };
+  const s = convergenceStatus({ findings: [selfDeclared] }, emptyLedger());
+  assert.equal(s.done, false, 'only a ledger entry may settle a finding');
+  assert.equal(s.settled.length, 0);
+  assert.equal(s.open.length, 1);
+});
+
+test('a report with no findings array is refused, not read as a clean review', () => {
+  // `report.findings ?? []` spelled "I could not find the findings" exactly
+  // like "there were none", so any findings-shaped JSON exited 0.
+  for (const bad of [{}, { findings: null }, { findings: 'none' }]) {
+    assert.throws(() => convergenceStatus(bad, emptyLedger()), /not a synthesis report/);
+  }
+  const clean = convergenceStatus({ findings: [] }, emptyLedger());
+  assert.equal(clean.done, true, 'a genuinely empty report still converges');
+});
+
+test('the blocking field can only add, never excuse', () => {
+  // A truthiness test on a field read off disk fails OPEN when it is missing,
+  // which is the shape `examined` was hardened against twenty lines below.
+  const noField = { ...finding() };
+  delete noField.blocking;
+  assert.equal(convergenceStatus({ findings: [noField] }, emptyLedger()).done, false,
+    'a critical defect blocks whether or not the report says so');
+
+  const denied = { ...finding(), blocking: false };
+  assert.equal(convergenceStatus({ findings: [denied] }, emptyLedger()).done, false,
+    'a report cannot mark a critical defect non-blocking');
+
+  const advisory = { ...finding(), kind: 'design' };
+  delete advisory.blocking;
+  assert.equal(convergenceStatus({ findings: [advisory] }, emptyLedger()).done, true,
+    'and an advisory finding is still never blocking');
+});
+
+test('only a fix that matched this finding is a regression', () => {
+  // Both headings say "recorded fixed", so both must key on the disposition —
+  // and on a match strong enough to be about this finding. A file-wide entry
+  // matches every finding of its kind in the file.
+  const f = finding();
+  const weak = entry({ title: 'unrelated', line: null, disposition: 'fixed' });
+  const declined = entry({ title: 'unrelated', disposition: 'declined' });
+
+  const s1 = convergenceStatus({ findings: [f] }, { entries: [weak] });
+  assert.equal(s1.regressed.length, 0, 'a file-wide fix is too weak to claim the fix failed');
+
+  const s2 = convergenceStatus({ findings: [f] }, { entries: [declined] });
+  assert.equal(s2.regressed.length, 0, 'a declined decision was never a fix');
+});
+
+test('a solo finding recorded fixed against THIS report is unverified, not unexamined', () => {
+  // The companion to the regressed case: the `unverified` half of the same fix.
+  const f = solo();
+  const l = recordDecisions(emptyLedger(),
+    [{ ...f, disposition: 'fixed', reason: 'patched' }],
+    { iteration: 1, atCommit: 'sha1', reportDigest: 'this-report' });
+  const s = convergenceStatus({ findings: [f] }, l, () => null,
+    { reportDigest: 'this-report' });
+  assert.equal(s.unverified.length, 1, 'the ledger adjudicated it against this very report');
+  assert.equal(s.regressed.length, 0, 'which is not a regression');
+});
+
+// --- a lane that failed did not find nothing ---------------------------------
+
+test('a run whose lanes failed has not converged, however few findings it has', () => {
+  // "Reviewed and found nothing" and "never looked" are the same input to a
+  // gate that only counts findings. The reviewers read the diff, so a file big
+  // enough to blow the Adversary's budget removes every security finding from
+  // the run — and exit 0 is what the ship loop reads as "hand over a green PR".
+  const dead = { findings: [], degraded: ['adversary', 'auditor'], skipped: [] };
+  const s = convergenceStatus(dead, emptyLedger());
+  assert.equal(s.done, false);
+  assert.deepEqual(s.degraded, ['adversary', 'auditor']);
+  assert.match(s.reason, /lane\(s\) failed and reviewed nothing/);
+});
+
+test('a lane deliberately not run is surfaced, but does not hold the loop open', () => {
+  // Skipping is a recorded choice, unlike a failure; it must never render as a
+  // clean lane, which is what returning it is for.
+  const s = convergenceStatus({
+    findings: [],
+    degraded: [],
+    skipped: [{ persona: 'adversary', reason: 'no trust boundary in the diff' }],
+  }, emptyLedger());
+  assert.equal(s.done, true);
+  assert.equal(s.skipped.length, 1);
+});
+
+test('a ledger naming more commits than a branch could is refused', () => {
+  // De-duplicating on the ref STRING is not enough: SAFE_REF admits unbounded
+  // distinct spellings of one commit, so 900 entries still cost 900 spawns —
+  // and all of them resolved, so no problem was recorded and the cap never
+  // fired. The ledger was accepted after 11 seconds of forking.
+  const calls = [];
+  const resolve = (ref) => { calls.push(ref); return 'sha'; };
+  const entries = Array.from({ length: 900 }, (_, i) =>
+    entry({ title: `f${i}`, atCommit: `HEAD${'~0'.repeat(i)}` }));
+  const problems = checkBinding({ entries }, resolve);
+
+  assert.ok(calls.length <= 50, `resolved ${calls.length} distinct refs`);
+  assert.match(problems.at(-1), /more than 50 distinct commits/);
 });

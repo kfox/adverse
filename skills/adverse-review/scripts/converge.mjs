@@ -143,16 +143,31 @@ const report = readJson(values.report);
 // Positions in the ledger were recorded against the commit the decision was
 // made at; re-project each one to `head` before matching, or a fix that shifted
 // the file makes every past decision look like a different finding.
+//
+// Memoized for the run. `matchFinding` traces every entry for every finding,
+// so the work is entries x findings, and `traceAnchor` spawns three git
+// processes per call. Measured at 20 entries x 10 findings: 602 spawns, 600 of
+// them byte-identical repeats of three commands; 200 entries took 73.7s. The
+// ledger only grows — `recordDecisions` appends and never rewrites, by design
+// — so this is a curve every honest long-lived ledger walks up, not only a
+// crafted one. `from`/`to` are fixed for the whole run, which is the same
+// reasoning `trace.mjs` already applies to its ref cache.
+const traceCache = new Map();
 const traceFor = (entry) => {
   if (!entry.file || !entry.atCommit) return null;
+  const key = `${entry.atCommit}\u0000${entry.file}\u0000${entry.line}\u0000${entry.citedLine}`;
+  if (traceCache.has(key)) return traceCache.get(key);
+  let traced = null;
   try {
-    return traceAnchor({
+    traced = traceAnchor({
       repo, from: entry.atCommit, to: head,
       file: entry.file, line: entry.line, citedLine: entry.citedLine,
     });
   } catch {
-    return null;
+    traced = null;
   }
+  traceCache.set(key, traced);
+  return traced;
 };
 
 // Validate AFTER coercion, and pass the option only when it is real.
@@ -174,19 +189,37 @@ if (rawMax !== undefined) {
   }
   capOption = { maxIterations: n };
 }
-const status = convergenceStatus(report, ledger ?? emptyLedger(), traceFor,
-  { ...capOption, reportDigest: digest(values.report) });
+let status;
+try {
+  status = convergenceStatus(report, ledger ?? emptyLedger(), traceFor,
+    { ...capOption, reportDigest: digest(values.report) });
+} catch (e) {
+  // Exit 2, not a stack trace on exit 1: exit 1 means "findings still open",
+  // which is a claim about a review this run could not read.
+  process.stderr.write(`converge: ${e.message}\n`);
+  process.exit(2);
+}
 
 const list = (fs) => fs.map((f) => `    - [${f.severity}·${f.kind}] ${f.title}`
   + (f.file ? ` (${f.file}${f.line !== null && f.line !== undefined ? `:${f.line}` : ''})` : '')).join('\n');
 
 let out = `iteration ${status.iteration} of at most ${status.maxIterations}: ${status.reason}\n`;
+if (status.degraded.length) {
+  out += `  LANES THAT FAILED — they reviewed nothing (${status.degraded.length}):\n`
+       + status.degraded.map((p) => `    - ${p}`).join('\n') + '\n'
+       + '    A lane that failed did not find nothing; it did not look. Re-run it.\n';
+}
+if (status.skipped.length) {
+  out += `  lanes not run (${status.skipped.length}):\n`
+       + status.skipped.map((sk) => `    - ${sk.persona ?? sk}${sk.reason ? ` — ${sk.reason}` : ''}`).join('\n') + '\n';
+}
 if (status.open.length)      out += `  still open (${status.open.length}):\n${list(status.open)}\n`;
 if (status.unexamined.length) {
   out += `  NOT CROSS-EXAMINED — blocking, and no round 2 adjudicated them (${status.unexamined.length}):\n`
        + `${list(status.unexamined)}\n`
        + '    These do not count as credible, but they do not count as absent either.\n'
-       + '    Cross-examine them (round 2) or record a decision on each.\n';
+       + '    Record a decision on each (Phase 7). A round 2 can inform that decision,\n'
+       + '    but it cannot settle one — only --record advances the iteration counter.\n';
 }
 if (status.disputed.length) {
   out += `  DISPUTED — reported and challenged, still blocking (${status.disputed.length}):\n`
@@ -197,8 +230,8 @@ if (status.disputed.length) {
 if (status.other.length) {
   out += `  UNCLASSIFIED — blocking and unsettled, matching no bucket (${status.other.length}):\n`
        + `${list(status.other)}\n`
-       + '    This should be unreachable. Treat it as a bug in the stop condition,\n'
-       + '    and decide the findings on their merits meanwhile.\n';
+       + '    Either a bug in the stop condition, or a report whose confidence and\n'
+       + '    cross_examined fields are off-contract. Decide them on their merits.\n';
 }
 if (status.regressed.length) out += `  REGRESSED — recorded fixed, reported again (${status.regressed.length}):\n${list(status.regressed)}\n`;
 if (status.unverified.length) {

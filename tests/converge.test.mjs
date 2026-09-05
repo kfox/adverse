@@ -260,3 +260,52 @@ test('a ledger from a future version is refused rather than guessed at', () => {
   assert.equal(r.status, 2);
   assert.match(r.stderr, /version 99/);
 });
+
+test('a disputed blocking critical is printed and holds the loop open', () => {
+  // Challengers are checked before reporters in synthesis, so one persona can
+  // label a critical two others found `disputed`. It used to leave `open`, be
+  // excluded from `unexamined` as examined, and exit 0 having printed nothing.
+  const { repo } = repoWithTwoCommits();
+  const report = writeJson(repo, 'report.json', {
+    findings: [{ ...blockingFinding(), confidence: 'disputed', cross_examined: true }],
+  });
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--report', report, '--repo', repo], repo);
+  assert.equal(r.status, 1, 'a challenge is not a verdict');
+  assert.match(r.stdout, /DISPUTED — reported and challenged, still blocking/);
+  assert.match(r.stdout, /record `declined` with the challenger's reasoning, or fix it/);
+});
+
+test('a blocking finding matching no bucket is named, not dropped', () => {
+  // `solo` with a cross-examination edge cannot come out of synthesis, but it
+  // can come out of a hand-edited report — and every previous leak in this
+  // file was a blocking finding that matched none of the named buckets.
+  const { repo } = repoWithTwoCommits();
+  const report = writeJson(repo, 'report.json', {
+    findings: [{ ...blockingFinding(), confidence: 'solo', cross_examined: true }],
+  });
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--report', report, '--repo', repo], repo);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /UNCLASSIFIED — blocking and unsettled, matching no bucket/);
+  assert.match(r.stdout, /off-contract/, 'the operator is told it may be the report, not the tool');
+});
+
+test('the unexamined remedy printed is one that advances the iteration counter', () => {
+  // `iterations` grows only under --record, so a printed remedy that records
+  // nothing freezes the counter, makes exit 3 unreachable, and lets a loop
+  // that keeps taking it run forever.
+  const { repo } = repoWithTwoCommits();
+  const report = writeJson(repo, 'report.json', {
+    findings: [{ ...blockingFinding(), confidence: 'solo', cross_examined: false }],
+  });
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--report', report, '--repo', repo], repo);
+  assert.match(r.stdout, /only --record advances the iteration counter/);
+  assert.doesNotMatch(r.stdout, /Cross-examine them \(round 2\) or record/);
+});
+
+test('a report that is not a synthesis report is a usage error, not a clean review', () => {
+  const { repo } = repoWithTwoCommits();
+  const report = writeJson(repo, 'report.json', { verdict: 'looks fine to me' });
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--report', report, '--repo', repo], repo);
+  assert.equal(r.status, 2, 'a usage error, not exit 1 — which claims findings are open');
+  assert.match(r.stderr, /not a synthesis report/);
+});
