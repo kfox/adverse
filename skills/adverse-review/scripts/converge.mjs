@@ -210,7 +210,10 @@ const laneList = (ls) => ls.slice(0, MAX_LANES_LISTED).map((l) => `    - ${lane(
 if (status.degraded.length) {
   out += `  LANES THAT FAILED — they reviewed nothing (${status.degraded.length}):\n`
        + `${laneList(status.degraded)}\n`
-       + '    A lane that failed did not find nothing; it did not look. Re-run it.\n';
+       + '    A lane that failed did not find nothing; it did not look. Re-run it.\n'
+       + '    If it fails again, record the iteration anyway (--record with the\n'
+       + '    decisions you have — an empty list is valid) so the cap can fire. Only\n'
+       + '    --record advances the counter, and "re-run it" alone never terminates.\n';
 }
 if (status.skipped.length) {
   out += `  lanes not run (${status.skipped.length}):\n${laneList(status.skipped)}\n`;

@@ -778,3 +778,71 @@ test('a severity-less entry does not match a severity-less finding', () => {
   assert.equal(m.score, 1);
   assert.match(m.why, /severity-less/);
 });
+
+// --- identity, for the shapes that have no file ------------------------------
+
+test('a contract decision cannot settle a finding about a different counterpart', () => {
+  // For a contract finding the counterpart is half the identity — the claim is
+  // "X contradicts Y" — which is why the positional branch treats a counterpart
+  // mismatch as no match at all. The title branch sat above that guard, so a
+  // stale-README decline settled a cross-validated critical about a security
+  // doc 388 lines away.
+  const sameTitle = 'the docstring contradicts the code';
+  const stale = entry({ title: sameTitle, kind: 'contract', file: 'src/api.mjs',
+    line: 12, counterpart: 'README.md', severity: 'warning', disposition: 'declined' });
+  const real = finding({ title: sameTitle, kind: 'contract', file: 'src/api.mjs',
+    line: 400, counterpart: 'docs/security.md' });
+
+  assert.equal(scoreMatch(stale, real), null);
+  assert.equal(convergenceStatus({ findings: [real] }, { entries: [stale] }).done, false);
+
+  // The same counterpart still settles.
+  const decided = entry({ ...stale, counterpart: 'docs/security.md' });
+  assert.equal(scoreMatch(decided, real).score, 3);
+});
+
+test('a decision on a file-less finding still settles it', () => {
+  // The file guard tested PRESENCE, so it also rejected the case where neither
+  // side names a file — which is not the cross-file leak it was for.
+  // `buildFinding` needs only a title and a severity, an unclassified kind is
+  // blocking, and a `design` advisory carries no file at all, so those
+  // decisions matched nothing ever again and the briefing re-raised them every
+  // iteration.
+  const f = finding({ file: null, line: null, title: 'error handling is inconsistent' });
+  const decided = entry({ title: f.title, file: null, line: null, disposition: 'declined' });
+
+  assert.equal(scoreMatch(decided, f).score, 3);
+  assert.equal(convergenceStatus({ findings: [f] }, { entries: [decided] }).done, true);
+
+  // And a file-less entry still cannot reach into a named file.
+  assert.equal(scoreMatch(decided, finding({ title: f.title, file: 'a.py' })), null);
+});
+
+test('the too-weak note says which weakness it means', () => {
+  // Rendered verbatim into briefing.json, so a wrong explanation is a false
+  // claim put in front of the reviewer whose judgment it is informing.
+  const bySeverity = entry({ title: 'other', line: 100, severity: 'warning' });
+  const [a] = annotate([finding({ title: 'new', line: 102 })], { entries: [bySeverity] });
+  assert.match(a.adjudicated.note, /different severity/);
+  assert.doesNotMatch(a.adjudicated.note, /names no line/);
+
+  const byLine = entry({ title: 'other', line: null });
+  const [b] = annotate([finding({ title: 'new' })], { entries: [byLine] });
+  assert.match(b.adjudicated.note, /names no line/);
+});
+
+test('the adjudication reports a match score, not a confidence label', () => {
+  // The finding beside it in the same briefing carries `confidence: "solo"`.
+  const [a] = annotate([finding()], { entries: [entry({ title: finding().title })] });
+  assert.equal(a.adjudicated.matchScore, 3);
+  assert.equal(a.adjudicated.confidence, undefined, 'the name collision is gone');
+});
+
+test('exit 3 on a degraded run says the lanes never reviewed', () => {
+  // "iteration cap reached with 0 still open" reads like a pass.
+  const l = { ...emptyLedger(), iterations: [{ n: 1 }, { n: 2 }, { n: 3 }] };
+  const s = convergenceStatus({ findings: [], degraded: ['adversary'] }, l);
+  assert.equal(s.capped, true);
+  assert.equal(s.done, false);
+  assert.match(s.reason, /lane\(s\) that never reviewed/);
+});

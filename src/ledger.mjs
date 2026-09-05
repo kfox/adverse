@@ -213,30 +213,45 @@ function numericLine(value) {
 export function scoreMatch(entry, finding, traced = null) {
   if ((entry.kind ?? null) !== (finding.kind ?? null)) return null;
 
+  // EQUALITY, not presence. `!entryFile || !finding.file` also rejected the case
+  // where NEITHER side names a file, which is not the cross-file leak this
+  // guard is for: `buildFinding` requires only a title and a severity, an
+  // unclassified kind is blocking, and a `design` advisory legitimately carries
+  // no file at all. Those decisions then matched nothing ever again, so the
+  // briefing re-raised them every iteration — the circling the ledger exists to
+  // stop — and a run holding one file-less blocking finding could not reach
+  // exit 0 however honestly it was declined.
   const entryFile = traced?.file ?? entry.file;
-  if (!entryFile || !finding.file || entryFile !== finding.file) return null;
+  if ((entryFile ?? null) !== (finding.file ?? null)) return null;
 
-  // Title equality is checked HERE, below the file and kind guards, not above
-  // them. It used to return first, so a decision recorded in one file settled
-  // an identically-titled finding in another file, of any kind and any
-  // severity — and reviewers reuse titles ("off-by-one in the loop bound")
-  // across files precisely because the defect is the same shape.
+  // For a contract finding the counterpart is half the identity — the claim is
+  // "X contradicts Y" — which is why the branch below treats a counterpart
+  // mismatch as no match at all. That has to hold for the title branch too:
+  // reviewers reuse a generic title ("the docstring contradicts the code")
+  // precisely because the same shape recurs against a DIFFERENT counterpart,
+  // and a stale-README decline was settling a cross-validated critical about a
+  // security doc 388 lines away.
+  if (entry.kind === 'contract'
+      && (!entry.counterpart || entry.counterpart !== finding.counterpart)) return null;
+
+  // Title equality is checked HERE, below the identity guards, not above them.
+  // It used to return first, so a decision recorded in one file settled an
+  // identically-titled finding in another, of any kind and any severity.
   if (normalizeTitle(entry.title)
       && normalizeTitle(entry.title) === normalizeTitle(finding.title)) {
-    return { score: 3, why: `identical title in ${entryFile}` };
+    return { score: 3, why: `identical title in ${entryFile ?? 'no file'}` };
   }
 
   const entryLine = numericLine(traced?.line ?? entry.line);
   const findingLine = numericLine(finding.line);
 
   if (entry.kind === 'contract') {
-    if (!entry.counterpart || entry.counterpart !== finding.counterpart) return null;
     // A code/counterpart pair with no line is file-wide, exactly the shape
     // SETTLING_SCORE exists to refuse. It used to score 2 here — one planted
     // entry settled every contract finding in a file, and the loop reported
     // itself converged. It annotates; only an anchor that lines up settles.
     if (entryLine === null || findingLine === null) {
-      return { score: 1, why: `same code/counterpart pair (${entryFile} vs ${entry.counterpart}), but no line on one side` };
+      return { score: 1, weakBecause: 'no-line', why: `same code/counterpart pair (${entryFile} vs ${entry.counterpart}), but no line on one side` };
     }
     const cdrift = Math.abs(entryLine - findingLine);
     if (cdrift > MATCH_WINDOW_LINES) return null;
@@ -248,7 +263,7 @@ export function scoreMatch(entry, finding, traced = null) {
   if (ADVISORY_KINDS.has(entry.kind)) return null;
 
   if (entryLine === null || findingLine === null) {
-    return { score: 1, why: `same kind in ${entryFile}, but no line on one side` };
+    return { score: 1, weakBecause: 'no-line', why: `same kind in ${entryFile ?? 'no file'}, but no line on one side` };
   }
   const drift = Math.abs(entryLine - findingLine);
   if (drift > MATCH_WINDOW_LINES) return null;
@@ -280,6 +295,7 @@ export function scoreMatch(entry, finding, traced = null) {
   if (entrySeverity === null || findingSeverity === null || entrySeverity !== findingSeverity) {
     return {
       score: 1,
+      weakBecause: 'severity',
       why: `same kind at ${entryFile}:${entryLine} (drift ${drift}), but the `
         + `decision was taken on a ${entrySeverity ?? 'severity-less'} finding `
         + `and this one is ${findingSeverity ?? 'severity-less'}`,
@@ -300,6 +316,20 @@ export function matchFinding(ledger, finding, traceFor = () => null) {
     if (!best || scored.score > best.score) best = { entry, ...scored };
   }
   return best;
+}
+
+// Did a recorded FIX fail to hold?
+//
+// Both regression headings say "recorded fixed", so both key on that
+// disposition and on a match strong enough to be about this finding — keying on
+// "annotated and unsettled" announced REGRESSED, which the Skill calls the
+// loudest signal in a run, for a brand-new finding in a file that merely
+// carried one line-less decline. Exported because `triage.mjs` computes the
+// same thing for `briefing.regressed` and had drifted to the older predicate.
+export function isRegressionCandidate(finding) {
+  return finding.adjudicated?.disposition === 'fixed'
+    && finding.adjudicated.matchScore >= SETTLING_SCORE
+    && !finding.adjudicated.settled;
 }
 
 // Annotate findings with the decision that already covers them.
@@ -348,16 +378,26 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
         // here: a 6,164-character line carrying a fake system block rode in
         // through this one. Anything leaving an entry gets clipped.
         matchedBy: clipReason(m.why),
-        confidence: m.score,
+        // `matchScore`, not `confidence`. The finding next to it in the same
+        // briefing carries `confidence: "solo"` — a label — while this is a 1-3
+        // integer. An orchestrator building decisions.json by copying fields off
+        // an annotated finding would have written the number into the entry's
+        // string-typed `confidence`.
+        matchScore: m.score,
         settled,
         sameReport,
         note: settled
           ? 'Already decided in an earlier iteration. Do not re-open it. Challenge '
             + 'only if that decision rested on something the fix has since changed.'
           : tooWeak
-            ? 'An earlier decision covers this file, but it names no line, so it is '
-              + 'too weak to settle this finding. Judge the finding on its merits; '
-              + 'the earlier reason is shown only as context.'
+            ? (m.weakBecause === 'severity'
+              ? 'An earlier decision sits within a few lines of this one, but it was '
+                + 'taken on a finding of a different severity, so it is too weak to '
+                + 'settle this. Judge this finding on its merits — and consider whether '
+                + 'the earlier decision was made at the right severity.'
+              : 'An earlier decision covers this file, but it names no line, so it is '
+                + 'too weak to settle this finding. Judge the finding on its merits; '
+                + 'the earlier reason is shown only as context.')
             : sameReport
               ? 'Recorded FIXED against THIS report, which was produced before the '
                 + 'fix. Not evidence of anything yet: the fix has not been observed. '
@@ -469,10 +509,10 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
   // The match must also be strong enough to be about this finding: a `fixed`
   // entry with no line matches every finding of its kind in the file, and
   // "the fix did not work" is too loud a claim to make on a file-wide guess.
-  const wasFixed = (f) => f.adjudicated?.disposition === 'fixed'
-    && f.adjudicated.confidence >= SETTLING_SCORE;
-  const regressed = unsettled.filter((f) => wasFixed(f) && !f.adjudicated.sameReport);
-  const unverified = unsettled.filter((f) => wasFixed(f) && f.adjudicated.sameReport);
+  const regressed = unsettled.filter((f) => isRegressionCandidate(f)
+    && !f.adjudicated.sameReport);
+  const unverified = unsettled.filter((f) => isRegressionCandidate(f)
+    && f.adjudicated.sameReport);
 
   const credible = (f) => f.confidence === 'cross-validated' || f.confidence === 'consensus';
 
@@ -560,6 +600,7 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
       ? 'converged: no blocking finding is unsettled'
       : capped
         ? `iteration cap (${maxIterations}) reached with ${unsettled.length} still open`
+          + (degraded.length ? `, and ${degraded.length} lane(s) that never reviewed` : '')
         : describeRemaining({ open, unexamined, disputed, other, degraded }),
   };
 }

@@ -448,11 +448,16 @@ node ${SKILL_DIR}/scripts/converge.mjs --ledger "$LEDGER" \
 | 1 | *only* `NOT CROSS-EXAMINED` listed | Phase 9 cannot clear these — each persona verifies only its own findings, so verification can never cross-examine. **Record an explicit decision on each** (Phase 7) |
 | 1 | `DISPUTED` listed | reported and challenged. Read the challenge, then decide it: `declined` with the challenger's reasoning, or fix it |
 | 1 | `UNCLASSIFIED` listed | either a stop-condition bug or a report whose `confidence`/`cross_examined` are off-contract. Decide those findings on their merits, and report it if the report came from this tool |
-| 1 | `LANES THAT FAILED` listed | a lane that failed did not find nothing — it did not look. **Re-run it.** A run missing its Adversary is not a reviewed run, however few findings the others returned |
+| 1 | `LANES THAT FAILED` listed | a lane that failed did not find nothing — it did not look. **Re-run it.** A run missing its Adversary is not a reviewed run, however few findings the others returned. If it fails again, **record the iteration anyway** (`--record` with the decisions you have; an empty list is valid) so the cap can fire |
 | 2 | usage error, or a report that is not a synthesis report | fix the invocation. Exit 2 is deliberately not exit 1: exit 1 is a claim about a review, and this run could not read one |
 | 3 | iteration cap reached, findings still open | **stop and say so.** This is not a pass. List what remains and hand it to the user |
 
-Every exit-1 remedy above records a decision, and that is deliberate. The
+Every exit-1 remedy above ends in a recorded iteration, and that is deliberate.
+A lane that deterministically fails — the case this gate exists for, since a
+diff large enough to exhaust a reviewer's budget fails the same way every retry
+— would otherwise hold the loop open forever with no branch that advances the
+counter. Recording is what makes the cap reachable, which is what makes exit 3
+an honest stop rather than an unreachable one. The
 iteration counter is `ledger.iterations.length + 1`, and `iterations` only grows
 when `converge.mjs` runs with `--record` — so a remedy that does not record
 leaves the counter frozen, `capped` never becomes true, exit 3 is unreachable,

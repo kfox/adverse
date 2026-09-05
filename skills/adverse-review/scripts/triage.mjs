@@ -42,7 +42,7 @@ import path from 'node:path';
 
 import { importFromSrc } from './package-root.mjs';
 
-const { annotate, checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
+const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('prompts.mjs');
 
@@ -343,7 +343,12 @@ for (let i = 0; i < findings.length; i += 1) {
   if (adjudicatedFindings[i].adjudicated) findings[i].adjudicated = adjudicatedFindings[i].adjudicated;
 }
 const settled = findings.filter((f) => f.adjudicated?.settled);
-const regressed = findings.filter((f) => f.adjudicated && !f.adjudicated.settled);
+// The same predicate convergenceStatus uses, imported rather than re-spelled —
+// this copy had drifted to "annotated and unsettled", which calls a brand-new
+// finding REGRESSED because a line-less decline sits somewhere in its file.
+// briefing.regressed IS the round-2 prompt, so that is a false claim made to a
+// reviewer about work that was never done.
+const regressed = findings.filter(isRegressionCandidate);
 
 const briefing = {
   base,
