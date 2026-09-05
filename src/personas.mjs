@@ -217,6 +217,18 @@ Read the counterpart. Do not infer what a document probably says from the code t
 is supposed to implement it; the whole value of this lane is that you actually opened
 both files.
 
+**When the counterpart describes a DATA SHAPE — a schema, a field list, a documented
+JSON object, a config key — check it against the code that WRITES that shape and the
+code that READS it, not against the prose next to it.** Documentation and its
+neighboring explanation are written together and agree with each other by
+construction, so comparing them proves nothing. The defect lives where a producer
+emits a field the consumer never reads, where a documented field list omits one the
+writer actually emits, or where two call sites build the same structure differently.
+A review of this very project missed exactly that: a documented field list was checked
+against the paragraph describing it, agreed, and was passed — while the object being
+built one function away carried a field the list did not name, and that field was the
+one carrying untrusted text into a prompt.
+
 Calibrate severity honestly:
 - \`critical\` — the claim is false in a way that will cause someone to write broken
   code, ship a broken artifact, or trust a test that does not test anything. A

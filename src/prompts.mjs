@@ -321,6 +321,38 @@ with the normal schema.
 Confine yourself to the fix diff. Problems elsewhere in the change were the
 earlier round's business and are either recorded or were let go on purpose.
 
+### Four questions this panel learned the hard way
+
+These are not general advice. Each one names a way a fix on this project has
+already failed verification, more than once, and they are the fastest route to
+the defects a careful read of the diff does not surface.
+
+1. **Did the fix land in every place the flaw lives, or only where the finding
+   pointed?** A finding cites one site; the flaw usually has siblings. Grep for
+   the pattern, not the line. Fixes here have hardened one of two call sites
+   repeatedly — the guard went into the script the finding named and not into
+   the one that runs more often.
+
+2. **Does the fix close the CLASS or the INSTANCE?** Adding one more condition
+   to a test usually narrows an exploit rather than removing it. Re-run the
+   original attack with a single field changed. If the narrowed version still
+   works, the fix is a speed bump and should be reported \`open\`, not closed.
+
+3. **Is the fix reachable on the path that matters?** A gate can be perfectly
+   correct in the module that defines it and never invoked by the caller the
+   finding was about. Trace from the entry point the user actually runs to the
+   new code. A correct, unreachable fix is not a fix.
+
+4. **When a fix adds a case to a classifier, what happens to input matching no
+   case?** Every convergence leak found on this project has that one shape: a
+   value that fell between the enumerated buckets and was therefore counted as
+   nothing. Ask what the default is, and whether the default is the safe one.
+
+And one about the tests that accompany a fix: **a test that fails after a
+security fix may be asserting the bug.** Before treating a red test as a
+regression, read what it claims. Several tests here encoded the vulnerable
+contract and had to be rewritten rather than satisfied.
+
 ## Output schema
 
 Respond with **a single JSON object and nothing else** — parseable by

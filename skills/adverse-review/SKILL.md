@@ -174,6 +174,31 @@ mentioned reads exactly like a lane that looked and found nothing.
 
 `collect.mjs` still exists and still works — it is what the standalone CLI
 needs, and it is the fallback if spawned reviewers cannot reach the filesystem.
+
+**Give each reviewer its own checkout.** Reviewers run concurrently and some of
+them mutate the tree to test a claim; without isolation one lane reads another
+lane's half-applied experiment as the code under review.
+
+```bash
+WORKTREES=$(mktemp -d)
+for p in auditor adversary steward pragmatist; do
+  git worktree add --detach "$WORKTREES/$p" HEAD
+done
+```
+
+Then tell each agent, in its prompt, to work **only** in its own path, and name
+the sibling directories it must not touch. Two things about this are easy to get
+backwards, and both have cost a whole iteration:
+
+- A harness flag that "isolates" an agent creates a worktree of the **session's**
+  repository, which is not necessarily the repository under review. An agent
+  reviewing another checkout lands somewhere that does not contain the code.
+- The rule is "work only in *your* path", **not** "never use an absolute path".
+  The second forbids the agent from reaching the code at all, and a reviewer
+  that cannot read the code cannot verify anything.
+
+Confirm one worktree can run the repo's gate before spawning — a detached
+worktree may lack installed dependencies.
 In this flow, skip it: a 250KB blob costs every reviewer the same tokens
 whether or not they needed the file, and it truncates exactly the large files
 most worth reading.
@@ -515,6 +540,39 @@ The ledger lives outside the run directory (Phase 0) precisely so that nothing
 about cleaning up scratch can touch it. **Keep it if the work is not merged
 yet** — a later pass on the same branch starts from these conclusions. Do not
 commit either.
+
+## Phase 11 — harvest what the run taught
+
+A converged run leaves behind more than a green diff. Before you close it out,
+look back over the iterations and ask whether anything generalizes past this
+change. Findings are about this code; **lessons are about how the work is
+done**, and those are worth more because they apply to the next change too.
+
+Look for these three shapes in particular, because they are what a review
+surfaces that reading cannot:
+
+- **A defect class that recurred.** The same mistake in a second file, or the
+  same shape of leak closed twice. That is not two findings, it is one thing
+  worth knowing.
+- **A fix that failed verification, and why.** A fix landing in one of two call
+  sites, closing an instance rather than a class, or being correct and
+  unreachable, says something about how fixes go wrong here.
+- **A blind spot the panel did not cover** — most valuably one a human found
+  that four lanes missed. That is a gap in the lanes, not in the change.
+
+Where each lesson goes:
+
+| The lesson is about | Write it to |
+|---|---|
+| how a reviewer should look | the persona's prompt in `src/personas.mjs`, or `VERIFY_INSTRUCTIONS` in `src/prompts.mjs` if it is about checking a fix |
+| how this repository works | its `CLAUDE.md` / `AGENTS.md` / architecture notes |
+| how the loop itself should run | this file |
+| how *you* should work, across projects | your own persistent instructions or memory, if the harness gives you one |
+
+Then say what you wrote and why, in one or two sentences. Do not pad this: a
+run that taught nothing generalizable should say so and stop. The point is that
+the panel gets better at reviewing this codebase every time it runs, rather than
+re-learning the same lesson and re-reporting the same class of finding.
 
 ## Failure handling
 
