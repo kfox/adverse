@@ -204,7 +204,7 @@ The **Steward** is this fork's addition, and it exists because code-versus-claim
 
 Every step that is not a review is **deterministic Node code**, not another LLM call. A model in any of those positions can hallucinate consensus, and consensus is the product. Counting validate / challenge edges is enough.
 
-Per review: the CLI runs 8 invocations (4 round-1 + 4 round-2); `--single-round` halves it. The Skill runs 7, because the Pragmatist skips round 2 — nothing advisory can block, so cross-validating it buys nothing — and 5 when the Adversary lane has no trust boundary to look at. Wall time is roughly twice the slowest single invocation, since personas run in parallel within each round.
+Per review: the CLI runs 8 invocations (4 round-1 + 4 round-2); `--single-round` halves it. The Skill runs 7 for the full shape, and its Phase 1 plan (`plan.mjs`) scales that in both directions: a small boundary-free diff runs 2 round-1 calls (Auditor + Steward) and, when round 1 reports nothing blocking, no round 2 — a floor of 2 — while a large diff splits the Auditor and Adversary lanes across two agents each, up to 9. The Pragmatist always skips round 2 (nothing advisory can block, so cross-validating it buys nothing). Wall time is roughly twice the slowest single invocation, since personas run in parallel within each round.
 
 ## What this fork adds
 
@@ -236,7 +236,7 @@ Review → fix → verify → repeat, stopping when **no blocking finding is lef
 - `declined` / `deferred` **settle** a question. A later pass is told the decision and its reason and told not to re-open it. This is what makes the loop terminate rather than circle.
 - `fixed` settles **nothing**. A finding recorded fixed that comes back means the fix did not work — the most valuable thing a re-review can report. It is surfaced louder than a new finding and still holds the loop open. Suppressing it is the natural-looking optimization that would quietly turn this into a machine for declaring victory.
 
-**A stop condition** ([`converge.mjs`](skills/adverse-review/scripts/converge.mjs)) — arithmetic on data the panel already produced, capped at 3 iterations. The cap exits `3`, not `0`: a capped run has open findings and has to say so, or the loop's promise is a lie told by an exit code.
+**A stop condition** ([`converge.mjs`](skills/adverse-review/scripts/converge.mjs)) — arithmetic on data the panel already produced, capped at 3 iterations — 5 when round 1 reported a critical finding of a blocking kind (`plan.mjs --escalate`). The cap exits `3`, not `0`: a capped run has open findings and has to say so, or the loop's promise is a lie told by an exit code.
 
 The verification pass is not a re-review. It asks two questions — is this finding closed, and *did closing it break something new* — and the second half is not politeness. A fix written under pressure to close a finding is unreviewed code, written by whoever was most convinced the finding was real. A pass that only ever confirmed closures would launder new defects into the tree one iteration at a time.
 
@@ -268,6 +268,7 @@ src/                          # Shared core, used by both CLI and Skill
   trace.mjs                   # Re-project a finding's anchor across commits
   ledger.mjs                  # Adjudication log + the convergence stop condition
   scope.mjs                   # Does this change have a trust boundary in it?
+  scaling.mjs                 # How much review does this change deserve?
   html.mjs                    # Self-contained HTML dashboard renderer
   cli.mjs                     # Argv parsing + command dispatch
 
@@ -282,7 +283,7 @@ skills/adverse-review/
     triage.mjs                # Skill bridge: claim/kind checks, clustering, briefing
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
-    scope.mjs                 # Skill bridge: should the Adversary lane run?
+    plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
     dump-prompts.mjs          # Regenerate prompt files from src/ (a test enforces it)
     prompts/                  # Generated — edit src/, then re-run dump-prompts.mjs
@@ -301,7 +302,7 @@ tests/
 - **Source size cap.** Default 250 KB total / 30 KB per file. Trips on very large repos in non-diff mode. Use `--diff` for review-on-PR workflows where the change set is what matters.
 - **Subprocess agent contract.** The CLI assumes the agent reads prompt from stdin and writes the response to stdout, exiting cleanly. Most coding agents support this; some need a flag (`-p` for Claude Code, `exec` for Codex CLI). When in doubt, run the agent manually with a stdin prompt first to confirm the shape.
 - **Not a fix-applier — mostly.** The CLI produces a report and stops; hand it to your coding agent if you want fixes applied. The Skill's convergence loop *does* apply fixes, but only when the user asks for that shape, and it records a reason for every finding it declines as well as every one it fixes.
-- **The scope gate is a budget hint, not a security judgment.** It decides whether the Adversary lane has anything to look at by pattern-matching changed paths and added lines. It cannot know that an innocuous-looking helper is called from an auth path, so it is biased toward running the lane, and a skipped lane is always named in the report — an unmentioned one reads exactly like a lane that looked and found nothing.
+- **The review plan is a budget policy, not a judgment.** The scope gate decides whether the Adversary lane has anything to look at by pattern-matching changed paths plus added and removed lines; the scaling policy sizes the rest — lanes, agents per lane, rounds, and the iteration cap — from the diff and from what round 1 found. Neither can know that an innocuous-looking helper is called from an auth path, so both are biased toward more review (pins force the full panel on paths a repo names), and a skipped lane is always named in the report — an unmentioned one reads exactly like a lane that looked and found nothing.
 - **`design` findings never gate.** That is deliberate, but it means the loop can converge with real design feedback outstanding. It is reported as a backlog; someone still has to read it.
 
 ## License and credit

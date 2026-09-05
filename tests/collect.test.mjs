@@ -168,3 +168,10 @@ test('collectDiff requires a git repo', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a base that looks like a git option is refused', () => {
+  assert.throws(
+    () => collectDiff(process.cwd(), '--output=/tmp/x'),
+    /looks like an option/,
+  );
+});

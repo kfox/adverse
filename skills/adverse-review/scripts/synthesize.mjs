@@ -22,12 +22,13 @@ const { values } = parseArgs({
     'html-out': { type: 'string' },
     skipped:    { type: 'string', multiple: true },
     degraded:   { type: 'string', multiple: true },
+    'round2-skipped': { type: 'string' },
   },
   strict: true,
 });
 
 if (!values.round1) {
-  process.stderr.write('Usage: synthesize.mjs --round1 <combined.json> [--round2 <combined.json>] [--out report.md] [--json-out report.json] [--html-out report.html] [--skipped persona=reason] [--degraded persona]\n');
+  process.stderr.write('Usage: synthesize.mjs --round1 <combined.json> [--round2 <combined.json>] [--out report.md] [--json-out report.json] [--html-out report.html] [--skipped persona=reason] [--degraded persona] [--round2-skipped reason]\n');
   process.exit(2);
 }
 
@@ -57,7 +58,18 @@ const skippedPersonas = (values.skipped ?? []).map((spec) => {
 // reported four healthy lanes and three findings as a unanimous SHIP.
 const failedPersonas = (values.degraded ?? []).map((spec) => spec.split('=')[0]);
 
-const syn = synthesize(round1, round2, { skippedPersonas, failedPersonas });
+// --round2-skipped makes a skipped round 2 visible in the report; a run whose
+// round 2 was skipped and not declared is textually indistinguishable from one
+// where the panel cross-examined and found nothing. An EMPTY value is that
+// same failure wearing a declaration's clothes (an unset $R2_REASON expands to
+// ""), so it is a usage error, not a silent no-op.
+if (values['round2-skipped'] !== undefined && values['round2-skipped'].trim() === '') {
+  process.stderr.write('synthesize: --round2-skipped requires a non-empty reason\n');
+  process.exit(2);
+}
+const syn = synthesize(round1, round2, {
+  skippedPersonas, failedPersonas, round2Skipped: values['round2-skipped'] ?? null,
+});
 const md = renderMarkdown(syn);
 
 if (values.out) writeFileSync(values.out, md, 'utf-8');

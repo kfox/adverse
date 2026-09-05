@@ -376,3 +376,50 @@ test('a ledger entry with no atCommit is refused', () => {
   assert.equal(r.status, 1);
   assert.match(r.stderr, /carries no atCommit/);
 });
+
+test('a split lane\'s two payloads merge in briefing.verdicts — worse verdict, both summaries', () => {
+  const { briefing } = runTriage(repo, [
+    { persona: 'auditor', verdict: 'approve', summary: 'half A', findings: [] },
+    { persona: 'auditor', verdict: 'reject', summary: 'half B', findings: [] },
+  ]);
+  assert.equal(briefing.verdicts.auditor.verdict, 'reject');
+  assert.match(briefing.verdicts.auditor.summary, /half A/);
+  assert.match(briefing.verdicts.auditor.summary, /half B/);
+});
+
+test('the merged verdict does not depend on which half the shell globbed first', () => {
+  const { briefing } = runTriage(repo, [
+    { persona: 'auditor', verdict: 'reject', summary: 'half B', findings: [] },
+    { persona: 'auditor', verdict: 'approve', summary: 'half A', findings: [] },
+  ]);
+  assert.equal(briefing.verdicts.auditor.verdict, 'reject');
+});
+
+test('an unsplit lane\'s off-contract verdict is normalized in the briefing too', () => {
+  const { briefing } = runTriage(repo, [
+    { persona: 'auditor', verdict: 'REJECT', summary: 's', findings: [] },
+  ]);
+  assert.equal(briefing.verdicts.auditor.verdict, 'reject');
+});
+
+test('a persona outside the registry is refused before it can key the briefing', () => {
+  const p = path.join(repo, 'round1-phantom.json');
+  writeFileSync(p, JSON.stringify({ persona: 'Auditor', verdict: 'approve', summary: 's', findings: [] }));
+  const out = path.join(repo, 'briefing-phantom.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /unknown persona/);
+});
+
+test('a --base that looks like a git option is refused', () => {
+  const p = path.join(repo, 'round1-ok.json');
+  writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));
+  const out = path.join(repo, 'briefing-x.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--repo', repo, '--base=--output=/tmp/x', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /looks like an option/);
+});

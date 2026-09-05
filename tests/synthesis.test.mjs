@@ -4,7 +4,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isBlocking, isOpenBlocking, renderMarkdown, synthesize, toJsonReport } from '../src/synthesis.mjs';
+import {
+  isBlocking, isOpenBlocking, mergeSplitReviews, normalizeVerdict, renderMarkdown,
+  synthesize, toJsonReport, worseVerdict,
+} from '../src/synthesis.mjs';
 
 const f = (title, severity = 'warning', file = null, line = null, detail = 'd', fix = null) =>
   ({ severity, file, line, title, detail, fix });
@@ -352,4 +355,85 @@ test("a round-2 reviewer's own added finding is not cross-examined", () => {
   const crit = rep.findings.find((f) => f.severity === 'critical');
   assert.equal(crit.blocking, true);
   assert.equal(crit.cross_examined, false, 'but nobody went on record about the critical');
+});
+
+// --- split-lane merge semantics + the declarable round-2 skip -----------------
+
+test('normalizeVerdict sends off-contract input to reject, never past it', () => {
+  assert.equal(normalizeVerdict('approve'), 'approve');
+  assert.equal(normalizeVerdict('REJECT'), 'reject');
+  assert.equal(normalizeVerdict(undefined), 'reject');
+  assert.equal(normalizeVerdict('toString'), 'reject');
+});
+
+test('worseVerdict is order-independent and garbage cannot erase a reject', () => {
+  assert.equal(worseVerdict('reject', 'approve'), 'reject');
+  assert.equal(worseVerdict('approve', 'reject'), 'reject');
+  assert.equal(worseVerdict('reject', 'REJECTED'), 'reject');
+  assert.equal(worseVerdict('conditional', 'approve'), 'conditional');
+});
+
+test('mergeSplitReviews keeps both summaries and unions findings', () => {
+  const merged = mergeSplitReviews(
+    { persona: 'auditor', verdict: 'approve', summary: 'half A', findings: [{ title: 'a' }] },
+    { persona: 'auditor', verdict: 'reject', summary: 'half B', findings: [{ title: 'b' }] },
+  );
+  assert.equal(merged.verdict, 'reject');
+  assert.match(merged.summary, /half A/);
+  assert.match(merged.summary, /half B/);
+  assert.deepEqual(merged.findings.map((f) => f.title), ['a', 'b']);
+});
+
+test('a skipped round 2 is visible in the markdown, the JSON, and nowhere claims cross-examination', () => {
+  const syn = synthesize(
+    { auditor: { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] } },
+    {},
+    { round2Skipped: 'no blocking finding in round 1' },
+  );
+  assert.equal(syn.round2Skipped, 'no blocking finding in round 1');
+  const md = renderMarkdown(syn);
+  assert.match(md, /Round 2 skipped:/);
+  assert.equal(toJsonReport(syn).round2_skipped, 'no blocking finding in round 1');
+});
+
+test('an undeclared round 2 stays null everywhere', () => {
+  const syn = synthesize({ auditor: { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] } });
+  assert.equal(syn.round2Skipped, null);
+  assert.doesNotMatch(renderMarkdown(syn), /Round 2 skipped:/);
+});
+
+test('synthesize itself normalizes an off-contract verdict — the rule is not bridge-only', () => {
+  const syn = synthesize({
+    auditor: { persona: 'auditor', verdict: 'REJECTED', summary: 's', findings: [] },
+    steward: { persona: 'steward', verdict: 'approve', summary: 's', findings: [] },
+  });
+  assert.equal(syn.verdicts.auditor, 'reject');
+  assert.match(syn.consensusLabel, /HOLD|BLOCK/);
+});
+
+test('a merged summary bounds each half at the reviewer contract limit, and the render cell fits the join', () => {
+  // The bound is prompts.mjs's "<= 200 chars" per-reviewer contract, because
+  // this merge feeds round1.json and the triage briefing, not just a report
+  // cell: a half that honors the contract must survive byte-for-byte in the
+  // persisted payload.
+  const contractA = 'A'.repeat(200);
+  const merged = mergeSplitReviews(
+    { persona: 'auditor', verdict: 'approve', summary: contractA, findings: [] },
+    { persona: 'auditor', verdict: 'reject', summary: 'half B found the injection', findings: [] },
+  );
+  assert.match(merged.summary, /^A{200} · half B found the injection$/);
+
+  // A runaway half still cannot amputate the other, and the renderer's cell
+  // cap is derived from this bound, so the whole join survives rendering.
+  const runaway = mergeSplitReviews(
+    { persona: 'auditor', verdict: 'approve', summary: 'A'.repeat(1000), findings: [] },
+    { persona: 'auditor', verdict: 'reject', summary: 'B'.repeat(1000), findings: [] },
+  );
+  assert.equal(runaway.summary.length, 403);
+  assert.match(runaway.summary, /B{200}$/);
+
+  const syn = synthesize({
+    auditor: { persona: 'auditor', verdict: 'reject', summary: runaway.summary, findings: [] },
+  });
+  assert.equal(syn.summaries.auditor.length, 403);
 });

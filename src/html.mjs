@@ -72,6 +72,9 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
       </section>`);
   }
 
+  const round2Skipped = syn.round2Skipped
+    ? `<div class="banner-warn">Round 2 skipped: ${esc(syn.round2Skipped)}. Nothing here was cross-examined.</div>`
+    : '';
   const degraded = syn.degraded.length
     ? `<div class="banner-warn">Degraded run: <strong>${esc(syn.degraded.join(', '))}</strong> failed and were excluded.</div>`
     : '';
@@ -142,6 +145,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     <p class="summary">Open blocking: <strong>${(syn.openBlocking ?? []).length}</strong> (cross-validated or consensus, not advisory, not info)</p>
 
     ${degraded}
+    ${round2Skipped}
 
     <h2>Reviewer verdicts</h2>
     <table class="verdicts">

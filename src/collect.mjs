@@ -140,6 +140,11 @@ export function collectDiff(target, base) {
   if (!isGitRepo(absRoot)) {
     throw new Error(`${absRoot} is not a git repository (--diff requires git)`);
   }
+  // A base in git's option position becomes a git option (`--output=X`
+  // creates X); execFile blocks the shell, not git's own parser.
+  if (base && String(base).startsWith('-')) {
+    throw new Error(`base ${JSON.stringify(base)} looks like an option, not a ref`);
+  }
   const diffArgs = base ? ['diff', `${base}...HEAD`] : ['diff', 'HEAD'];
   const namesArgs = base ? ['diff', '--name-only', `${base}...HEAD`] : ['diff', '--name-only', 'HEAD'];
 

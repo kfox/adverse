@@ -40,6 +40,48 @@ const SEVERITY_ORDER = { critical: 0, warning: 1, info: 2 };
 // cancel each other out, conditional carries half-weight on the approve side.
 // The mean across reviewers gives the final score in [-1, 1].
 const verdictScores = { approve: 1, conditional: 0.5, reject: -1 };
+
+// Split-lane merge semantics, shared by the combine and triage bridges so the
+// combined payload and the briefing cannot disagree about what a split lane
+// concluded. An off-contract verdict normalizes to `reject`: the scorer above
+// treats an unknown string as 0 (better than reject's -1) and consensusLabel
+// counts only the literal `reject` as a block, so letting garbage through is
+// the one direction that can erase a real rejection.
+export const VERDICT_RANK = { reject: 0, conditional: 1, approve: 2 };
+
+export function normalizeVerdict(v) {
+  return Object.hasOwn(VERDICT_RANK, v) ? v : 'reject';
+}
+
+export function worseVerdict(a, b) {
+  const na = normalizeVerdict(a);
+  const nb = normalizeVerdict(b);
+  return VERDICT_RANK[na] <= VERDICT_RANK[nb] ? na : nb;
+}
+
+// Union a split lane's two payloads: findings concatenate, the worse verdict
+// wins, and BOTH summaries survive — a verdict from one half rendered beside
+// the other half's summary reads as one reviewer's position, and is not.
+// Each half is bounded BEFORE the join, at the per-reviewer contract limit
+// (prompts.mjs promises "<= 200 chars"), so a half that honors the contract
+// loses nothing in the persisted payload — this merge feeds round1.json and
+// the triage briefing, not just a report cell — while a runaway half cannot
+// amputate the other, which is exactly the voice the merge exists to keep.
+// The summary cell cap below is derived from this bound for the same reason.
+const MERGED_SUMMARY_PART_MAX = 200;
+const SUMMARY_CELL_MAX = 2 * MERGED_SUMMARY_PART_MAX + ' · '.length;
+export function mergeSplitReviews(a, b) {
+  const part = (s) => String(s ?? '').slice(0, MERGED_SUMMARY_PART_MAX);
+  return {
+    ...a,
+    verdict: worseVerdict(a?.verdict, b?.verdict),
+    summary: [a?.summary, b?.summary].filter(Boolean).map(part).join(' · '),
+    findings: [
+      ...(Array.isArray(a?.findings) ? a.findings : []),
+      ...(Array.isArray(b?.findings) ? b.findings : []),
+    ],
+  };
+}
 const CONFIDENCE_RANK = { disputed: 0, 'cross-validated': 1, consensus: 2, solo: 3 };
 
 function severityRank(s) {
@@ -108,7 +150,8 @@ function buildFinding(persona, raw) {
   };
 }
 
-export function synthesize(round1, round2 = {}, { failedPersonas = [], skippedPersonas = [] } = {}) {
+export function synthesize(round1, round2 = {},
+  { failedPersonas = [], skippedPersonas = [], round2Skipped = null } = {}) {
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
@@ -200,8 +243,11 @@ export function synthesize(round1, round2 = {}, { failedPersonas = [], skippedPe
   const verdicts = {};
   const summaries = {};
   for (const [p, r] of Object.entries(round1)) {
-    verdicts[p] = r?.verdict ?? 'unknown';
-    summaries[p] = String(r?.summary ?? '').slice(0, 300);
+    // Normalized here, not only in the combine bridge, so the CLI path gets
+    // the same rule: an off-contract verdict scores as reject, never as a
+    // neutral string that can dilute a real rejection out of the banner.
+    verdicts[p] = normalizeVerdict(r?.verdict);
+    summaries[p] = String(r?.summary ?? '').slice(0, SUMMARY_CELL_MAX);
   }
   const verdictList = Object.values(verdicts);
   const score =
@@ -224,6 +270,10 @@ export function synthesize(round1, round2 = {}, { failedPersonas = [], skippedPe
     // failed. Both must appear in the report: a lane that was skipped and not
     // mentioned reads exactly like a lane that looked and found nothing.
     skipped: [...skippedPersonas],
+    // Same rule, one level up: a run whose round 2 was skipped must say so, or
+    // it is textually indistinguishable from one where the panel
+    // cross-examined and found nothing.
+    round2Skipped: round2Skipped || null,
   };
 }
 
@@ -308,6 +358,13 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
     lines.push(
       `> **Lane not run:** ${syn.skipped.map((s) => `${s.persona ?? s}${s.reason ? ` — ${s.reason}` : ''}`).join('; ')}. `
       + 'Nothing below reflects that perspective.',
+    );
+  }
+  if (syn.round2Skipped) {
+    lines.push('');
+    lines.push(
+      `> **Round 2 skipped:** ${syn.round2Skipped}. No finding below was `
+      + 'cross-examined, and round 2\'s cross-lane additions were forgone.',
     );
   }
   lines.push('');
@@ -398,6 +455,7 @@ export function toJsonReport(syn) {
     summaries: syn.summaries,
     degraded: syn.degraded,
     skipped: syn.skipped ?? [],
+    round2_skipped: syn.round2Skipped ?? null,
     // Report-level flag, kept only so an older consumer keeps working. It is
     // NOT what the stop condition should read: `some()` over the whole report
     // means one edge anywhere — including on an advisory finding that can never

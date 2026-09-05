@@ -34,8 +34,11 @@ const PATH_SIGNALS = [
   'sql', 'deserial', 'pickle', 'subprocess', 'shell',
 ];
 
-// Content patterns, matched against ADDED lines only — an unchanged sink is
-// somebody else's review. Same pruning rule: `open(`, `exec(`, `readFile`,
+// Content patterns, matched against ADDED and REMOVED lines — an UNCHANGED
+// sink is somebody else's review, but a removed line is this change's doing:
+// deleting `if (!authorized) throw` is a three-line diff that removes a guard,
+// and the false positive on the other side (removing a sink, a security
+// improvement) costs two model calls under the stated bias. Same pruning rule: `open(`, `exec(`, `readFile`,
 // `JSON.parse`, and a bare `../` all fired on essentially every diff, the last
 // three on ordinary imports, so they are gone. What remains either names a
 // dangerous sink or names a security concept outright.
@@ -66,6 +69,39 @@ const CONTENT_SIGNALS = [
   /authenticat/i, /authoriz/i, /permission/i, /sanitiz/i, /credential/i,
 ];
 
+// Signals scanned against REMOVED lines only. CONTENT_SIGNALS names sinks and
+// security vocabulary, but a deleted guard needs neither: `if (!u.perm[i])
+// throw` removes enforcement without naming a single concept on that list,
+// and the attacker picks the vocabulary. These match the SHAPE of enforcement
+// instead — a negated-condition check, a one-line guard, a thrown refusal, an
+// assertion, refusal words, HTTP deny codes — because removing enforcement is
+// exactly the Adversary's business regardless of what the guard was called.
+// They stay off the added-line scan, where `if (!x) return` is most of
+// ordinary code and the signal would launder "always run" into a decision.
+// No static list survives a determined author — the deleted-lines floor and
+// the pins are the backstops — but shape is what the author cannot cheaply
+// rename away.
+const REMOVED_LINE_SIGNALS = [
+  // Negated-condition check, in the mainstream spellings: `if (!x` (C
+  // family), `if !ok` (Go, no parens), `if not x` (Python), and the
+  // keyword-inverted forms — Ruby's `unless` and Swift's `guard … else` ARE
+  // negated conditionals with no `!`/`not` token to match. `(?!=)` keeps a
+  // plain `if (a != b)` comparison from reading as a negated guard; the
+  // paren-required version alone missed the Python and Go guards verbatim.
+  /\bif\s*\(?\s*(!(?!=)|not\b)/,
+  /\bunless\b/,
+  /\bguard\b.*\belse\b/,
+  /\bif\s*\(.*\)\s*\{?\s*(throw|return|raise)\b/,
+  // The enforcement consequence, at line start (multi-line guard body) or
+  // right after an opening brace (`else { throw … }`, `if !ok { return … }`).
+  /^\s*(throw|raise)\b/,
+  /\{\s*(throw|raise|return)\b/,
+  /\bassert\w*\s*\(/i,
+  /\b(deny|denied|forbid|forbidden|reject)/i,
+  /\b40[13]\b/,
+  /\bperms?\b/i, /\brole\b/i, /\badmin/i, /\bowner/i,
+];
+
 // Lines a unified diff adds. The `+++ b/path` header is not an added line —
 // but `+++i;` IS, and matching the bare `+++` prefix silently dropped every
 // added line starting with `++`, which is exactly what an attacker would
@@ -79,9 +115,17 @@ const CONTENT_SIGNALS = [
 // costs two model calls; a false negative ships a vulnerability nobody looked
 // for), so cost control belongs in the patterns, not in dropping input. The SQL
 // signal, the one that was actually super-linear, is bounded by shape now.
-function addedLines(diffText) {
+export function addedLines(diffText) {
   return String(diffText).split('\n')
     .filter((l) => l.startsWith('+') && !l.startsWith('+++ '))
+    .map((l) => l.slice(1));
+}
+
+// Same header rule on the minus side: `--- a/path` always has the trailing
+// space, `---x` is a removed line.
+export function removedLines(diffText) {
+  return String(diffText).split('\n')
+    .filter((l) => l.startsWith('-') && !l.startsWith('--- '))
     .map((l) => l.slice(1));
 }
 
@@ -98,16 +142,19 @@ export function assessScope({ files = [], diff = '' } = {}) {
     }
   }
 
-  const added = addedLines(diff);
   const seen = new Set();
-  for (const line of added) {
-    for (const re of CONTENT_SIGNALS) {
-      const m = re.exec(line);
-      if (!m || seen.has(re.source)) continue;
-      seen.add(re.source);
-      evidence.push({ kind: 'content', signal: re.source, sample: line.trim().slice(0, 120) });
+  const scan = (lines, kind, signals) => {
+    for (const line of lines) {
+      for (const re of signals) {
+        const m = re.exec(line);
+        if (!m || seen.has(re.source)) continue;
+        seen.add(re.source);
+        evidence.push({ kind, signal: re.source, sample: line.trim().slice(0, 120) });
+      }
     }
-  }
+  };
+  scan(addedLines(diff), 'content', CONTENT_SIGNALS);
+  scan(removedLines(diff), 'content-removed', [...CONTENT_SIGNALS, ...REMOVED_LINE_SIGNALS]);
 
   // No files at all means we were handed nothing to reason about, which is not
   // the same as having looked and found nothing.
@@ -118,16 +165,17 @@ export function assessScope({ files = [], diff = '' } = {}) {
   if (evidence.length) {
     const paths = evidence.filter((e) => e.kind === 'path').length;
     const content = evidence.filter((e) => e.kind === 'content').length;
+    const removed = evidence.filter((e) => e.kind === 'content-removed').length;
     return {
       recommend: 'run',
-      reason: `trust-boundary signals present (${paths} in paths, ${content} in added code)`,
+      reason: `trust-boundary signals present (${paths} in paths, ${content} in added code, ${removed} in removed code)`,
       evidence,
     };
   }
 
   return {
     recommend: 'skip',
-    reason: 'no trust-boundary signal in the changed paths or the added lines',
+    reason: 'no trust-boundary signal in the changed paths, the added lines, or the removed lines',
     evidence: [],
   };
 }
