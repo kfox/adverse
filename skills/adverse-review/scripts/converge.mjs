@@ -188,6 +188,10 @@ if (status.unexamined.length) {
        + '    These do not count as credible, but they do not count as absent either.\n'
        + '    Cross-examine them (round 2) or record a decision on each.\n';
 }
+if (status.disputed.length) {
+  out += `  DISPUTED — challenged on record, not blocking (${status.disputed.length}):\n`
+       + `${list(status.disputed)}\n`;
+}
 if (status.regressed.length) out += `  REGRESSED — recorded fixed, reported again (${status.regressed.length}):\n${list(status.regressed)}\n`;
 if (status.unverified.length) {
   out += `  recorded fixed against THIS report, not yet re-observed (${status.unverified.length}):\n`

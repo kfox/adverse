@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -333,4 +333,46 @@ test('an in-tree symlink pointing out of the tree is disproved, not followed', (
   assert.equal(briefing.findings[0].claimCheck.status, 'DISPROVED');
   assert.ok(!JSON.stringify(briefing).includes('SSH-SENTINEL'),
     'the symlink target must never reach the briefing, which becomes the round-2 prompt');
+});
+
+test('a ledger that does not belong to this repository is refused', () => {
+  // triage.mjs writes briefing.json, which IS the round-2 prompt, so a foreign
+  // ledger accepted here marks findings settled with "Do not re-open it" in
+  // front of every reviewer. converge.mjs's copy of this guard is tested;
+  // this one was added by the same fix and was not.
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-foreign-'));
+  const ledger = path.join(dir, 'l.json');
+  writeFileSync(ledger, JSON.stringify({
+    version: 1, base: 'some-other-repo-entirely', iterations: [],
+    entries: [{ id: 'X', title: 't', kind: 'defect', file: 'app.py', line: 20,
+                disposition: 'declined', reason: 'trust me',
+                atCommit: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' }],
+  }));
+
+  const round1 = path.join(dir, 'round1-0.json');
+  writeFileSync(round1, JSON.stringify(review('auditor', [finding()])));
+  const r = spawnSync(process.execPath, [TRIAGE, '--round1', round1, '--repo', repo,
+                                         '--base', 'base', '--ledger', ledger,
+                                         '--out', path.join(dir, 'b.json')],
+                      { encoding: 'utf-8' });
+  assert.equal(r.status, 1, 'a foreign ledger must be refused, not adjudicated from');
+  assert.match(r.stderr, /does not belong to this repository/);
+});
+
+test('a ledger entry with no atCommit is refused', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-unanchored-'));
+  const ledger = path.join(dir, 'l.json');
+  writeFileSync(ledger, JSON.stringify({
+    version: 1, iterations: [],
+    entries: [{ id: 'X', title: 't', kind: 'defect', file: 'app.py', line: 20,
+                disposition: 'declined', reason: 'trust me' }],
+  }));
+  const round1 = path.join(dir, 'round1-0.json');
+  writeFileSync(round1, JSON.stringify(review('auditor', [finding()])));
+  const r = spawnSync(process.execPath, [TRIAGE, '--round1', round1, '--repo', repo,
+                                         '--base', 'base', '--ledger', ledger,
+                                         '--out', path.join(dir, 'b.json')],
+                      { encoding: 'utf-8' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /carries no atCommit/);
 });
