@@ -477,7 +477,7 @@ node ${SKILL_DIR}/scripts/converge.mjs --ledger "$LEDGER" \
 | 1 | findings still open | go to Phase 9 |
 | 1 | *only* `NOT CROSS-EXAMINED` listed | Phase 9 cannot clear these — each persona verifies only its own findings, so verification can never cross-examine. **Record an explicit decision on each** (Phase 7) |
 | 1 | `DISPUTED` listed | reported and challenged. Read the challenge, then decide it: `declined` with the challenger's reasoning, or fix it |
-| 1 | `UNCLASSIFIED` listed | either a stop-condition bug or a report whose `confidence`/`cross_examined` are off-contract. Decide those findings on their merits, and report it if the report came from this tool |
+| 1 | `UNCLASSIFIED` listed | usually a stop-condition bug or a report whose `confidence`/`cross_examined` are off-contract — or, on a hand-edited report, a `blocking: true` override on a finding this tool would not otherwise call blocking. Decide those findings on their merits, and report it if the report came from this tool |
 | 1 | `LANES THAT FAILED` listed | a lane that failed did not find nothing — it did not look. **Re-run it.** A run missing its Adversary is not a reviewed run, however few findings the others returned. If it fails again, **record the iteration anyway** (`--record` with the decisions you have; an empty list is valid) so the cap can fire |
 | 2 | usage error, or a report that is not a synthesis report | fix the invocation. Exit 2 is deliberately not exit 1: exit 1 is a claim about a review, and this run could not read one |
 | 3 | iteration cap reached, findings still open | **stop and say so.** This is not a pass. List what remains and hand it to the user |
