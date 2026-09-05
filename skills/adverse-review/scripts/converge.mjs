@@ -182,6 +182,12 @@ const list = (fs) => fs.map((f) => `    - [${f.severity}·${f.kind}] ${f.title}`
 
 let out = `iteration ${status.iteration} of at most ${status.maxIterations}: ${status.reason}\n`;
 if (status.open.length)      out += `  still open (${status.open.length}):\n${list(status.open)}\n`;
+if (status.unexamined.length) {
+  out += `  NOT CROSS-EXAMINED — blocking, and no round 2 adjudicated them (${status.unexamined.length}):\n`
+       + `${list(status.unexamined)}\n`
+       + '    These do not count as credible, but they do not count as absent either.\n'
+       + '    Cross-examine them (round 2) or record a decision on each.\n';
+}
 if (status.regressed.length) out += `  REGRESSED — recorded fixed, reported again (${status.regressed.length}):\n${list(status.regressed)}\n`;
 if (status.unverified.length) {
   out += `  recorded fixed against THIS report, not yet re-observed (${status.unverified.length}):\n`

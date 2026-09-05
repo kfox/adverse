@@ -323,3 +323,51 @@ test('a settled finding is not also listed as an unverified fix', () => {
   assert.equal(s.unverified.length, 0, 'a declined decision is settled, not an unverified fix');
   assert.equal(s.done, true);
 });
+
+// --- a report nobody cross-examined is not a converged report ----------------
+
+const solo = (over = {}) => ({
+  severity: 'critical', kind: 'defect', file: 'x.py', line: 10, title: 'a',
+  blocking: true, confidence: 'solo', ...over,
+});
+
+test('blocking findings that no round 2 adjudicated hold the loop open', () => {
+  // `open` keeps only cross-validated and consensus findings, so a report with
+  // no cross-review counts zero however many criticals it holds — and the
+  // stop condition read that as success. Phase 9 produces exactly this shape:
+  // each persona verifies only its own findings, so nothing can ever be
+  // cross-validated. Exiting 0 there declares victory over unexamined criticals.
+  const report = { cross_examined: false, findings: [solo(), solo({ title: 'b', line: 40 })] };
+  const s = convergenceStatus(report, emptyLedger());
+  assert.equal(s.done, false, 'a report nobody cross-examined cannot be converged');
+  assert.equal(s.unexamined.length, 2);
+  assert.equal(s.open.length, 0, 'they are still not counted as credible');
+  assert.match(s.reason, /never cross-examined/);
+});
+
+test('a settled decision clears an unexamined finding', () => {
+  const report = { cross_examined: false, findings: [solo()] };
+  const l = recordDecisions(emptyLedger(), [{ ...solo(), disposition: 'declined', reason: 'by design' }],
+    { iteration: 1, atCommit: 'sha1' });
+  const s = convergenceStatus(report, l);
+  assert.equal(s.unexamined.length, 0);
+  assert.equal(s.done, true);
+});
+
+test('a fixed decision does NOT clear an unexamined finding', () => {
+  // `fixed` settles nothing anywhere else in this module, and it must not
+  // start here: an unverified fix is the thing the loop exists to re-check.
+  const report = { cross_examined: false, findings: [solo()] };
+  const l = recordDecisions(emptyLedger(), [{ ...solo(), disposition: 'fixed', reason: 'patched' }],
+    { iteration: 1, atCommit: 'sha1' });
+  assert.equal(convergenceStatus(report, l).done, false);
+});
+
+test('a cross-examined report is unaffected, and so is one from an older synthesizer', () => {
+  const examined = { cross_examined: true, findings: [solo()] };
+  assert.equal(convergenceStatus(examined, emptyLedger()).done, true, 'solo alone still does not block');
+
+  // Reports written before `cross_examined` existed must keep working.
+  const legacy = { findings: [solo()] };
+  assert.equal(convergenceStatus(legacy, emptyLedger()).done, true);
+});

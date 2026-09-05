@@ -267,8 +267,9 @@ export function recordDecisions(ledger, decisions, { iteration, atCommit, report
 // input is data the panel already produced; no model judges this.
 export function convergenceStatus(report, ledger, traceFor = () => null,
                                   { maxIterations = 3, reportDigest = null } = {}) {
-  const open = (report.findings ?? []).filter((f) => f.blocking
-    && (f.confidence === 'cross-validated' || f.confidence === 'consensus'));
+  const blocking = (report.findings ?? []).filter((f) => f.blocking);
+  const open = blocking.filter((f) =>
+    f.confidence === 'cross-validated' || f.confidence === 'consensus');
 
   const annotated = annotate(open, ledger, traceFor, { reportDigest });
   const settled = annotated.filter((f) => f.adjudicated?.settled);
@@ -288,6 +289,23 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
     && !f.adjudicated.settled);
   const remaining = annotated.filter((f) => !f.adjudicated?.settled);
 
+  // A blocking finding that no cross-review ever adjudicated is NOT evidence
+  // of convergence, and the confidence gate erases it: `open` keeps only
+  // cross-validated and consensus findings, so a report with no round 2 counts
+  // zero however many criticals it holds. That is exactly the shape Phase 9
+  // produces — each persona verifies only its own findings, so nothing it
+  // reports can ever be cross-validated — and the loop read it as success.
+  //
+  // The confidence gate stays: it exists so one reviewer's hunch cannot hold a
+  // change open forever. What changes is that an UNEXAMINED blocking finding
+  // is neither counted as credible nor silently dropped. It holds the loop
+  // open until a cross-review adjudicates it or a decision settles it.
+  const crossExamined = report.cross_examined !== false;
+  const unexamined = crossExamined ? [] : annotate(
+    blocking.filter((f) => f.confidence !== 'cross-validated' && f.confidence !== 'consensus'),
+    ledger, traceFor, { reportDigest },
+  ).filter((f) => !f.adjudicated?.settled);
+
   const iteration = (ledger.iterations ?? []).length + 1;
   const capped = iteration > maxIterations;
 
@@ -298,14 +316,17 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
     settled,
     regressed,
     unverified,
-    done: remaining.length === 0,
+    unexamined,
+    done: remaining.length === 0 && unexamined.length === 0,
     capped,
     // The cap is a stop, not a pass. A run that ends here has open findings and
     // has to say so, or the loop's whole promise is a lie told by an exit code.
-    reason: remaining.length === 0
+    reason: remaining.length === 0 && unexamined.length === 0
       ? 'converged: no blocking finding is unsettled'
       : capped
-        ? `iteration cap (${maxIterations}) reached with ${remaining.length} still open`
-        : `${remaining.length} blocking finding(s) still open`,
+        ? `iteration cap (${maxIterations}) reached with ${remaining.length + unexamined.length} still open`
+        : remaining.length === 0
+          ? `${unexamined.length} blocking finding(s) were never cross-examined`
+          : `${remaining.length} blocking finding(s) still open`,
   };
 }

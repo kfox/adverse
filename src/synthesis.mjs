@@ -389,6 +389,12 @@ export function toJsonReport(syn) {
     summaries: syn.summaries,
     degraded: syn.degraded,
     skipped: syn.skipped ?? [],
+    // Whether ANY cross-review edge exists in this report. The stop condition
+    // needs it: `open_blocking` counts only cross-validated or consensus
+    // findings, so a report nobody cross-examined counts zero no matter what
+    // it contains, and a loop reading only that number reports success.
+    cross_examined: syn.findings.some((f) =>
+      (f.validators ?? []).length > 0 || (f.challengers ?? []).length > 0),
     open_blocking: (syn.openBlocking ?? []).map((f) => f.title),
     findings: syn.findings.map((f) => ({
       severity: f.severity,
