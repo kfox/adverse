@@ -4,7 +4,10 @@
   "description": "Multi-agent adversarial code review for any coding agent. Single model, four lenses, two rounds, and a convergence loop that terminates on arithmetic. Ships as both a CLI and a Claude Code Skill.",
   "type": "module",
   "license": "MIT",
-  "author": "Addy Osmani",
+  "author": "Kelly Fox <kfox@users.noreply.github.com> (https://github.com/kfox)",
+  "contributors": [
+    "Addy Osmani (https://github.com/addyosmani)"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -38,6 +41,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/addyosmani/adverse"
-  }
+    "url": "https://github.com/kfox/adverse"
+  },
+  "bugs": {
+    "url": "https://github.com/kfox/adverse/issues"
+  },
+  "homepage": "https://github.com/kfox/adverse#readme"
 }

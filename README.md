@@ -58,18 +58,18 @@ npx adverse review ./src
 The skill is in [`skills/adverse-review/`](skills/adverse-review/). One-liner install via [skills.sh](https://skills.sh/):
 
 ```bash
-npx skills add addyosmani/adverse
+npx skills add kfox/adverse
 ```
 
-That clones the repo, locates `skills/adverse-review/`, and installs it to `~/.claude/skills/adverse-review/` (or `.claude/skills/` with `--project`). Re-run to update. If you'd rather pin the exact subpath, `npx skills add https://github.com/addyosmani/adverse/tree/main/skills/adverse-review` works too. Or do it by hand:
+That clones the repo, locates `skills/adverse-review/`, and installs it to `~/.claude/skills/adverse-review/` (or `.claude/skills/` with `--project`). Re-run to update. If you'd rather pin the exact subpath, `npx skills add https://github.com/kfox/adverse/tree/main/skills/adverse-review` works too. Or do it by hand:
 
 ```bash
-git clone https://github.com/addyosmani/adverse.git ~/.adverse-source
+git clone https://github.com/kfox/adverse.git ~/.adverse-source
 mkdir -p ~/.claude/skills
 ln -s ~/.adverse-source/skills/adverse-review ~/.claude/skills/adverse-review
 ```
 
-Inside Claude Code, ask for "adversarial review", "adverse review of these changes", or "review my changes from multiple angles" — or hit `/adverse-review`. The skill handles scope detection (uncommitted changes vs branch diff vs full tree), spawns reviewer subagents in parallel via Claude Code's native Agent tool (no nested-auth issues, no subprocess overhead), runs triage and the cross-review round, and calls small Node helpers for every deterministic step. Needs `node` ≥ 20 on PATH; no `npm install`.
+Inside Claude Code, ask for "adversarial review", "adverse review of these changes", or "review my changes from multiple angles" — or hit `/adverse-review`. The skill handles scope detection (uncommitted changes vs branch diff vs full tree), spawns reviewer subagents in parallel via Claude Code's native Agent tool (no nested-auth issues, no subprocess overhead), runs triage and the cross-review round, and calls small Node helpers for every deterministic step. Needs `node` ≥ 22 on PATH; no `npm install`.
 
 Ask for "review until clean" (or "keep going until it's done") to get the convergence loop instead of a single pass.
 
@@ -304,6 +304,8 @@ tests/
 - **The scope gate is a budget hint, not a security judgment.** It decides whether the Adversary lane has anything to look at by pattern-matching changed paths and added lines. It cannot know that an innocuous-looking helper is called from an auth path, so it is biased toward running the lane, and a skipped lane is always named in the report — an unmentioned one reads exactly like a lane that looked and found nothing.
 - **`design` findings never gate.** That is deliberate, but it means the loop can converge with real design feedback outstanding. It is reported as a backlog; someone still has to read it.
 
-## License
+## License and credit
 
-MIT
+MIT.
+
+Originally written by [Addy Osmani](https://github.com/addyosmani) ([addyosmani/adverse](https://github.com/addyosmani/adverse)); the copyright notice in [LICENSE](LICENSE) is his and stays that way. This fork has diverged substantially, so **issues and questions belong here, not upstream** — please do not route them to Addy.
