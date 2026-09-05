@@ -189,8 +189,16 @@ if (status.unexamined.length) {
        + '    Cross-examine them (round 2) or record a decision on each.\n';
 }
 if (status.disputed.length) {
-  out += `  DISPUTED — challenged on record, not blocking (${status.disputed.length}):\n`
-       + `${list(status.disputed)}\n`;
+  out += `  DISPUTED — reported and challenged, still blocking (${status.disputed.length}):\n`
+       + `${list(status.disputed)}\n`
+       + '    One challenger labels a finding disputed however many reported it.\n'
+       + '    Decide it — record `declined` with the challenger\'s reasoning, or fix it.\n';
+}
+if (status.other.length) {
+  out += `  UNCLASSIFIED — blocking and unsettled, matching no bucket (${status.other.length}):\n`
+       + `${list(status.other)}\n`
+       + '    This should be unreachable. Treat it as a bug in the stop condition,\n'
+       + '    and decide the findings on their merits meanwhile.\n';
 }
 if (status.regressed.length) out += `  REGRESSED — recorded fixed, reported again (${status.regressed.length}):\n${list(status.regressed)}\n`;
 if (status.unverified.length) {

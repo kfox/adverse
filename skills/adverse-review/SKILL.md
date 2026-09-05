@@ -426,8 +426,20 @@ node ${SKILL_DIR}/scripts/converge.mjs --ledger "$LEDGER" \
 |---|---|---|
 | 0 | converged — nothing blocking is unsettled | stop; report what was fixed and what was declined |
 | 1 | findings still open | go to Phase 9 |
-| 1 | *only* `NOT CROSS-EXAMINED` listed | Phase 9 cannot clear these — each persona verifies only its own findings, so verification can never cross-examine. Either run a round 2 over them, or record an explicit decision on each |
+| 1 | *only* `NOT CROSS-EXAMINED` listed | Phase 9 cannot clear these — each persona verifies only its own findings, so verification can never cross-examine. **Record an explicit decision on each** (Phase 7) |
+| 1 | `DISPUTED` listed | reported and challenged. Read the challenge, then decide it: `declined` with the challenger's reasoning, or fix it |
+| 1 | `UNCLASSIFIED` listed | a bug in the stop condition — report it. Decide those findings on their merits meanwhile |
 | 3 | iteration cap reached, findings still open | **stop and say so.** This is not a pass. List what remains and hand it to the user |
+
+Every exit-1 remedy above records a decision, and that is deliberate. The
+iteration counter is `ledger.iterations.length + 1`, and `iterations` only grows
+when `converge.mjs` runs with `--record` — so a remedy that does not record
+leaves the counter frozen, `capped` never becomes true, exit 3 is unreachable,
+and a loop that keeps taking that branch does not terminate. An earlier version
+of this table offered "run a round 2 over them" for the unexamined case, which
+is exactly that shape: if the round-2 reviewers keep declining to go on record,
+the loop runs forever. Cross-examining them is still useful — but it informs the
+decision, it does not replace it.
 
 ## Phase 9 — verify, then loop
 
