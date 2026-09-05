@@ -6,7 +6,7 @@
   "license": "MIT",
   "author": "Addy Osmani",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "bin": {
     "adverse": "bin/adverse.mjs"

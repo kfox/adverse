@@ -32,7 +32,7 @@ typos), do NOT invoke this — say so and stop.
 `node` (>= 20) on PATH. Verify with `node --version`. The skill scripts live
 under `${SKILL_DIR}/scripts/` and are stdlib-only (no `npm install` needed).
 
-If `node` is missing, tell the user: install Node 20+ from nodejs.org (or their
+If `node` is missing, tell the user: install Node 22+ from nodejs.org (or their
 package manager) and re-invoke. Do not fall back to a different implementation;
 the deterministic synthesizer is the contract.
 
@@ -587,7 +587,7 @@ re-learning the same lesson and re-reporting the same class of finding.
 | `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge and continue. |
 | `converge.mjs` exits 3 | The cap, not success. Say plainly what is still open. |
 | Ledger version mismatch | Do not delete it. Tell the user which version it is; the schema changed under them. |
-| `node` not on PATH | Tell the user to install Node 20+. Do not improvise a fallback. |
+| `node` not on PATH | Tell the user to install Node 22+. Do not improvise a fallback. |
 | User interrupts | Stop spawning subagents. Say where the partial artifacts are. |
 
 ## Notes for the orchestrator
