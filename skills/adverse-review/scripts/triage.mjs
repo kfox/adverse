@@ -43,7 +43,7 @@ import path from 'node:path';
 import { importFromSrc } from './package-root.mjs';
 
 const { annotate, checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
-const { resolveRef, traceAnchor } = await importFromSrc('trace.mjs');
+const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('prompts.mjs');
 
 const CLUSTER_WINDOW_LINES = 15;
@@ -337,15 +337,7 @@ if (values.ledger) {
     process.exit(1);
   }
 }
-const traceFor = (entry) => {
-  if (!entry.file || !entry.atCommit) return null;
-  try {
-    return traceAnchor({ repo, from: entry.atCommit, to: 'HEAD',
-                         file: entry.file, line: entry.line, citedLine: entry.citedLine });
-  } catch {
-    return null;
-  }
-};
+const traceFor = makeAnchorTracer({ repo, to: 'HEAD' });
 const adjudicatedFindings = annotate(findings, ledger, traceFor);
 for (let i = 0; i < findings.length; i += 1) {
   if (adjudicatedFindings[i].adjudicated) findings[i].adjudicated = adjudicatedFindings[i].adjudicated;

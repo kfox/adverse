@@ -47,20 +47,29 @@ left. Phases 0–7, then 8–9, looping. Use it when the user says "until clean"
 workflow. Announce which shape you are running.
 
 The loop terminates on arithmetic, not on judgment. `converge.mjs` holds it
-open while either of two counts is non-zero:
+open while **any blocking finding is unsettled** — where settled means a
+decision was recorded on it, not that a reviewer felt good about it. Credibility
+and cross-examination decide what a finding is *called*, not whether the loop
+stops:
 
-- **Open** — findings that are credible enough (cross-validated or consensus)
-  and consequential enough (not advisory, not `info`) and not already settled.
-- **Unexamined** — blocking findings that *fail* the credibility test and that
-  no reviewer ever went on record about. These are not counted as credible;
-  they are counted as unfinished. Without this the confidence gate silently
-  deleted them, and a round-2 reviewer's own added critical — which has no
-  validators by construction, because surfacing what round 1 missed is the
-  entire point of a cross-review — made the loop report success.
+- **Open** — credible (cross-validated or consensus) and consequential.
+- **Not cross-examined** — blocking, but nobody went on record either way. A
+  round-2 reviewer's own added critical has no validators by construction —
+  surfacing what round 1 missed is the entire point of a cross-review — so the
+  credibility test alone silently deleted exactly those findings.
+- **Disputed** — reported and challenged. It still blocks. `synthesis.mjs`
+  applies that label on the *first* challenger, before it counts reporters, so
+  one persona could otherwise erase a critical two others found by disagreeing
+  once. A dispute is not a verdict; it is the case that most needs a decision.
+- **Unclassified** — blocking and unsettled but matching none of the above.
+  Should be unreachable; reported rather than dropped, because three separate
+  leaks in this loop's history were a blocking finding that matched no bucket.
 
-A `disputed` finding is reported but blocks nothing: somebody did go on record,
-and they disagreed. The loop is capped at 3 iterations, and a run that hits the
-cap is a **stop, not a pass**.
+A run whose lanes **failed** does not converge either, however few findings the
+survivors returned: a lane that failed did not find nothing, it did not look.
+
+The loop is capped at 3 iterations, and a run that hits the cap is a **stop,
+not a pass**.
 
 ## The four lanes
 
@@ -231,8 +240,18 @@ finding is a finding nobody can verify.
 Save each parsed object to `$ADVERSE_RUN/round1-<persona>.json`.
 
 If a subagent returns malformed JSON, **retry that one persona once** with the
-validator error appended. If the retry also fails, drop that persona. If fewer
-than 2 personas survive, abort — synthesis needs at least 2 voices.
+validator error appended. If the retry also fails, drop that persona **and pass
+it to `synthesize.mjs` as `--degraded <persona>`** in Phase 5. If fewer than 2
+personas survive, abort — synthesis needs at least 2 voices.
+
+Dropping a lane silently is the failure this flag exists to prevent: a lane
+that failed did not find nothing, it did not look, and both produce zero
+findings. A run that dropped its Adversary and said nothing rendered as
+`SHIP (unanimous, 3/3)` and converged with exit 0 — which the `ship` workflow
+reads as "hand over a green PR". `--degraded` holds the loop open until the
+lane is re-run. Use `--skipped <persona>=<reason>` only for a lane you chose
+not to run; it is reported but does not block, and it is not a place to put a
+lane that crashed.
 
 ## Phase 3 — triage (deterministic, no model)
 

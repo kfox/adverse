@@ -21,12 +21,13 @@ const { values } = parseArgs({
     'json-out': { type: 'string' },
     'html-out': { type: 'string' },
     skipped:    { type: 'string', multiple: true },
+    degraded:   { type: 'string', multiple: true },
   },
   strict: true,
 });
 
 if (!values.round1) {
-  process.stderr.write('Usage: synthesize.mjs --round1 <combined.json> [--round2 <combined.json>] [--out report.md] [--json-out report.json] [--html-out report.html] [--skipped persona=reason]\n');
+  process.stderr.write('Usage: synthesize.mjs --round1 <combined.json> [--round2 <combined.json>] [--out report.md] [--json-out report.json] [--html-out report.html] [--skipped persona=reason] [--degraded persona]\n');
   process.exit(2);
 }
 
@@ -48,7 +49,15 @@ const skippedPersonas = (values.skipped ?? []).map((spec) => {
     : { persona: spec.slice(0, at), reason: spec.slice(at + 1) };
 });
 
-const syn = synthesize(round1, round2, { skippedPersonas });
+// --degraded adversary records a lane that was TRIED and FAILED, which is not
+// the same as one deliberately skipped and must not be spelled the same way.
+// The stop condition refuses to converge while any lane is degraded — a lane
+// that failed did not find nothing, it did not look — and until this flag
+// existed there was no way for the Skill's own loop to say so, so `synthesize`
+// reported four healthy lanes and three findings as a unanimous SHIP.
+const failedPersonas = (values.degraded ?? []).map((spec) => spec.split('=')[0]);
+
+const syn = synthesize(round1, round2, { skippedPersonas, failedPersonas });
 const md = renderMarkdown(syn);
 
 if (values.out) writeFileSync(values.out, md, 'utf-8');

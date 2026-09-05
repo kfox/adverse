@@ -252,3 +252,40 @@ export function traceAnchor({ repo, from, to, file, line, citedLine = null }) {
 
   return result;
 }
+
+// A `traceFor(entry)` for one run, memoized.
+//
+// `matchFinding` traces every ledger entry for every finding, and `traceAnchor`
+// spawns three git processes per call, so the work is entries x findings: 200
+// entries against 10 findings measured 602 spawns and 73.7s, with 600 of the
+// spawns byte-identical. `from`/`to` are fixed for a whole run — the same
+// reasoning `refCache` above already rests on — so an entry's projection is
+// answered once.
+//
+// Both callers need this, and only one of them had it: `converge.mjs` runs once
+// at the end, while `triage.mjs` runs on every review and annotates ALL
+// findings rather than the blocking subset, so the uncached copy was the hotter
+// path (200 entries: 6041 spawns, 191s).
+//
+// `citedLine` is deliberately NOT in the key: it is a text checksum that never
+// influences the projection, so keying on it let entries naming one commit, one
+// file and one line cost one trace each.
+export function makeAnchorTracer({ repo, to }) {
+  const cache = new Map();
+  return (entry) => {
+    if (!entry.file || !entry.atCommit) return null;
+    const key = `${entry.atCommit}\u0000${entry.file}\u0000${entry.line}`;
+    if (cache.has(key)) return cache.get(key);
+    let traced = null;
+    try {
+      traced = traceAnchor({
+        repo, from: entry.atCommit, to,
+        file: entry.file, line: entry.line, citedLine: entry.citedLine,
+      });
+    } catch {
+      traced = null;
+    }
+    cache.set(key, traced);
+    return traced;
+  };
+}

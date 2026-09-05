@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, renameSync, unlinkSync } from 'node
 import os from 'node:os';
 import path from 'node:path';
 
-import { clearRefCache, followRename, parseHunks, projectLine, resolveRef, traceAnchor } from '../src/trace.mjs';
+import { clearRefCache, followRename, makeAnchorTracer, parseHunks, projectLine, resolveRef, traceAnchor } from '../src/trace.mjs';
 
 // --- pure arithmetic ---------------------------------------------------------
 
@@ -221,4 +221,32 @@ test('resolveRef caches resolutions but not failures, and clears on demand', () 
   const first = resolveRef(repo, 'HEAD');
   clearRefCache();
   assert.equal(resolveRef(repo, 'HEAD'), first, 'clearRefCache re-resolves rather than breaking');
+});
+
+test('makeAnchorTracer answers a repeated anchor from the memo', () => {
+  // `matchFinding` traces every ledger entry for every finding, and each trace
+  // spawns three git processes — 200 entries against 10 findings measured 602
+  // spawns and 73.7s, 600 of them byte-identical. Timing is not a test, but
+  // identity is: a memoized answer is the SAME object, a recomputed one is not.
+  const traceFor = makeAnchorTracer({ repo, to: 'v2' });
+  const entry = { file: 'app.py', line: 30, citedLine: null, atCommit: 'v1' };
+
+  const first = traceFor(entry);
+  assert.ok(first, 'the anchor traces at all');
+  assert.equal(traceFor({ ...entry }), first, 'a fresh object with the same anchor hits the memo');
+
+  // `citedLine` is a text checksum that never influences the projection, so it
+  // must not split the key — entries naming one commit, one file and one line
+  // cost one trace each when it did.
+  assert.equal(traceFor({ ...entry, citedLine: 'line 30 MARKED' }), first);
+
+  // A different anchor is a different answer, not a stale one.
+  assert.notEqual(traceFor({ ...entry, line: 5 }), first);
+});
+
+test('makeAnchorTracer does not memoize its way past a missing anchor', () => {
+  const traceFor = makeAnchorTracer({ repo, to: 'v2' });
+  assert.equal(traceFor({ file: 'app.py', line: 30, atCommit: null }), null);
+  assert.equal(traceFor({ file: null, line: 30, atCommit: 'v1' }), null);
+  assert.ok(traceFor({ file: 'app.py', line: 30, citedLine: null, atCommit: 'v1' }));
 });

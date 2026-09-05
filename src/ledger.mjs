@@ -40,15 +40,22 @@ export const LEDGER_VERSION = 1;
 // silently buries a real finding under an old decision.
 const MATCH_WINDOW_LINES = 5;
 const MAX_BINDING_PROBLEMS = 20;
-// `SAFE_REF` admits unbounded distinct spellings of one commit — HEAD, HEAD~0,
-// HEAD~0~0 — so de-duplicating on the ref STRING still let 900 entries cost 900
-// spawns, and because they all resolved, no problem was recorded and the cap
-// never fired: the ledger was accepted after 11 seconds of forking. An honest
-// ledger names a handful of commits.
-const MAX_DISTINCT_REFS = 50;
+// Bound the ledger, not its vocabulary.
+//
+// This was a cap on DISTINCT REFS, and it was a self-inflicted denial of the
+// decision record: `SAFE_REF` admits unbounded spellings of one commit
+// (`HEAD~0~0`), but a branch reviewed across enough commits legitimately names
+// that many too. Past the cap the resolver returned null, so the run accused
+// real commits of not existing and exited 2 — and since `recordDecisions`
+// appends forever and the ledger outlives the run, the file became permanently
+// unreadable AND unwritable, with deleting it (losing every recorded decline)
+// the only way out. A count cap bounds the same work, never fires on an honest
+// ledger — this branch's own has ~30 entries after five iterations — and says
+// plainly what tripped it.
+const MAX_LEDGER_ENTRIES = 1000;
 
 // The weakest match that may settle a finding. Below it, annotate only.
-const SETTLING_SCORE = 2;
+export const SETTLING_SCORE = 3;
 
 // Longest ledger `reason` copied into a briefing. The ledger is a JSON file on
 // disk, and its text is rendered into the round-2 prompt, so it is a channel
@@ -56,7 +63,7 @@ const SETTLING_SCORE = 2;
 // the briefing is what tells a reviewer it is data, not instruction.
 const MAX_REASON_CHARS = 500;
 
-function clipReason(text) {
+export function clipReason(text) {
   const flat = String(text ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ');
   return flat.length > MAX_REASON_CHARS ? `${flat.slice(0, MAX_REASON_CHARS)}… [clipped]` : flat;
 }
@@ -107,15 +114,16 @@ export function checkBinding(ledger, resolve) {
   // one bogus commit cost N `git rev-parse` spawns before the ledger can be
   // refused. Measured at 26.1 s for 2000 entries, ~1100x per entry. This cache
   // lives for one call, so it cannot go stale.
+  const entryCount = (ledger.entries ?? []).length;
+  if (entryCount > MAX_LEDGER_ENTRIES) {
+    return [`ledger holds ${entryCount} entries, more than the ${MAX_LEDGER_ENTRIES} `
+      + 'a decision log for one branch can plausibly reach; refusing rather than '
+      + 'resolving that many commits'];
+  }
+
   const seen = new Map();
-  let refBudgetSpent = false;
   const resolveOnce = (ref) => {
-    if (seen.has(ref)) return seen.get(ref);
-    if (seen.size >= MAX_DISTINCT_REFS) {
-      refBudgetSpent = true;
-      return null;
-    }
-    seen.set(ref, resolve(ref));
+    if (!seen.has(ref)) seen.set(ref, resolve(ref));
     return seen.get(ref);
   };
 
@@ -144,10 +152,6 @@ export function checkBinding(ledger, resolve) {
       problems.push(`entry ${JSON.stringify(e.title)} has disposition ${JSON.stringify(e.disposition)}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
   }
-  if (refBudgetSpent) {
-    problems.push(`ledger names more than ${MAX_DISTINCT_REFS} distinct commits; `
-      + 'a decision log for one branch names a handful');
-  }
   return problems;
 }
 
@@ -166,13 +170,32 @@ export function saveLedger(file, ledger) {
 //   2  same kind, same file, and an anchor that lines up
 //   1  same kind and file, but one side has no line to compare
 //
-// Only a score of 2 or better may SETTLE a finding — see SETTLING_SCORE. A
-// score-1 match is file-wide by construction: an entry carrying `line: null`
-// matches every finding of its kind anywhere in that file, so honoring it as a
-// settlement turns one `declined` entry into a blanket amnesty for the file.
-// The ledger is a JSON file the loop reads back from disk, so that is a way to
-// make the panel report a clean review it never performed. Score 1 still
-// annotates, because a prior decision nearby is worth showing a reviewer.
+// Only an identical title may SETTLE a finding — see SETTLING_SCORE. Position
+// annotates; it does not adjudicate.
+//
+// That bar was score 2, and the difference is the difference between showing a
+// reviewer a nearby decision and DELETING a finding. A positional match knows
+// kind, file, and that two lines are close. It does not know the two findings
+// are the same one. So an honest `declined` critical — "not exploitable here,
+// the input is bounded upstream", the most routine decision a maintainer makes
+// — settled a brand-new cross-validated critical RCE five lines away, and the
+// loop printed "converged" and exited 0. Adding a severity check narrowed that
+// to same-severity pairs and left the class intact; entries tiling the
+// severities and kinds every eleven lines rebuilt the file-wide blanket amnesty
+// this scale was written to refuse.
+//
+// The asymmetry settles it. A wrong settle is SILENT and drops a real finding.
+// A missed settle is noisy and safe: the finding returns with the earlier
+// decision attached as context, a reviewer re-declines it in one line, and the
+// new title is recorded — so it settles from then on and the loop still
+// terminates. Rephrasing costs one extra decision; proximity cost criticals.
+//
+// `normalizeTitle` absorbs case, whitespace and trailing punctuation, so this
+// is identity of the finding as written, not of the byte string.
+//
+//   3  same title, in the same file, of the same kind — settles
+//   2  an anchor that lines up (positional, or a contract pair) — annotates
+//   1  same kind and file, but one side has no line to compare — annotates
 // A line number, or null for anything that is not one.
 //
 // The ledger is a JSON file on disk, so `line` arrives as whatever it says. A
@@ -247,12 +270,19 @@ export function scoreMatch(entry, finding, traced = null) {
   // one line. So a positional match settles only when the severity agrees too;
   // anything else annotates. A missing severity does not equal anything, which
   // fails in the safe direction.
-  if ((entry.severity ?? null) !== (finding.severity ?? null)) {
+  // `?? null` collapsed both sides to null, so missing DID equal missing and
+  // took the stronger branch — the opposite of what this comment used to
+  // promise. `recordDecisions` writes `severity: d.severity ?? null` and
+  // validates nothing, so a decisions.json omitting the field produces exactly
+  // that shape. Missing now equals nothing, including another missing.
+  const entrySeverity = typeof entry.severity === 'string' ? entry.severity : null;
+  const findingSeverity = typeof finding.severity === 'string' ? finding.severity : null;
+  if (entrySeverity === null || findingSeverity === null || entrySeverity !== findingSeverity) {
     return {
       score: 1,
       why: `same kind at ${entryFile}:${entryLine} (drift ${drift}), but the `
-        + `decision was taken on a ${entry.severity ?? 'severity-less'} finding `
-        + `and this one is ${finding.severity ?? 'severity-less'}`,
+        + `decision was taken on a ${entrySeverity ?? 'severity-less'} finding `
+        + `and this one is ${findingSeverity ?? 'severity-less'}`,
     };
   }
   return { score: 2, why: `same kind and severity at ${entryFile}:${entryLine} (drift ${drift})` };

@@ -19,9 +19,10 @@ import { readFileSync } from 'node:fs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
-  checkBinding, convergenceStatus, emptyLedger, loadLedger, recordDecisions, saveLedger,
+  checkBinding, clipReason, convergenceStatus, emptyLedger, loadLedger, recordDecisions,
+  saveLedger,
 } = await importFromSrc('ledger.mjs');
-const { resolveRef, traceAnchor } = await importFromSrc('trace.mjs');
+const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 
 const { values } = parseArgs({
   options: {
@@ -143,32 +144,7 @@ const report = readJson(values.report);
 // Positions in the ledger were recorded against the commit the decision was
 // made at; re-project each one to `head` before matching, or a fix that shifted
 // the file makes every past decision look like a different finding.
-//
-// Memoized for the run. `matchFinding` traces every entry for every finding,
-// so the work is entries x findings, and `traceAnchor` spawns three git
-// processes per call. Measured at 20 entries x 10 findings: 602 spawns, 600 of
-// them byte-identical repeats of three commands; 200 entries took 73.7s. The
-// ledger only grows — `recordDecisions` appends and never rewrites, by design
-// — so this is a curve every honest long-lived ledger walks up, not only a
-// crafted one. `from`/`to` are fixed for the whole run, which is the same
-// reasoning `trace.mjs` already applies to its ref cache.
-const traceCache = new Map();
-const traceFor = (entry) => {
-  if (!entry.file || !entry.atCommit) return null;
-  const key = `${entry.atCommit}\u0000${entry.file}\u0000${entry.line}\u0000${entry.citedLine}`;
-  if (traceCache.has(key)) return traceCache.get(key);
-  let traced = null;
-  try {
-    traced = traceAnchor({
-      repo, from: entry.atCommit, to: head,
-      file: entry.file, line: entry.line, citedLine: entry.citedLine,
-    });
-  } catch {
-    traced = null;
-  }
-  traceCache.set(key, traced);
-  return traced;
-};
+const traceFor = makeAnchorTracer({ repo, to: head });
 
 // Validate AFTER coercion, and pass the option only when it is real.
 //
@@ -200,18 +176,44 @@ try {
   process.exit(2);
 }
 
-const list = (fs) => fs.map((f) => `    - [${f.severity}·${f.kind}] ${f.title}`
-  + (f.file ? ` (${f.file}${f.line !== null && f.line !== undefined ? `:${f.line}` : ''})` : '')).join('\n');
+// Everything below renders strings out of report.json — an untrusted file read
+// off disk — as PLAIN TEXT to stdout, which is what the Skill tells the
+// orchestrating agent to read and act on. `clipReason` bounds length and strips
+// control bytes but deliberately keeps newlines, because a `reason` is prose
+// and JSON-escaping contains it in briefing.json. Here there is no JSON to
+// escape it: a newline ends the line and the next one can look like the tool
+// speaking. So every interpolated value is also flattened to one line.
+const oneLine = (v) => clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
+
+const list = (fs) => fs.map((f) => `    - [${oneLine(f.severity)}·${oneLine(f.kind)}] ${oneLine(f.title)}`
+  + (f.file ? ` (${oneLine(f.file)}${f.line !== null && f.line !== undefined ? `:${oneLine(f.line)}` : ''})` : '')).join('\n');
 
 let out = `iteration ${status.iteration} of at most ${status.maxIterations}: ${status.reason}\n`;
+// Both lists come out of report.json, which is read off disk under the same
+// threat model as the ledger — and this output is what the Skill tells the
+// orchestrating agent to read and act on. Rendering them raw put an unbounded,
+// newline-carrying channel directly above the real findings; every other
+// disk-read string in this tool goes through `clipReason`, and these are no
+// different. A lane name that needs 500 characters is not a lane name.
+// A lane name is a persona token — `adversary`, `steward`. Bounded tightly so
+// a long string cannot dominate the block it is listed in.
+const MAX_LANE_NAME = 40;
+const lane = (l) => {
+  const name = oneLine(l?.persona ?? l);
+  return name.length > MAX_LANE_NAME ? `${name.slice(0, MAX_LANE_NAME)}…` : name;
+};
+const MAX_LANES_LISTED = 8;
+const laneList = (ls) => ls.slice(0, MAX_LANES_LISTED).map((l) => `    - ${lane(l)}`
+  + (l?.reason ? ` — ${oneLine(l.reason)}` : '')).join('\n')
+  + (ls.length > MAX_LANES_LISTED ? `\n    … and ${ls.length - MAX_LANES_LISTED} more` : '');
+
 if (status.degraded.length) {
   out += `  LANES THAT FAILED — they reviewed nothing (${status.degraded.length}):\n`
-       + status.degraded.map((p) => `    - ${p}`).join('\n') + '\n'
+       + `${laneList(status.degraded)}\n`
        + '    A lane that failed did not find nothing; it did not look. Re-run it.\n';
 }
 if (status.skipped.length) {
-  out += `  lanes not run (${status.skipped.length}):\n`
-       + status.skipped.map((sk) => `    - ${sk.persona ?? sk}${sk.reason ? ` — ${sk.reason}` : ''}`).join('\n') + '\n';
+  out += `  lanes not run (${status.skipped.length}):\n${laneList(status.skipped)}\n`;
 }
 if (status.open.length)      out += `  still open (${status.open.length}):\n${list(status.open)}\n`;
 if (status.unexamined.length) {

@@ -13,8 +13,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  annotate, checkBinding, convergenceStatus, emptyLedger, isSettled, loadLedger,
-  matchFinding, normalizeTitle, recordDecisions, saveLedger, scoreMatch,
+  SETTLING_SCORE, annotate, checkBinding, convergenceStatus, emptyLedger, isSettled,
+  loadLedger, matchFinding, normalizeTitle, recordDecisions, saveLedger, scoreMatch,
 } from '../src/ledger.mjs';
 
 const finding = (over = {}) => ({
@@ -678,17 +678,103 @@ test('a lane deliberately not run is surfaced, but does not hold the loop open',
   assert.equal(s.skipped.length, 1);
 });
 
-test('a ledger naming more commits than a branch could is refused', () => {
-  // De-duplicating on the ref STRING is not enough: SAFE_REF admits unbounded
-  // distinct spellings of one commit, so 900 entries still cost 900 spawns —
-  // and all of them resolved, so no problem was recorded and the cap never
-  // fired. The ledger was accepted after 11 seconds of forking.
+test('an implausibly large ledger is refused before any commit is resolved', () => {
+  // De-duplicating on the ref STRING is not enough on its own: SAFE_REF admits
+  // unbounded distinct spellings of one commit (HEAD, HEAD~0, HEAD~0~0), and
+  // they all resolve, so no problem is recorded and the problem cap never
+  // fires. Bounding the entry count bounds that work without capping the
+  // ledger's vocabulary — a cap on distinct REFS accused real commits of not
+  // existing on a branch reviewed across enough of them, and since the ledger
+  // outlives the run and is only ever appended to, that was permanent.
   const calls = [];
   const resolve = (ref) => { calls.push(ref); return 'sha'; };
-  const entries = Array.from({ length: 900 }, (_, i) =>
+  const entries = Array.from({ length: 1001 }, (_, i) =>
     entry({ title: `f${i}`, atCommit: `HEAD${'~0'.repeat(i)}` }));
   const problems = checkBinding({ entries }, resolve);
 
-  assert.ok(calls.length <= 50, `resolved ${calls.length} distinct refs`);
-  assert.match(problems.at(-1), /more than 50 distinct commits/);
+  assert.equal(calls.length, 0, 'refused before paying for a single resolve');
+  assert.match(problems[0], /more than the 1000/);
+});
+
+test('a long-lived ledger naming many real commits is not refused', () => {
+  // One `--record` per iteration stamps one commit, and a branch reviewed over
+  // a long life legitimately names dozens. Refusing that would make the file
+  // unreadable AND unwritable, with deleting every recorded decision the only
+  // way out.
+  const resolve = () => 'sha';
+  const entries = Array.from({ length: 200 }, (_, i) =>
+    entry({ title: `f${i}`, atCommit: `commit${i}` }));
+  assert.deepEqual(checkBinding({ entries }, resolve), []);
+});
+
+// --- position annotates; only identity adjudicates ---------------------------
+
+test('an honest decline cannot bury a different finding of the same severity', () => {
+  // Adding a severity check to the positional branch narrowed the exploit
+  // without closing the class: a `declined` CRITICAL — "not exploitable here,
+  // the input is bounded upstream", the most routine decision a maintainer
+  // makes — still settled a brand-new cross-validated critical RCE five lines
+  // away, because kind, file and proximity were the whole test.
+  const declined = entry({
+    title: 'unbounded recursion on deeply nested input', severity: 'critical', line: 18,
+    disposition: 'declined', reason: 'input depth is bounded upstream',
+  });
+  const rce = finding({
+    title: 'command injection: user input reaches execFileSync unescaped', line: 20,
+  });
+
+  const m = scoreMatch(declined, rce);
+  assert.equal(m.score, 2, 'still annotated — the reviewer should see it');
+  assert.ok(m.score < SETTLING_SCORE, 'but proximity is not identity');
+
+  const s = convergenceStatus({ findings: [rce] }, { entries: [declined] });
+  assert.equal(s.done, false);
+  assert.equal(s.settled.length, 0);
+});
+
+test('a ledger tiling the severities cannot rebuild a file-wide amnesty', () => {
+  // One entry per 11 lines across every severity and kind reconstructed the
+  // blanket amnesty this scale exists to refuse, at score 2.
+  const entries = [];
+  for (let line = 1; line < 200; line += 11) {
+    for (const severity of ['critical', 'warning']) {
+      for (const kind of ['defect', 'behavioral', 'contract']) {
+        entries.push(entry({ title: `decided ${line} ${severity} ${kind}`, kind, severity, line,
+          counterpart: null, disposition: 'declined' }));
+      }
+    }
+  }
+  const findings = Array.from({ length: 10 }, (_, i) =>
+    finding({ title: `genuinely new critical ${i}`, line: i * 19 + 3 }));
+
+  const s = convergenceStatus({ findings }, { entries });
+  assert.equal(s.settled.length, 0, `${s.settled.length} findings were buried`);
+  assert.equal(s.done, false);
+});
+
+test('an identical title still settles, so the loop still terminates', () => {
+  // The other half of the trade: re-litigation must remain bounded. A decision
+  // recorded on a finding settles it when it comes back under the same name,
+  // whatever the line has done in between.
+  const f = finding();
+  const decided = entry({ title: f.title, line: 400, disposition: 'declined' });
+  assert.equal(scoreMatch(decided, f).score, 3);
+
+  const s = convergenceStatus({ findings: [f] }, { entries: [decided] });
+  assert.equal(s.done, true);
+  assert.equal(s.settled.length, 1);
+});
+
+test('a severity-less entry does not match a severity-less finding', () => {
+  // `?? null` collapsed both sides, so missing DID equal missing and took the
+  // stronger branch — the opposite of what the comment promised.
+  // `recordDecisions` writes `severity: d.severity ?? null` and validates
+  // nothing, so a decisions.json omitting the field produces exactly that.
+  const noSeverity = entry({ title: 'whitespace nit', severity: null, line: 18 });
+  const f = finding({ title: 'command injection', line: 20 });
+  delete f.severity;
+
+  const m = scoreMatch(noSeverity, f);
+  assert.equal(m.score, 1);
+  assert.match(m.why, /severity-less/);
 });
