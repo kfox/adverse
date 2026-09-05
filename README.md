@@ -2,6 +2,11 @@
 
 Multi-agent adversarial code review for **any** coding agent. Ships as both a standalone **CLI** and a Claude Code **Skill** — pick whichever fits your workflow, the underlying logic is the same Node.js code.
 
+> **This fork's Skill is optimized for Claude Code.** It hands reviewers the
+> repo directly and gives round 2 a triaged briefing rather than re-sending the
+> collected source, which cuts the largest input by ~88% and buys deeper
+> verification per reviewer. The CLI path is unchanged.
+
 ```
 $ adverse review ./src
 ⏳ collecting source...

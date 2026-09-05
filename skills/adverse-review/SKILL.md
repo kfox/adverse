@@ -18,7 +18,7 @@ This skill is the Claude Code-native side of the
 also available as a standalone CLI (`adverse review …`). When you run inside
 Claude Code, prefer this skill — it uses Claude Code's native Agent tool to
 spawn reviewers (no subprocess auth issues, faster) and calls Node helpers
-only for the deterministic source-collection and synthesis steps.
+only for the deterministic collection, triage, and synthesis steps.
 
 ## When to use this skill
 
@@ -36,9 +36,9 @@ If `node` is missing, tell the user: install Node 20+ from nodejs.org (or
 their package manager) and re-invoke. Do not fall back to a different
 implementation; the deterministic synthesizer is the contract.
 
-## Phase 0 — decide what to review
+## Phase 0 — scope, run directory, and the repo's own gate
 
-Pick scope before spending tokens:
+**Pick scope.**
 
 1. If the user named a path, that's the scope.
 2. Else if `git status --porcelain` reports uncommitted changes, review those
@@ -49,21 +49,54 @@ Pick scope before spending tokens:
 
 State the scope you picked in one sentence so the user can redirect.
 
-## Phase 1 — collect source
-
-Run the Node helper that walks the target and produces a single prompt-ready
-text block:
+**Pick a run directory.** Use the session scratchpad directory when the harness
+provides one; otherwise `mktemp -d`. Everything below writes there. Never
+hardcode `/tmp/adverse-*` — parallel runs collide, and the files outlive the
+session.
 
 ```bash
-node ${SKILL_DIR}/scripts/collect.mjs --target <path> [--diff [base]] --out /tmp/adverse-source.txt --files-out /tmp/adverse-files.json
+ADVERSE_RUN="${SCRATCHPAD:-$(mktemp -d)}/adverse-run"   # SCRATCHPAD = session scratchpad if the harness gave you one
+mkdir -p "$ADVERSE_RUN"
 ```
 
-`/tmp/adverse-source.txt` is what you'll embed in the reviewer prompts.
-`/tmp/adverse-files.json` is the file list (use it to confirm scope to the
-user). The helper enforces the same source-size caps as the CLI.
+**Run the repo's own gate first, and abort if it is red.** Whatever this repo
+calls its checks — `make check`, `npm test`, `cargo test`, lint, typecheck —
+run them before spending a single reviewer token. Two reasons:
 
-If collect fails, surface the error to the user — it's almost always
-"target not found" or "diff is empty".
+- A red gate means the change is not ready for a panel. Say so and stop; a
+  failing build makes every reviewer waste findings on symptoms of it.
+- A green gate is *evidence*, and reviewers should be told about it. Findings
+  that a type-checker, linter, or test suite would already have caught are pure
+  noise, and reviewers reliably produce them when they don't know the tools ran.
+
+Record a one-line summary — it rides into the briefing in Phase 3:
+
+```bash
+GATE="lint green · pyright/mypy clean · 1,412 tests pass (0 fail, 3 skip) · schema no drift"
+```
+
+**Pin the base.** Every reviewer must read the same tree, and the triage step
+needs a stable ref for its in-diff/outside-diff classification:
+
+```bash
+BASE=$(git merge-base HEAD origin/main)   # or the branch the user named
+```
+
+## Phase 1 — file list, not a source blob
+
+Reviewers read the repo themselves, so all you need is the inventory and the
+diff stat:
+
+```bash
+git diff --stat "$BASE"...HEAD | tee "$ADVERSE_RUN/diffstat.txt"
+git diff --name-only "$BASE"...HEAD > "$ADVERSE_RUN/files.txt"
+```
+
+`collect.mjs` still exists and still works — it is what the standalone CLI
+needs, and it is the fallback if the reviewers you spawn somehow cannot reach
+the filesystem. In this flow, skip it: a 250KB blob costs every reviewer the
+same tokens whether or not they needed the file, and it truncates exactly the
+large files most worth reading.
 
 ## Phase 2 — round 1: independent reviews
 
@@ -72,8 +105,13 @@ persona. Each one gets:
 
 - **System prompt**: read from `${SKILL_DIR}/scripts/prompts/<persona>.txt`
   (auditor / adversary / pragmatist).
-- **User message**: the contents of `/tmp/adverse-source.txt` prefixed by
-  `${SKILL_DIR}/scripts/prompts/round1.txt`.
+- **User message**: `${SKILL_DIR}/scripts/prompts/round1.txt`, then:
+  - the repo path and the pinned `$BASE` SHA, with the instruction to read the
+    diff and the files directly (`git diff $BASE...HEAD -- <path>`, then open
+    whatever the diff makes them want to see);
+  - the diffstat and file list from Phase 1;
+  - the gate summary `$GATE`, with the instruction **not** to report anything
+    those tools already prove.
 - **Model**: `opus` unless the user asked for a different one. If the user
   picks a smaller model, pass it to all three personas — different models
   across personas defeats the single-model design.
@@ -98,62 +136,126 @@ Each subagent must respond with a single JSON object matching this schema:
 }
 ```
 
-Save each parsed JSON object to disk:
+`file` and `line` are load-bearing in this flow, not decoration: Phase 3
+claim-checks them against the checkout, and round 2 navigates by them instead
+of by a source block. Tell reviewers that an unanchored finding is a finding
+nobody can verify.
 
-- `/tmp/adverse-round1-auditor.json`
-- `/tmp/adverse-round1-adversary.json`
-- `/tmp/adverse-round1-pragmatist.json`
+Save each parsed JSON object to `$ADVERSE_RUN/round1-<persona>.json`.
 
 If a subagent returns malformed JSON, **retry that one persona once** with
 the parser/validator error appended to the original prompt. If the retry also
 fails, drop that persona. If fewer than 2 personas survive, abort the run and
 report the failure — synthesis requires at least 2 voices.
 
-When all three are done, combine them into one file for the next phase:
+## Phase 3 — triage (deterministic, no model)
+
+This is the step that makes round 2 cheap and makes cross-lane consensus
+survive. Run it before spawning anything:
 
 ```bash
-node ${SKILL_DIR}/scripts/combine.mjs \
-    --round1 /tmp/adverse-round1-auditor.json /tmp/adverse-round1-adversary.json /tmp/adverse-round1-pragmatist.json \
-    --out /tmp/adverse-round1.json
+node ${SKILL_DIR}/scripts/triage.mjs \
+    --round1 "$ADVERSE_RUN"/round1-auditor.json \
+    --round1 "$ADVERSE_RUN"/round1-adversary.json \
+    --round1 "$ADVERSE_RUN"/round1-pragmatist.json \
+    --repo . \
+    --base "$BASE" \
+    --gate "$GATE" \
+    --out "$ADVERSE_RUN"/briefing.json
 ```
 
-## Phase 3 — round 2: cross-review
+It prints a summary and writes the briefing. What it gives you:
 
-For each persona that produced a valid round-1 review, spawn a subagent that:
+- **Stable IDs** (`F1`..`Fn`) for every finding, so round 2 can reference a
+  finding without retyping its title. Synthesis still joins on title; Phase 5
+  repairs the title from the ID so it cannot miss.
+- **Claim checks.** A cited file that doesn't exist, or a line past end of
+  file, is marked `DISPROVED` before any model spends a token on it.
+- **Clusters** — same file, within 15 lines, different reporters — and
+  **cross-file co-citations**, where one finding's prose names another
+  finding's file. These are candidate *one defect, seen twice*: exactly the
+  pairs the title join drops on the floor.
+- **In-diff classification.** `inDiff: "outside"` means the cited line is not
+  in the diff. That is **annotated, never rejected** — a latent bug the change
+  newly makes reachable lives in unchanged lines by definition, and in the run
+  that motivated this flow the only CRITICAL on the table was one of those.
+  Round 2 is told to judge whether the finding explains why *this diff* puts
+  it in play, not to discard it.
 
-- Sees ALL round-1 reviews (the combined `/tmp/adverse-round1.json`).
-- Validates findings it agrees with (cross-lane validation is the signal).
-- Challenges findings it thinks are wrong / overstated (with a concrete
-  reason).
-- Optionally adds new findings the other angles surfaced.
+Read the summary line yourself. A large `DISPROVED` count means a reviewer was
+inventing line numbers — worth telling the user.
 
-System prompt: same persona file as round 1. User prompt: the contents of
-`${SKILL_DIR}/scripts/prompts/round2.txt`, then the round-1 combined JSON,
-then the source block.
+## Phase 4 — round 2: cross-review from the briefing
+
+For each persona that produced a valid round-1 review, spawn a subagent with
+the same persona system prompt and a user message of:
+
+1. `${SKILL_DIR}/scripts/prompts/round2.txt`
+2. `$ADVERSE_RUN/briefing.json`
+3. the repo path and `$BASE` again
+
+**Not the source block.** The briefing (~30KB) anchors every finding to a file
+and line; reviewers open exactly the regions they need to rule on. That is ~30KB
+of input where the source block was ~250KB, and it buys deeper verification,
+not shallower — a reviewer chasing one finding reads 200 lines of real context
+instead of whatever survived the blob's truncation.
+
+Round 2 must produce an explicit one-defect-or-two ruling on every cluster and
+every cross-reference. That ruling is the whole point: when two personas found
+one root cause under two titles, the validate edge is what turns two lone
+opinions into consensus.
 
 Output schema:
 
 ```json
 {
   "persona": "<auditor|adversary|pragmatist>",
-  "validate":  [{ "from": "<reporter>", "title": "<title>", "reason": "<…>" }],
-  "challenge": [{ "from": "<reporter>", "title": "<title>", "reason": "<…>" }],
+  "validate":  [{ "id": "F3", "from": "<reporter>", "title": "<verbatim>", "reason": "<…>" }],
+  "challenge": [{ "id": "F7", "from": "<reporter>", "title": "<verbatim>", "reason": "<…>" }],
   "added":     [<finding object>]
 }
 ```
 
-Save each to `/tmp/adverse-round2-<persona>.json` and combine:
+Save each to `$ADVERSE_RUN/round2-<persona>.json`.
+
+If the user asked for a faster review or `--single-round`, skip phases 4 and 5
+entirely. The synthesizer treats missing round 2 as an empty cross-review.
+
+## Phase 5 — repair, then combine
+
+Repair rewrites each edge's title to the briefing's canonical string, keyed on
+the finding ID, so a paraphrase or a helpfully-fixed typo cannot silently drop
+the edge:
+
+```bash
+node ${SKILL_DIR}/scripts/repair.mjs \
+    --briefing "$ADVERSE_RUN"/briefing.json \
+    --round2 "$ADVERSE_RUN"/round2-auditor.json \
+    --round2 "$ADVERSE_RUN"/round2-adversary.json \
+    --round2 "$ADVERSE_RUN"/round2-pragmatist.json \
+    --outdir "$ADVERSE_RUN"
+```
+
+It exits non-zero when an edge names an ID that isn't in the briefing — a
+reviewer invented a finding number, and that edge is about to vanish. Read the
+stderr lines and decide; do not ignore the exit code.
+
+Then combine both rounds:
 
 ```bash
 node ${SKILL_DIR}/scripts/combine.mjs \
-    --round2 /tmp/adverse-round2-*.json \
-    --out /tmp/adverse-round2.json
+    --round1 "$ADVERSE_RUN"/round1-*.json \
+    --out "$ADVERSE_RUN"/round1.json
+
+node ${SKILL_DIR}/scripts/combine.mjs \
+    --round2 "$ADVERSE_RUN"/round2-*.repaired.json \
+    --out "$ADVERSE_RUN"/round2.json
 ```
 
-If the user asked for a faster review or `--single-round`, skip phase 3
-entirely. The synthesizer treats missing round 2 as an empty cross-review.
+Combine the `.repaired.json` files, not the raw ones. That is the whole reason
+Phase 5 exists.
 
-## Phase 4 — synthesize
+## Phase 6 — synthesize
 
 Run the deterministic synthesizer. This produces the canonical report — never
 LLM-render the findings yourself, the synthesizer's groupings (cross-validated
@@ -161,14 +263,14 @@ LLM-render the findings yourself, the synthesizer's groupings (cross-validated
 
 ```bash
 node ${SKILL_DIR}/scripts/synthesize.mjs \
-    --round1 /tmp/adverse-round1.json \
-    --round2 /tmp/adverse-round2.json \
-    --out /tmp/adverse-report.md \
-    --json-out /tmp/adverse-report.json \
-    --html-out /tmp/adverse-report.html
+    --round1 "$ADVERSE_RUN"/round1.json \
+    --round2 "$ADVERSE_RUN"/round2.json \
+    --out "$ADVERSE_RUN"/report.md \
+    --json-out "$ADVERSE_RUN"/report.json \
+    --html-out "$ADVERSE_RUN"/report.html
 ```
 
-Read `/tmp/adverse-report.md` and present a **summary** to the user, not the
+Read `$ADVERSE_RUN/report.md` and present a **summary** to the user, not the
 full report:
 
 1. The verdict line (e.g., `SHIP-WITH-CAVEATS (2/3 ship, 1/3 block)`).
@@ -186,18 +288,21 @@ Then ask the user how they want to proceed:
 
 Do not start editing files until the user picks one.
 
-## Phase 5 — clean up
+## Phase 7 — clean up
 
-After the user is done with the report, delete `/tmp/adverse-*` and tell the
+After the user is done with the report, delete `$ADVERSE_RUN` and tell the
 user the run is complete. Do not commit those files.
 
 ## Failure handling
 
 | Failure | What to do |
 |---|---|
-| `collect.mjs` exits non-zero | Surface the error. Common causes: target doesn't exist, `--diff` on non-git dir, empty diff. |
+| The repo's own gate is red | Stop before Phase 2. Report which check failed; a panel review of a broken build is wasted tokens. |
+| `git merge-base` finds no base | Ask the user which ref to diff against. Do not guess `main`. |
 | One reviewer returns garbage twice | Continue with 2 reviewers, mark the run "degraded" in your summary. |
 | ≥2 reviewers fail | Abort. Tell the user the model is misbehaving and suggest re-running with a different model or with `--single-round`. |
+| `triage.mjs` reports many `DISPROVED` | Surface it. Those findings are dead, and a reviewer inventing line numbers is worth the user knowing about. |
+| `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge and continue. |
 | `node` not on PATH | Tell the user to install Node 20+. Do not improvise a fallback. |
 | User interrupts | Stop spawning new subagents. Tell the user where the partial artifacts are. |
 
@@ -208,9 +313,15 @@ user the run is complete. Do not commit those files.
 - Persona prompts are deliberately written to "stay in your lane" — do NOT
   override them with general-purpose review instructions, doing so collapses
   the orthogonality the design relies on.
-- The synthesizer is deterministic Python-free Node code (`synthesize.mjs`).
-  Counting validate/challenge edges is the consensus signal; do not run a
-  fourth LLM "judge" pass.
+- The synthesizer is deterministic Node code (`synthesize.mjs`). Counting
+  validate/challenge edges is the consensus signal; do not run a fourth LLM
+  "judge" pass. Triage and repair are deterministic for the same reason: they
+  exist to keep a real edge from being lost, never to invent one.
+- `prompts/round2.txt` in this fork is hand-written for the briefing flow and
+  no longer matches `PHASE2_INSTRUCTIONS` in `src/prompts.mjs`. Running
+  `dump-prompts.mjs` will overwrite it with the CLI's version. Don't, until
+  the two are reconciled upstream.
 - The standalone CLI (`adverse review`) is an alternative path that
   subprocesses any coding agent (`claude -p`, `codex exec`, …). Mention it
-  to the user only if they ask how to run this without Claude Code.
+  to the user only if they ask how to run this without Claude Code — and note
+  that it uses the blob flow, not this one.
