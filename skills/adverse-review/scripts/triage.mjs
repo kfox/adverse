@@ -35,8 +35,7 @@
 // reviewer ("does the finding say why this diff puts it in play?"), not a
 // verdict.
 
-import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
@@ -47,9 +46,8 @@ const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('prompts.mjs');
 const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
-const { closeQuietly, openRegularFileSync } = await importFromSrc('fsSafe.mjs');
-
-const CLUSTER_WINDOW_LINES = 15;
+const { CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings, makeClaimChecker } =
+  await importFromSrc('triage.mjs');
 
 // `allowPositionals` is not optional here. `--round1 run/round1-*.json` is the
 // documented invocation and the natural one to type; the shell expands it, and
@@ -93,175 +91,7 @@ function readJson(file) {
   }
 }
 
-function changedRanges(file) {
-  let out;
-  try {
-    out = execFileSync('git', ['diff', '-U0', `${base}...HEAD`, '--', file],
-                       { cwd: repo, encoding: 'utf-8' });
-  } catch {
-    return null;
-  }
-  const ranges = [];
-  for (const line of out.split('\n')) {
-    const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (!m) continue;
-    const start = Number(m[1]);
-    const count = m[2] === undefined ? 1 : Number(m[2]);
-    if (count === 0) continue;
-    ranges.push([start, start + count - 1]);
-  }
-  return ranges;
-}
-
-// Resolve a model-supplied path against the repo root, or null if it escapes.
-//
-// `file` comes out of a reviewer's JSON, so `../../../etc/passwd` is a path a
-// reviewer can write. Both callers below go on to read the file and put a line
-// of it into `citedLine`, which is copied verbatim into the round-2 prompt —
-// so an unchecked join is a read-anything primitive with an exfiltration path
-// attached. `path.join` normalizes `..` away rather than rejecting it, which is
-// why the check has to be on the resolved result.
-// Note `realpathSync`, not just `resolve`. `path.resolve` normalizes `..` but
-// knows nothing about symlinks, while a plain existence check and a read by
-// path both follow them — so a symlink committed inside the checkout (git
-// stores mode 120000) kept the path under the repo prefix while the read
-// landed wherever it pointed. That is the same exfiltration channel this
-// function was written to close, reached by a path the string check could
-// not see.
-const repoReal = (() => {
-  try {
-    return realpathSync(repo);
-  } catch {
-    return repo;
-  }
-})();
-
-function insideRepo(file) {
-  const abs = path.resolve(repo, file);
-  if (abs !== repo && !abs.startsWith(repo + path.sep)) return null;
-
-  let real;
-  try {
-    real = realpathSync(abs);
-  } catch {
-    return abs; // does not exist yet; the caller's open attempt rejects it
-  }
-  if (real !== repoReal && !real.startsWith(repoReal + path.sep)) return null;
-  return real;
-}
-
-function checkClaim(file, line) {
-  if (!file) return { status: 'not-file-bound' };
-
-  const abs = insideRepo(file);
-  if (abs === null) {
-    return { status: 'DISPROVED', why: `cited path escapes the checkout: ${file}` };
-  }
-
-  // Open once and check/read through the same descriptor rather than the
-  // path — an exists-then-readFileSync-by-path pair leaves a window where
-  // the path could resolve to something else by the time it's read, and
-  // `insideRepo`'s realpath check above only proves the path was clean at
-  // that moment.
-  let fd = null;
-  try {
-    fd = openRegularFileSync(abs);
-  } catch {
-    // ENOENT, ELOOP (a symlink slipped in after the realpath check), EACCES…
-  }
-  if (fd === null) {
-    return { status: 'DISPROVED', why: `cited file does not exist in the checkout: ${file}` };
-  }
-  let lines;
-  try {
-    lines = readFileSync(fd, 'utf-8').split('\n');
-  } finally {
-    closeQuietly(fd);
-  }
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  const total = lines.length;
-  const out = { status: 'ok', file, fileLines: total };
-
-  if (line === null || line === undefined) {
-    out.line = null;
-    out.note = 'no line cited; file exists';
-    return out;
-  }
-  out.line = line;
-  if (line > total) {
-    return { status: 'DISPROVED', file, fileLines: total, line,
-             why: `cited line ${line} is past end of file (${total} lines)` };
-  }
-
-  const ranges = changedRanges(file);
-  if (ranges === null) {
-    out.inDiff = 'unknown';
-  } else if (ranges.some(([s, e]) => line >= s && line <= e)) {
-    out.inDiff = 'inside';
-  } else {
-    out.inDiff = 'outside';
-    out.note = 'cited line is NOT in this diff\'s changed ranges. That is legitimate '
-             + 'for a latent defect the diff newly makes reachable — but the finding '
-             + 'must say why the diff is what puts it in play.';
-  }
-  out.citedLine = lines[line - 1] ?? null;
-  return out;
-}
-
-// What each kind promises about its own anchoring. Checked, not enforced —
-// see the doctrine note at the top of this file.
-const KIND_REQUIREMENTS = {
-  defect:     { file: true, line: true,  counterpart: false },
-  behavioral: { file: true, line: false, counterpart: false },
-  contract:   { file: true, line: false, counterpart: true  },
-  design:     { file: false, line: false, counterpart: false },
-};
-
-// A `contract` finding names a second path, and that path is a claim like any
-// other: a counterpart that is not in the checkout disproves the contradiction
-// just as surely as a missing primary file does.
-function checkCounterpart(file) {
-  if (!file) return null;
-  const abs = insideRepo(file);
-  if (abs === null) {
-    return { status: 'DISPROVED', why: `cited counterpart escapes the checkout: ${file}` };
-  }
-  let fd = null;
-  try {
-    fd = openRegularFileSync(abs);
-  } catch {
-    // not a usable file at this path
-  }
-  if (fd === null) {
-    return { status: 'DISPROVED', why: `cited counterpart does not exist in the checkout: ${file}` };
-  }
-  closeQuietly(fd);
-  return { status: 'ok', file };
-}
-
-function checkKind(kind, file, line, counterpart) {
-  if (kind === undefined || kind === null || kind === '') {
-    return { status: 'MISSING', why: 'no `kind` on this finding; it is treated as blocking' };
-  }
-  const req = KIND_REQUIREMENTS[kind];
-  if (!req) {
-    return { status: 'UNKNOWN', kind, why: `unrecognized kind ${JSON.stringify(kind)}; treated as blocking` };
-  }
-  const missing = [];
-  if (req.file && !file) missing.push('file');
-  if (req.line && (line === null || line === undefined)) missing.push('line');
-  if (req.counterpart && !counterpart) missing.push('counterpart');
-  if (missing.length) {
-    return {
-      status: 'UNDER-ANCHORED',
-      kind,
-      missing,
-      why: `kind \`${kind}\` requires ${missing.join(' and ')}, which this finding does not give. `
-         + 'The claim may still be real — judge the claim, not the label.',
-    };
-  }
-  return { status: 'ok', kind, advisory: ADVISORY_KINDS.has(kind) };
-}
+const { checkClaim, checkCounterpart } = makeClaimChecker({ repo, base });
 
 const reviews = values.round1.map(readJson);
 // The persona string is model-written and keys the briefing's verdicts,
@@ -296,65 +126,25 @@ for (const review of reviews) {
       fix: f.fix ?? null,
       claimCheck: checkClaim(f.file ?? null, f.line ?? null),
       counterpartCheck: checkCounterpart(f.counterpart ?? null),
-      kindCheck: checkKind(f.kind, f.file ?? null, f.line ?? null, f.counterpart ?? null),
+      kindCheck: checkKind(f.kind, f.file ?? null, f.line ?? null, f.counterpart ?? null, { advisoryKinds: ADVISORY_KINDS }),
     });
   }
 }
 
-// Proximity clusters: same file, lines within CLUSTER_WINDOW_LINES, different
-// reporters. These are the consensus edges a title-only join cannot see.
-const clusters = [];
+// Same-file-and-nearby-lines, and cross-file co-citation: the two consensus
+// edges a title-only join cannot see. Pure over `findings`, so both live in
+// src/triage.mjs where a unit test can exercise them directly.
+const clusters = clusterFindings(findings, { windowLines: CLUSTER_WINDOW_LINES });
+const crossReferences = crossReferenceFindings(findings);
+
+// Every finding sharing a file with another reporter's, regardless of line
+// distance — a wider net than `clusters`, which `sameFileDifferentRegion`
+// below reports separately.
 const byFile = new Map();
 for (const f of findings) {
   if (!f.file) continue;
   if (!byFile.has(f.file)) byFile.set(f.file, []);
   byFile.get(f.file).push(f);
-}
-for (const [file, group] of byFile) {
-  if (group.length < 2) continue;
-  const sorted = [...group].sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
-  let run = [sorted[0]];
-  const flush = () => {
-    const reporters = new Set(run.map((f) => f.reporter));
-    if (run.length >= 2 && reporters.size >= 2) {
-      clusters.push({
-        file,
-        ids: run.map((f) => f.id),
-        reporters: [...reporters],
-        titles: run.map((f) => f.title),
-      });
-    }
-  };
-  for (const f of sorted.slice(1)) {
-    const prev = run[run.length - 1];
-    const near = f.line !== null && prev.line !== null
-      && Math.abs(f.line - prev.line) <= CLUSTER_WINDOW_LINES;
-    if (near) { run.push(f); continue; }
-    flush();
-    run = [f];
-  }
-  flush();
-}
-
-// Cross-file co-citation. Proximity cannot see two personas describing one root
-// cause that spans files — a docstring in one file contradicting a design note
-// in another. If finding A's prose cites finding B's file (and, when both name
-// lines, B's line too), that is a candidate same-root-cause edge that the title
-// join and the line clustering would both drop.
-const crossReferences = [];
-for (const a of findings) {
-  for (const b of findings) {
-    if (a.id === b.id || a.reporter === b.reporter || !b.file) continue;
-    if (!a.detail || !a.detail.includes(b.file)) continue;
-    const lineEchoed = b.line !== null && new RegExp(`\\b${b.line}\\b`).test(a.detail);
-    crossReferences.push({
-      from: a.id,
-      to: b.id,
-      file: b.file,
-      lineEchoed,
-      reporters: [a.reporter, b.reporter],
-    });
-  }
 }
 
 // What earlier iterations already decided. Positions in the ledger were
