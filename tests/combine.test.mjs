@@ -35,20 +35,27 @@ function personasIn(outPath) {
 }
 
 // --- Accepted invocation forms (all must parse to the same three personas) --
+//
+// The third persona is the STEWARD, not the Pragmatist. These cases are about
+// argv shapes, and one of them is a `--round2` invocation — which the roster
+// now refuses for a lane that does not cross-review. The Pragmatist was only
+// ever filler here, so using a lane that is legal in both rounds keeps all
+// three forms asserting the one thing this block is for: that they parse to
+// the same personas.
 
 const ACCEPTED_FORMS = [
   {
     name: 'space-separated (SKILL.md Phase 2 form)',
-    args: (f, out) => ['--round1', f.auditor, f.adversary, f.pragmatist, '--out', out],
+    args: (f, out) => ['--round1', f.auditor, f.adversary, f.steward, '--out', out],
   },
   {
     name: 'glob-expanded multi-file (SKILL.md Phase 3 form)',
-    args: (f, out) => ['--round2', f.auditor, f.adversary, f.pragmatist, '--out', out],
+    args: (f, out) => ['--round2', f.auditor, f.adversary, f.steward, '--out', out],
   },
   {
     name: 'repeated flags (backward-compatible)',
     args: (f, out) => [
-      '--round1', f.auditor, '--round1', f.adversary, '--round1', f.pragmatist, '--out', out,
+      '--round1', f.auditor, '--round1', f.adversary, '--round1', f.steward, '--out', out,
     ],
   },
 ];
@@ -60,12 +67,12 @@ for (const form of ACCEPTED_FORMS) {
       const f = {
         auditor: review(dir, 'auditor'),
         adversary: review(dir, 'adversary'),
-        pragmatist: review(dir, 'pragmatist'),
+        steward: review(dir, 'steward'),
       };
       const out = path.join(dir, 'combined.json');
       const r = runCombine(form.args(f, out));
       assert.equal(r.status, 0, r.stderr);
-      assert.deepEqual(personasIn(out), ['adversary', 'auditor', 'pragmatist']);
+      assert.deepEqual(personasIn(out), ['adversary', 'auditor', 'steward']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

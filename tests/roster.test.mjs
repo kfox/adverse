@@ -12,7 +12,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DEFAULT_PERSONAS } from '../src/personas.mjs';
+import { DEFAULT_PERSONAS, PERSONAS, crossReviews } from '../src/personas.mjs';
+import { ADVISORY_KINDS } from '../src/taxonomy.mjs';
 import { REFUSED, USAGE, checkRoster, mergeRoster } from '../src/roster.mjs';
 import { parsePlan } from '../src/scaling.mjs';
 
@@ -24,6 +25,41 @@ test('a clean roster raises nothing', () => {
   const r = checkRoster([payload('auditor'), payload('steward')]);
   assert.deepEqual(r.problems, []);
   assert.deepEqual(r.warnings, []);
+});
+
+// The Pragmatist reviews in round 1 and never cross-reviews: every kind it
+// owns is `design`, which is advisory and cannot block, so it has no blocking
+// claim to validate or challenge. Nothing refused its round-2 payload, and
+// synthesis applies anyone's `challenge` — one challenger relabels a finding
+// `disputed` however many personas reported it, moving it out of
+// `Open blocking` and demanding an adjudication this lane cannot ask for.
+test('a round-2 payload from a lane that does not cross-review is refused', () => {
+  const r = checkRoster([payload('auditor'), payload('pragmatist')], { round: 2 });
+  assert.equal(r.problems.length, 1);
+  assert.equal(r.problems[0].exit, REFUSED);
+  assert.match(messages(r), /does not cross-review/);
+  assert.match(messages(r), /stale round-1 file or a spoof/);
+});
+
+test('the same payload is accepted in round 1, where that lane does review', () => {
+  const r = checkRoster([payload('auditor'), payload('pragmatist')]);
+  assert.deepEqual(r.problems, []);
+});
+
+test('lanes that do cross-review are still accepted in round 2', () => {
+  const r = checkRoster(
+    [payload('auditor'), payload('adversary'), payload('steward')], { round: 2 });
+  assert.deepEqual(r.problems, []);
+});
+
+test('crossReviews is derived from advisory kinds, not from a hard-coded name', () => {
+  // If a second advisory-only lane is ever added, it must be covered without
+  // anyone remembering to edit roster.mjs.
+  for (const name of DEFAULT_PERSONAS) {
+    const advisoryOnly = PERSONAS[name].kinds.every((k) => ADVISORY_KINDS.has(k));
+    assert.equal(crossReviews(name, 2), !advisoryOnly, name);
+    assert.equal(crossReviews(name, 1), true, `${name} in round 1`);
+  }
 });
 
 test('a persona outside the registry is refused, not read as a fifth lane', () => {

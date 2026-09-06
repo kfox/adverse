@@ -22,7 +22,7 @@
 // asked what it would have said. `checkBinding` in ledger.mjs already answers
 // this shape.
 
-import { DEFAULT_PERSONAS } from './personas.mjs';
+import { DEFAULT_PERSONAS, crossReviews } from './personas.mjs';
 import { runLanes, skippedLanes, splitLanes } from './scaling.mjs';
 
 // exit 2 is deliberately not exit 1: exit 1 is a claim about a review, and
@@ -45,7 +45,7 @@ export function mergeRoster(lanes, explicit = [], { round = 1 } = {}) {
   ]);
 }
 
-function checkIdentity(payload, { personas, ruledOut }) {
+function checkIdentity(payload, { personas, ruledOut, round }) {
   const { persona, src } = payload;
   if (typeof persona !== 'string') {
     return problem(REFUSED, at(src, 'missing or invalid `persona` field'));
@@ -53,6 +53,18 @@ function checkIdentity(payload, { personas, ruledOut }) {
   if (!personas.includes(persona)) {
     return problem(REFUSED, at(src, `unknown persona '${persona}'`
       + ` (expected one of ${personas.join(', ')})`));
+  }
+  // A lane that does not cross-review cannot have produced a round-2 payload,
+  // so one under its name is a stale file from round 1 or a spoof. Refused
+  // rather than warned: its `challenge` entries are applied by synthesis like
+  // anyone else's, and one challenger relabels a finding `disputed` however
+  // many personas reported it — which moves it out of `Open blocking` and
+  // demands a human adjudication the lane has no standing to ask for.
+  if (!crossReviews(persona, round)) {
+    return problem(REFUSED, at(src, `'${persona}' does not cross-review: every kind it owns`
+      + ' is advisory, so it has no blocking claim to validate or challenge.\n'
+      + '  A round-2 payload under its name is a stale round-1 file or a spoof, not a'
+      + ' reviewer. Check the run directory for leftovers from an earlier phase.'));
   }
   if (ruledOut.has(persona)) {
     return problem(REFUSED, at(src, `the plan recorded '${persona}' as not run, so a payload`
@@ -89,9 +101,8 @@ function checkCount(persona, count, merged) {
 // cross-reviews, so its absence from a round-2 roster is the design working,
 // and a warning that fires on every run is how a real warning gets skimmed.
 function silentLanes(lanes, heard, round) {
-  const crossReviews = (p) => !(round === 2 && p === 'pragmatist');
   return runLanes(lanes).map((l) => l.persona)
-    .filter((p) => crossReviews(p) && !heard.has(p));
+    .filter((p) => crossReviews(p, round) && !heard.has(p));
 }
 
 export function checkRoster(payloads, {
@@ -105,7 +116,7 @@ export function checkRoster(payloads, {
   const ruledOut = new Set(lanes ? skippedLanes(lanes).map((l) => l.persona) : []);
   const counts = new Map();
   for (const payload of payloads) {
-    const bad = checkIdentity(payload, { personas, ruledOut });
+    const bad = checkIdentity(payload, { personas, ruledOut, round });
     // A refused payload is not a lane that was heard from. No refusal reason
     // can currently apply to a persona that is also in `runLanes` — the three
     // are "not a string", "not in the registry" and "the plan ruled it out",
