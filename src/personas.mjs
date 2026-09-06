@@ -38,6 +38,8 @@
 // the single signal the whole design trusts most, and therefore the worst thing
 // this file can manufacture.
 
+import { ADVISORY_KINDS } from './taxonomy.mjs';
+
 export const AUDITOR = {
   name: 'auditor',
   title: 'Auditor',
@@ -335,3 +337,27 @@ export const PERSONAS = Object.freeze({
 });
 
 export const DEFAULT_PERSONAS = Object.freeze(['auditor', 'adversary', 'steward', 'pragmatist']);
+
+// Whether a lane takes part in round 2. A lane whose every kind is ADVISORY
+// has nothing to validate or challenge with: advisory findings cannot block,
+// so there is no blocking claim for it to go on record about, and going on
+// record is all round 2 is. The Pragmatist is that lane today.
+//
+// Derived from the registry rather than naming the Pragmatist, so a second
+// advisory-only lane is covered the day someone adds it — and so the two
+// places that need this answer (suppressing the round-2 silence warning, and
+// refusing a round-2 payload) read one predicate instead of two copies that
+// can drift.
+//
+// `Object.hasOwn`, not a bare index: `persona` is model-written, and
+// `PERSONAS['__proto__']` on a plain object answers with Object.prototype.
+// `personas` is injectable so a test can register a SECOND advisory-only lane.
+// Without that the property is untestable: the Pragmatist is the only such
+// lane today, so any test over the real registry agrees with a hard-coded
+// `persona !== 'pragmatist'` and cannot tell the two implementations apart.
+export function crossReviews(persona, round = 1, { personas = PERSONAS } = {}) {
+  if (round !== 2) return true;
+  if (!Object.hasOwn(personas, persona)) return true;
+  const kinds = personas[persona].kinds ?? [];
+  return kinds.length === 0 || !kinds.every((kind) => ADVISORY_KINDS.has(kind));
+}

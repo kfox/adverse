@@ -519,6 +519,10 @@ export function groupFindings(findings,
 // Claim-checking needs the repo root and the diff base, so it is built by a
 // factory rather than taking them as parameters on every call — the same
 // shape trace.mjs's `makeAnchorTracer` uses for the same reason.
+const GIT_DIR = '.git';
+const GIT_DIR_REFUSAL = 'is repository metadata, not reviewable source'
+  + ' (paths under .git/ are refused: they carry credentials, not code)';
+
 export function makeClaimChecker({ repo, base }) {
   // Resolve a model-supplied path against the repo root, or null if it
   // escapes.
@@ -544,33 +548,115 @@ export function makeClaimChecker({ repo, base }) {
     }
   })();
 
-  function insideRepo(file) {
+  // `.git` lives INSIDE the checkout, so every prefix check below admits it —
+  // and a citation of `.git/config` is a credential read, not a code review.
+  // `actions/checkout` writes the job's token there as an
+  // `http.<host>.extraheader` line, and `checkClaim` copies the cited line
+  // verbatim into `citedLine`, which triage writes into briefing.json, which
+  // IS the round-2 prompt. One citation therefore hands the token to every
+  // later reviewer and to any artifact that keeps the briefing.
+  //
+  // Every segment, not just the first: a submodule keeps its own `.git`, and
+  // a worktree keeps a `.git` file. Checked against the resolved path as well
+  // as the literal one, because a symlink committed in the tree can point at
+  // `.git` while the string stays clean — the same bypass `realpathSync` is
+  // already here to close.
+  // Case-INSENSITIVELY, and that is the whole point. The first version of this
+  // compared segments with `includes(GIT_DIR)`, which is exact — and APFS and
+  // NTFS are not. On macOS `.GIT/config` opens the same file, and
+  // `realpathSync` returns the caller's casing rather than the on-disk casing,
+  // so neither the literal nor the resolved check saw it. One character
+  // defeated the refusal and put the token back in the round-2 prompt.
+  //
+  // Trailing dots and spaces go too: Windows strips them when resolving, so
+  // `.git.` and `.git ` name the same directory there.
+  function underGitDir(root, candidate) {
+    return path.relative(root, candidate).split(path.sep)
+      .some((seg) => seg.toLowerCase().replace(/[. ]+$/, '') === GIT_DIR);
+  }
+
+  // Git's own answer, which no amount of path spelling can argue with, and the
+  // backstop for whatever the segment match above still does not anticipate.
+  // Resolved once per checker: it is one subprocess, and the answer cannot
+  // change while triage runs.
+  //
+  // This also covers a git dir that is not called `.git` at all —
+  // `--separate-git-dir`, or a submodule whose `.git` is a file pointing into
+  // the parent's `modules/`. Those usually land outside the checkout, where
+  // the containment check already refuses them, but "usually" is not a
+  // security property.
+  let gitDirReal;
+  function realGitDir() {
+    if (gitDirReal !== undefined) return gitDirReal;
+    try {
+      const out = execFileSync('git', ['rev-parse', '--absolute-git-dir'],
+                               { cwd: repo, encoding: 'utf-8' }).trim();
+      gitDirReal = out ? realpathSync(out) : null;
+    } catch {
+      gitDirReal = null; // not a git repo, or git unavailable; segment match stands
+    }
+    return gitDirReal;
+  }
+
+  function isGitInternal(root, candidate) {
+    if (underGitDir(root, candidate)) return true;
+    const gitDir = realGitDir();
+    if (!gitDir) return false;
+    return candidate === gitDir || candidate.startsWith(gitDir + path.sep);
+  }
+
+  // Either the path this checker may read, or the reason it may not. The two
+  // refusals stay distinct on purpose: a path that leaves the checkout is a
+  // traversal attempt, while a path into `.git` is a request for repository
+  // metadata — and telling a reviewer that its `.git/config` citation
+  // "escapes the checkout" would simply be false.
+  function resolveCited(file) {
     // `path.resolve` throws ERR_INVALID_ARG_TYPE on a number, boolean, array
     // or object, and `file` reaches here from reviewer JSON. Rejecting a
     // non-string here rather than letting it throw keeps a malformed anchor a
     // DISPROVED finding instead of an uncaught crash that loses the run.
-    if (typeof file !== 'string' || !file) return null;
+    if (typeof file !== 'string' || !file) return { why: 'is not a string' };
 
     const abs = path.resolve(repo, file);
 
-    if (abs !== repo && !abs.startsWith(repo + path.sep)) return null;
+    if (abs !== repo && !abs.startsWith(repo + path.sep)) {
+      return { why: 'escapes the checkout' };
+    }
+    if (isGitInternal(repo, abs)) return { why: GIT_DIR_REFUSAL };
 
     let real;
     try {
       real = realpathSync(abs);
     } catch {
-      return abs; // does not exist yet; the caller's open attempt rejects it
+      return { path: abs }; // does not exist yet; the caller's open rejects it
     }
-    if (real !== repoReal && !real.startsWith(repoReal + path.sep)) return null;
-    return real;
+    if (real !== repoReal && !real.startsWith(repoReal + path.sep)) {
+      return { why: 'escapes the checkout' };
+    }
+    if (isGitInternal(repoReal, real)) return { why: GIT_DIR_REFUSAL };
+    return { path: real };
   }
 
+  // Keyed by the path, because the answer depends on nothing else: `repo` and
+  // `base` are fixed for the life of the checker, and triage is one
+  // synchronous pass over findings that have already been collected — the diff
+  // cannot change underneath it. Without this, `checkClaim` spawned one `git
+  // diff` per FINDING rather than per file: 400 findings all citing the same
+  // file spawned 400 subprocesses, measured at ~12.6ms each and rising
+  // linearly, and a panel is free to return as many findings as it likes.
+  // `null` (the git failure) is cached too — a path git refuses once it
+  // refuses every time, and re-asking 400 times is the same waste.
+  const rangesByFile = new Map();
+
   function changedRanges(file) {
+    if (rangesByFile.has(file)) return rangesByFile.get(file);
+
     let out;
     try {
       out = execFileSync('git', ['diff', '-U0', `${base}...HEAD`, '--', file],
                          { cwd: repo, encoding: 'utf-8' });
     } catch {
+      rangesByFile.set(file, null);
       return null;
     }
     const ranges = [];
@@ -578,16 +664,18 @@ export function makeClaimChecker({ repo, base }) {
       if (h.newCount === 0) continue;
       ranges.push([h.newStart, h.newStart + h.newCount - 1]);
     }
+    rangesByFile.set(file, ranges);
     return ranges;
   }
 
   function checkClaim(file, line) {
     if (!file) return { status: 'not-file-bound' };
 
-    const abs = insideRepo(file);
-    if (abs === null) {
-      return { status: 'DISPROVED', why: `cited path escapes the checkout: ${file}` };
+    const resolved = resolveCited(file);
+    if (resolved.why) {
+      return { status: 'DISPROVED', why: `cited path ${resolved.why}: ${file}` };
     }
+    const abs = resolved.path;
 
     // Open once and check/read through the same descriptor rather than the
     // path — an exists-then-readFileSync-by-path pair leaves a window where
@@ -634,7 +722,13 @@ export function makeClaimChecker({ repo, base }) {
                why: `cited line ${line} is past end of file (${total} lines)` };
     }
 
-    const ranges = changedRanges(file);
+    // The RESOLVED path, not the cited string. Keyed on `file`, the memo below
+    // was one entry per SPELLING: a payload citing `a.js`, `./a.js`,
+    // `././a.js`, … restored the original unbounded fan-out at full cost, and
+    // every one of those spellings claim-checks `ok`, so nothing else rejects
+    // them. A model also trips this by accident when two lanes spell one path
+    // differently.
+    const ranges = changedRanges(path.relative(repoReal, abs));
     if (ranges === null) {
       out.inDiff = 'unknown';
     } else if (ranges.some(([s, e]) => line >= s && line <= e)) {
@@ -654,10 +748,11 @@ export function makeClaimChecker({ repo, base }) {
   // contradiction just as surely as a missing primary file does.
   function checkCounterpart(file) {
     if (!file) return null;
-    const abs = insideRepo(file);
-    if (abs === null) {
-      return { status: 'DISPROVED', why: `cited counterpart escapes the checkout: ${file}` };
+    const resolved = resolveCited(file);
+    if (resolved.why) {
+      return { status: 'DISPROVED', why: `cited counterpart ${resolved.why}: ${file}` };
     }
+    const abs = resolved.path;
     let fd = null;
     try {
       fd = openRegularFileSync(abs);

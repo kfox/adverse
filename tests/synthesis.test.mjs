@@ -22,6 +22,31 @@ const v = (verdict, findings = []) => ({ persona: 'x', verdict, summary: '', fin
 
 // --- Consensus labels --------------------------------------------------------
 
+// A persona name is reviewer-written, and `verdicts[persona] = …` on a plain
+// object silently does nothing when the name is `__proto__`: the assignment
+// reaches Object.prototype's setter, no own property appears, and
+// `Object.values` never sees the verdict. A reject then vanished from the
+// consensus score and the banner read `SHIP (unanimous, 2/2)` above a live
+// CRITICAL. JSON.parse is what makes the key reachable — it DOES create an own
+// `__proto__` — and `adverse synthesize --round1` JSON.parses its input with
+// no roster check.
+test('a persona named __proto__ has its verdict counted, not swallowed', () => {
+  const round1 = JSON.parse(`{
+    "auditor":   {"verdict":"approve","summary":"fine","findings":[]},
+    "steward":   {"verdict":"approve","summary":"fine","findings":[]},
+    "__proto__": {"verdict":"reject","summary":"auth bypass","findings":[]}
+  }`);
+  assert.ok(Object.hasOwn(round1, '__proto__'), 'fixture must carry an own __proto__');
+
+  const syn = synthesize(round1);
+  assert.deepEqual(Object.keys(syn.verdicts).sort(), ['__proto__', 'auditor', 'steward']);
+  assert.equal(syn.verdicts.__proto__, 'reject');
+  assert.equal(syn.summaries.__proto__, 'auth bypass');
+  assert.doesNotMatch(syn.consensusLabel, /unanimous/,
+    'a dropped reject is what made three reviewers look unanimous');
+  assert.match(renderMarkdown(syn), /__proto__ \| reject/);
+});
+
 test('SHIP unanimous when all approve', () => {
   const r1 = {
     auditor: v('approve'), adversary: v('approve'), pragmatist: v('approve'),

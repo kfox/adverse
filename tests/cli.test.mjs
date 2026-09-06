@@ -189,6 +189,31 @@ test('synthesize subcommand reads disk and emits report', () => {
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
+// The roster rule lived only in src/roster.mjs, which the Skill bridges call
+// and the shipped binary does not — so `adverse synthesize` still accepted a
+// round-2 payload from a lane that never cross-reviews, and one such
+// `challenge` moves a critical reported by two lanes out of `Open blocking`.
+// The same rule, on both paths.
+test('synthesize refuses a round-2 payload from a lane that does not cross-review', () => {
+  const out = freshTmp();
+  try {
+    const round1 = {
+      auditor:   { persona: 'auditor', verdict: 'reject', summary: 'bug', findings: [
+        { severity: 'critical', kind: 'defect', file: 'x.py', line: 1, title: 'B', detail: 'd', fix: null }] },
+      adversary: { persona: 'adversary', verdict: 'reject', summary: 'bug', findings: [
+        { severity: 'critical', kind: 'defect', file: 'x.py', line: 1, title: 'B', detail: 'd', fix: null }] },
+    };
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify(round1));
+    writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
+      pragmatist: { persona: 'pragmatist', challenge: [{ title: 'B', reason: 'no' }] },
+    }));
+    const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json'),
+      '--round2', path.join(out, 'r2.json')]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /does not cross-review/);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
 test('synthesize subcommand records --skipped, --degraded, and --round2-skipped', () => {
   const out = freshTmp();
   try {
@@ -230,11 +255,18 @@ test('synthesize --briefing carries the root causes into every output', () => {
     // Two independent voices: confirming a group is one disposition covering N
     // findings, so it takes the same cross-validation the report's confidence
     // labels take.
+    //
+    // The second voice is the AUDITOR, not the Pragmatist. SKILL.md Phase 4 is
+    // explicit that "the Pragmatist skips round 2", so a round2-pragmatist
+    // payload is not something the documented flow produces — it was only ever
+    // the nearest second persona to hand here, and it is now refused. The
+    // Auditor is not discounted as `selfRuled`, because it is not the sole
+    // reporter of every citation (F2 is the Adversary's).
     writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
       steward: { persona: 'steward', validate: [], challenge: [], added: [],
                  groups: [{ id: 'G1', ruling: 'one', reason: 'one unreachable guard' }] },
-      pragmatist: { persona: 'pragmatist', validate: [], challenge: [], added: [],
-                    groups: [{ id: 'G1', ruling: 'one', reason: 'agreed' }] },
+      auditor: { persona: 'auditor', validate: [], challenge: [], added: [],
+                 groups: [{ id: 'G1', ruling: 'one', reason: 'agreed' }] },
     }));
 
     writeFileSync(path.join(out, 'briefing.json'), JSON.stringify({

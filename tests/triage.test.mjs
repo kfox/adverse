@@ -440,6 +440,100 @@ test('checkClaim: an in-tree symlink pointing out of the tree is disproved, not 
   }
 });
 
+// `.git` is inside the checkout, so every containment check admits it — and
+// `actions/checkout` writes the job token into `.git/config` as an
+// `http.<host>.extraheader` line. checkClaim copies the cited line into
+// `citedLine`, which triage writes into briefing.json, which IS the round-2
+// prompt: one citation hands the token to every later reviewer. The sentinel
+// stands in for that token, and the assertion is that it is never read.
+const GIT_CONFIG_SENTINEL = 'AUTHORIZATION: basic TOKEN-SENTINEL-DO-NOT-EXFILTRATE';
+
+test('checkClaim: a path under .git/ is disproved, so its credentials are never read', () => {
+  git(repo, 'config', 'http.https://github.com/.extraheader', GIT_CONFIG_SENTINEL);
+  const c = checker.checkClaim('.git/config', 1);
+  assert.equal(c.status, 'DISPROVED');
+  assert.match(c.why, /repository metadata/);
+  assert.equal(c.citedLine, undefined);
+});
+
+test('checkClaim: .git is refused through a symlink and through traversal, not just by name', () => {
+  const link = path.join(repo, 'gitlink');
+  try {
+    symlinkSync(path.join(repo, '.git'), link);
+  } catch {
+    return; // no symlink support on this platform
+  }
+  try {
+    for (const cite of ['gitlink/config', './.git/config', '.git/../.git/config']) {
+      const c = checker.checkClaim(cite, 1);
+      assert.equal(c.status, 'DISPROVED', cite);
+      assert.equal(c.citedLine, undefined, cite);
+    }
+  } finally {
+    unlinkSync(link);
+  }
+});
+
+// The segment match is only half the refusal; this pins the other half, and it
+// is the half that runs everywhere. The casing test below can only assert on a
+// case-INSENSITIVE filesystem, so it skips on the Linux CI — leaving the fix
+// for a credential leak exercised on no runner at all. This case has no such
+// hole: with `--separate-git-dir`, the real git dir sits INSIDE the checkout
+// under a name that is not `.git` (here `gitdata`), so no segment match can
+// ever see it and only `git rev-parse --absolute-git-dir` can.
+test('checkClaim: a git dir inside the checkout is refused even when it is not named .git', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-sepgit-'));
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'base',
+      `--separate-git-dir=${path.join(dir, 'gitdata')}`, '.'],
+      { cwd: dir, stdio: 'pipe' });
+    git(dir, 'config', 'user.email', 'test@example.invalid');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    writeFileSync(path.join(dir, 'a.py'), 'line 1\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'base');
+    git(dir, 'config', 'http.https://github.com/.extraheader', GIT_CONFIG_SENTINEL);
+
+    const sep = makeClaimChecker({ repo: dir, base: 'base' });
+    const c = sep.checkClaim('gitdata/config', 1);
+    assert.equal(c.status, 'DISPROVED');
+    assert.match(c.why, /repository metadata/);
+    assert.equal(c.citedLine, undefined);
+    assert.equal(sep.checkClaim('a.py', 1).status, 'ok', 'ordinary source still reads');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The refusal compared segments to the literal '.git', and APFS and NTFS are
+// case-INSENSITIVE while `realpathSync` on darwin returns the caller's casing
+// rather than the on-disk casing. So `.GIT/config` opened the same file and
+// passed both the literal and the resolved check: one character defeated the
+// refusal and put the token back in briefing.json. Skipped where the
+// filesystem really is case-sensitive, since there the variants name nothing.
+test('checkClaim: .git is refused in any casing, on a case-insensitive filesystem', (t) => {
+  git(repo, 'config', 'http.https://github.com/.extraheader', GIT_CONFIG_SENTINEL);
+  let caseInsensitive = false;
+  try {
+    caseInsensitive = readFileSync(path.join(repo, '.GIT', 'config'), 'utf-8').length > 0;
+  } catch { /* case-sensitive filesystem */ }
+  if (!caseInsensitive) return t.skip('case-sensitive filesystem');
+
+  for (const cite of ['.GIT/config', '.Git/config', '.gIt/config', './.GIT/config']) {
+    const c = checker.checkClaim(cite, 1);
+    assert.equal(c.status, 'DISPROVED', cite);
+    assert.equal(c.citedLine, undefined, cite);
+  }
+  assert.equal(checker.checkCounterpart('.GIT/config').status, 'DISPROVED');
+});
+
+test('checkCounterpart: a path under .git/ is refused too, not only the primary anchor', () => {
+  const c = checker.checkCounterpart('.git/config');
+  assert.equal(c.status, 'DISPROVED');
+  assert.match(c.why, /repository metadata/);
+});
+
 test('checkCounterpart: an existing file passes', () => {
   assert.equal(checker.checkCounterpart('a.py').status, 'ok');
 });

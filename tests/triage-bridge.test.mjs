@@ -96,6 +96,51 @@ let repo;
 test.before(() => { repo = makeRepo(); });
 test.after(() => rmSync(repo, { recursive: true, force: true }));
 
+// One `git diff` per FILE, not per FINDING. `changedRanges` shelled out on
+// every call, so a panel that returned 400 findings against one file spawned
+// 400 subprocesses — measured at ~12.6ms each and rising linearly, on input a
+// reviewer chooses the size of. Counted through a PATH shim rather than
+// inferred from a duration, because a timing assertion on a shared CI box is
+// a flake waiting to happen.
+test('changedRanges shells out once per cited file, not once per finding', () => {
+  const shim = mkdtempSync(path.join(os.tmpdir(), 'adverse-gitshim-'));
+  const log = path.join(shim, 'calls.txt');
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf-8' }).trim();
+  // Only `git diff` is counted. The checker also asks `git rev-parse` once
+  // for the authoritative git dir, and that is a fixed cost per checker, not
+  // the per-finding fan-out this test is about.
+  writeFileSync(path.join(shim, 'git'),
+    `#!/bin/sh\nfor a in "$@"; do [ "$a" = diff ] && echo call >> ${log} && break; done\nexec ${real} "$@"\n`,
+    { mode: 0o755 });
+
+  // Half of each file's citations use an ALIASED spelling. Keyed on the cited
+  // string rather than the resolved path, the memo was one entry per spelling
+  // — so `a.py`, `./a.py`, `././a.py` … restored the full fan-out while every
+  // one of them still claim-checked `ok`. Two files must still be two calls.
+  const findings = [];
+  for (const file of ['app.py', 'docs/app.md']) {
+    for (let i = 0; i < 25; i += 1) {
+      const cited = i % 2 ? `${'./'.repeat(i)}${file}` : file;
+      findings.push(finding({ file: cited, line: 1, title: `${file} ${i}` }));
+    }
+  }
+  const round1 = path.join(repo, 'round1-fanout.json');
+  writeFileSync(round1, JSON.stringify(review('auditor', findings)));
+  const out = path.join(repo, 'briefing-fanout.json');
+
+  try {
+    const r = spawnSync(process.execPath,
+      [TRIAGE, '--round1', round1, '--repo', repo, '--base', 'base', '--out', out],
+      { encoding: 'utf-8', timeout: 60_000,
+        env: { ...process.env, PATH: `${shim}:${process.env.PATH}` } });
+    assert.equal(r.status, 0, r.stderr);
+    const calls = readFileSync(log, 'utf-8').trim().split('\n').filter(Boolean).length;
+    assert.equal(calls, 2, `50 findings across 2 files should shell out twice, got ${calls}`);
+  } finally {
+    rmSync(shim, { recursive: true, force: true });
+  }
+});
+
 test('--gate and --base are carried from argv into the briefing verbatim', () => {
   // What buildBriefing does with these is tested in-process; this is the wire
   // between argv and that call, which is its own claim. Both fields are read
