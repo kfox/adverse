@@ -45,6 +45,9 @@ Options for 'review':
 Options for 'synthesize':
   --round1 <path>          Path to a JSON file: { "<persona>": <round1Payload>, … }.
   --round2 <path>          Same shape, but with round-2 cross-reviews. Optional.
+  --briefing <path>        triage.mjs's briefing.json. Its candidate root-cause
+                           groups, plus round 2's rulings on them, become the
+                           report's root-cause section. Optional.
   --out <path>             Markdown output path. Default: stdout.
   --json-out <path>        JSON synthesis output path.
   --html-out <path>        HTML dashboard output path.
@@ -258,6 +261,7 @@ async function cmdSynthesize(rest) {
     options: {
       round1:     { type: 'string' },
       round2:     { type: 'string' },
+      briefing:   { type: 'string' },
       out:        { type: 'string' },
       'json-out': { type: 'string' },
       'html-out': { type: 'string' },
@@ -270,6 +274,14 @@ async function cmdSynthesize(rest) {
   if (!values.round1) die('synthesize: --round1 is required');
   const round1 = readJsonArg(values.round1);
   const round2 = values.round2 ? readJsonArg(values.round2) : {};
+
+  // The candidate root causes triage proposed. Optional: without it the report
+  // is exactly what it was before grouping existed, one section per finding —
+  // which is also what a run whose briefing proposed nothing produces.
+  const briefing = values.briefing ? readJsonArg(values.briefing) : null;
+  if (briefing && !Array.isArray(briefing.groups)) {
+    die(`synthesize: ${values.briefing}: not a briefing.json (no \`groups\` array)`);
+  }
 
   // --skipped auditor="reason" records a lane that was deliberately not run, so
   // the report cannot present its silence as a clean bill of health.
@@ -293,6 +305,7 @@ async function cmdSynthesize(rest) {
 
   const syn = synthesize(round1, round2, {
     skippedPersonas, failedPersonas, round2Skipped: values['round2-skipped'] ?? null,
+    groups: briefing?.groups ?? [],
   });
   const md = renderMarkdown(syn);
 

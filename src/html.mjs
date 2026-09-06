@@ -24,6 +24,14 @@ const VERDICT_BADGE = {
   unknown:     { label: '—',           color: '#374151', bg: '#f3f4f6' },
 };
 
+const ROOT_CAUSE_STATUS = {
+  confirmed: 'Confirmed by round 2 — one fix, one disposition',
+  contested: 'Contested — reviewers disagree; decide each citation',
+  oversized: 'Too many citations to collapse; decide each citation',
+  proposed: 'Candidate — round 2 did not rule; decide each citation',
+  split: 'Dissolved by round 2 — separate problems',
+};
+
 function esc(s) {
   return String(s ?? '')
     .replaceAll('&', '&amp;')
@@ -54,7 +62,16 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     else groups[f.confidence].push(f);
   }
 
+  const rootCauses = syn.rootCauses ?? [];
   const sections = [];
+  if (rootCauses.length) {
+    sections.push(`
+      <section class="findings-group">
+        <h2>Root causes — ${rootCauses.filter((rc) => rc.status === 'confirmed').length} confirmed of ${rootCauses.length} proposed</h2>
+        <p class="empty">Proposed from the panel's own cluster and co-citation edges, then ruled on in round 2. Confidence is still counted per finding: a group fixes and decides several citations at once, it is not an extra voice.</p>
+        ${rootCauses.map(renderRootCause).join('\n')}
+      </section>`);
+  }
   for (const conf of ['cross-validated', 'consensus', 'disputed', 'solo']) {
     const items = groups[conf];
     if (!items.length) continue;
@@ -124,6 +141,9 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     .card .reporters { font-size: 12px; color: var(--fg-muted); margin: 0 0 8px; }
     .card .kind { font-size: 11px; color: var(--fg-muted); border: 1px solid currentColor; border-radius: 999px; padding: 1px 7px; }
     .card .detail { margin: 8px 0; }
+    .card .citations { margin: 8px 0; padding-left: 20px; }
+    .card .citations li { margin: 4px 0; }
+    .card .cite-meta { font-size: 12px; color: var(--fg-muted); }
     .card .fix { background: var(--bg-alt); padding: 8px 12px; border-radius: 6px; margin: 8px 0 0; }
     .card .fix strong { color: var(--accent); }
     blockquote.validate, blockquote.challenge { margin: 6px 0; padding: 6px 12px; border-left: 3px solid; border-radius: 0 6px 6px 0; font-size: 13px; }
@@ -172,6 +192,38 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
 </body>
 </html>
 `;
+}
+
+// One card per root cause, opened by default: a reader who sees four
+// citations of one defect as one defect is the entire point of aggregating,
+// and that does not survive being folded away behind a disclosure triangle.
+function renderRootCause(rc) {
+  const sev = SEVERITY_BADGE[rc.severity] ?? SEVERITY_BADGE.info;
+  const citations = rc.citations.map((c) => {
+    const loc = c.file ? `${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}` : '';
+    return `<li><strong>${esc(c.id)}</strong> <span class="cite-meta">${esc(c.reporter)} · `
+      + `${esc(c.severity ?? 'no severity')}·${esc(c.kind ?? 'unclassified')}</span> ${esc(c.title)}`
+      + (loc ? ` <span class="loc">${esc(loc)}</span>` : '')
+      + (c.resolved ? '' : ' <em>— not in the report; this citation named a finding synthesis did not build</em>')
+      + '</li>';
+  }).join('\n');
+  const rulings = rc.rulings.map((r) =>
+    `<blockquote class="${r.ruling === 'one' ? 'validate' : 'challenge'}">`
+    + `<strong>${esc(r.persona)} rules ${esc(r.ruling)}:</strong> ${esc(r.reason)}</blockquote>`,
+  ).join('\n');
+  return `<details class="card" open>
+    <summary>
+      <span class="badge" style="color:${sev.color};background:${sev.bg}">${esc(rc.id)}</span>
+      <span class="title">${esc(rc.title)}</span>
+      <span class="kind">${esc(rc.status)}</span>
+    </summary>
+    <div class="body">
+      <p class="reporters">${esc(ROOT_CAUSE_STATUS[rc.status] ?? rc.status)} · ${rc.citations.length} citations from ${rc.reporters.length} reviewer(s): ${esc(rc.reporters.join(', '))} · ${rc.blocking ? 'blocking' : 'advisory only'}</p>
+      <ul class="citations">${citations}</ul>
+      ${rc.fix ? `<div class="fix"><strong>Fix:</strong> ${esc(rc.fix)}</div>` : ''}
+      ${rulings}
+    </div>
+  </details>`;
 }
 
 function renderCard(f) {

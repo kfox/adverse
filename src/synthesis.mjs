@@ -33,7 +33,7 @@
 // are both credible enough (cross-validated or consensus) and consequential
 // enough (not advisory, not `info`) to hold a change open.
 
-import { ADVISORY_KINDS, SEVERITY_RANK } from './taxonomy.mjs';
+import { ADVISORY_KINDS, GROUP_RULINGS, SEVERITY_RANK } from './taxonomy.mjs';
 
 // Verdict → score mapping. The natural symmetric choice: approve and reject
 // cancel each other out, conditional carries half-weight on the approve side.
@@ -146,11 +146,86 @@ function buildFinding(persona, raw) {
     validators: [], // Array<{persona, reason}>
     challengers: [],
     confidence: 'solo',
+    // The root cause this finding is a citation of, once round 2 has been
+    // read. Declared here so the field exists whether or not a run grouped
+    // anything — a shape that appears only sometimes is one every consumer
+    // has to guess about.
+    group: null,
   };
 }
 
+// Attach round 2's rulings to the candidate root causes triage proposed, and
+// resolve each citation back to the finding it names.
+//
+// The unit of REPORT and DECISION becomes the group; the unit of CONFIDENCE
+// stays the finding, and nothing here touches it. That separation is the whole
+// safety argument: distinct-persona counting is what makes consensus mean
+// something, and a group that let one lane's three findings read as three
+// voices would counterfeit exactly the signal the design trusts most.
+//
+// Five states, and only one of them collapses anything:
+//
+//   confirmed  every ruling says `one` — a single fix, a single disposition,
+//              with its citations attached
+//   split      every ruling says `split` — the proposal was wrong; the
+//              citations are independent findings and are decided that way
+//   contested  the rulings disagree. Not a verdict, and not a collapse: the
+//              citations stay individually decidable, like a `disputed`
+//              finding stays blocking until someone decides it
+//   oversized  ruled `one`, but carrying more citations than one disposition
+//              can honestly cover (src/triage.mjs, MAX_CONFIRMABLE_MEMBERS)
+//   proposed   nobody ruled — the pre-grouping behaviour, kept as the default
+//
+// Every state but `confirmed` leaves the members exactly as they were, so a
+// missing, contested, or oversized ruling costs the speedup and never a
+// finding.
+function buildRootCauses(groups, round2, findByTitle) {
+  const rulingsById = new Map();
+  for (const [persona, cross] of Object.entries(round2)) {
+    for (const r of cross?.groups ?? []) {
+      if (!r || typeof r !== 'object' || !GROUP_RULINGS.has(r.ruling)) continue;
+      if (!rulingsById.has(r.id)) rulingsById.set(r.id, []);
+      rulingsById.get(r.id).push({ persona, ruling: r.ruling, reason: (coerceStr(r.reason) ?? '').trim() });
+    }
+  }
+
+  return groups.map((g) => {
+    const rulings = rulingsById.get(g.id) ?? [];
+    const verdicts = new Set(rulings.map((r) => r.ruling));
+    const status = rulings.length === 0 ? 'proposed'
+      : verdicts.size > 1 ? 'contested'
+        : verdicts.has('split') ? 'split'
+          : g.oversized ? 'oversized' : 'confirmed';
+
+    // A citation naming a title synthesis never built is reported unresolved
+    // rather than dropped: the finding may have been rejected upstream for a
+    // missing severity, and a citation that quietly disappears makes a group
+    // of three look like a group of two.
+    const citations = (g.citations ?? []).map((c) => {
+      const f = findByTitle(c.title);
+      return {
+        ...c,
+        resolved: Boolean(f),
+        confidence: f?.confidence ?? null,
+        blocking: f ? isBlocking(f) : null,
+        fix: f?.fix ?? null,
+      };
+    });
+
+    return {
+      ...g,
+      status,
+      rulings,
+      citations,
+      reporters: [...new Set(citations.map((c) => c.reporter))],
+      blocking: citations.some((c) => c.blocking === true),
+      fix: citations.find((c) => c.fix)?.fix ?? null,
+    };
+  });
+}
+
 export function synthesize(round1, round2 = {},
-  { failedPersonas = [], skippedPersonas = [], round2Skipped = null } = {}) {
+  { failedPersonas = [], skippedPersonas = [], round2Skipped = null, groups = [] } = {}) {
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
@@ -257,8 +332,21 @@ export function synthesize(round1, round2 = {},
 
   const openBlocking = findings.filter(isOpenBlocking);
 
+  // 6. Root causes, and the back-reference from each finding to its group.
+  const rootCauses = buildRootCauses(Array.isArray(groups) ? groups : [], round2, findByTitle);
+  for (const rc of rootCauses) {
+    // A dissolved group is not a grouping. Back-referencing it would put
+    // "part of G2" on findings a reviewer has just said are unrelated.
+    if (rc.status === 'split') continue;
+    for (const c of rc.citations) {
+      const f = findByTitle(c.title);
+      if (f && !f.group) f.group = rc.id;
+    }
+  }
+
   return {
     findings,
+    rootCauses,
     openBlocking,
     verdicts,
     summaries,
@@ -317,6 +405,52 @@ const ADVISORY_PREAMBLE =
   + 'structure, so a loop that waits for them to run out never ends. Take them '
   + 'or file them; do not let them gate the merge._';
 
+const ROOT_CAUSE_STATUS = {
+  confirmed: 'confirmed by round 2 — one fix, one disposition',
+  contested: 'CONTESTED — reviewers disagree on whether this is one thing; decide each citation',
+  oversized: 'too many citations to collapse into one disposition; decide each citation',
+  proposed: 'candidate — round 2 did not rule; decide each citation',
+  split: 'dissolved by round 2 — these are separate problems',
+};
+
+// One block per root cause: the canonical statement, the fix once, and the
+// citation fanout. `split` groups are still listed, because a proposal the
+// panel rejected is a fact about the run — silently dropping it would leave
+// the reader wondering why the co-citation they can see in the briefing
+// produced nothing.
+function renderRootCauses(rootCauses) {
+  const lines = ['## Root causes (aggregated from the panel\'s own co-citations)', ''];
+  lines.push('_Grouping is proposed deterministically from cluster and co-citation edges, '
+    + 'then ruled on in round 2. Confidence is still counted per finding: a group is a way '
+    + 'to fix and decide several citations at once, never an extra voice._');
+  lines.push('');
+  for (const rc of rootCauses) {
+    const marker = SEVERITY_MARKER[rc.severity] ?? '·';
+    lines.push(`### ${marker} **[${rc.id}]** ${rc.title}`);
+    lines.push('');
+    lines.push(`_${ROOT_CAUSE_STATUS[rc.status] ?? rc.status} · ${rc.citations.length} citations `
+      + `from ${rc.reporters.length} reviewer${rc.reporters.length === 1 ? '' : 's'} `
+      + `(${rc.reporters.join(', ')}) · ${rc.blocking ? 'blocking' : 'advisory only'}_`);
+    lines.push('');
+    for (const c of rc.citations) {
+      const loc = c.file ? ` — \`${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}\`` : '';
+      lines.push(`- **${c.id}** (${c.reporter}, ${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}) `
+        + `${c.title}${loc}`
+        + (c.resolved ? '' : ' — _not in the report; this citation named a finding synthesis did not build_'));
+    }
+    if (rc.fix) {
+      lines.push('');
+      lines.push(`**Fix:** ${rc.fix}`);
+    }
+    for (const r of rc.rulings) {
+      lines.push('');
+      lines.push(`> ${r.ruling === 'one' ? '🔗' : '✂️'} **${r.persona} rules \`${r.ruling}\`:** ${r.reason}`);
+    }
+    lines.push('');
+  }
+  return lines;
+}
+
 export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) {
   const lines = [];
   lines.push(`# ${title}`);
@@ -336,6 +470,14 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
       + `(cross-validated or consensus, not advisory, not info)`
       + (open.length ? ` — ${open.map((f) => f.title).join('; ')}` : ''),
   );
+  const rootCauses = syn.rootCauses ?? [];
+  if (rootCauses.length) {
+    const confirmed = rootCauses.filter((rc) => rc.status === 'confirmed');
+    lines.push(
+      `**Root causes:** ${confirmed.length} confirmed of ${rootCauses.length} proposed, `
+        + `covering ${new Set(rootCauses.flatMap((rc) => rc.members)).size} findings  `,
+    );
+  }
   lines.push('');
 
   lines.push('## Reviewer verdicts');
@@ -375,6 +517,10 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
     lines.push('');
     return lines.join('\n');
   }
+
+  // Before the per-finding sections, not after: the point of aggregating is
+  // that a reader meets the four citations of one defect as one defect.
+  if ((syn.rootCauses ?? []).length) lines.push(...renderRootCauses(syn.rootCauses));
 
   const groups = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
   const advisory = [];
@@ -463,6 +609,26 @@ export function toJsonReport(syn) {
     cross_examined: syn.findings.some((f) =>
       (f.validators ?? []).length > 0 || (f.challengers ?? []).length > 0),
     open_blocking: (syn.openBlocking ?? []).map((f) => f.title),
+    // The decision unit, when round 2 confirmed one. Carried into the report
+    // so Phase 7 can record ONE disposition against the whole group and the
+    // ledger can say, on a later pass, whether a returning finding survived a
+    // root-cause fix or a symptom-level one.
+    root_causes: (syn.rootCauses ?? []).map((rc) => ({
+      id: rc.id,
+      title: rc.title,
+      status: rc.status,
+      severity: rc.severity,
+      kinds: rc.kinds,
+      files: rc.files,
+      reporters: rc.reporters,
+      members: rc.members,
+      via: rc.via,
+      oversized: rc.oversized,
+      blocking: rc.blocking,
+      fix: rc.fix,
+      rulings: rc.rulings,
+      citations: rc.citations,
+    })),
     findings: syn.findings.map((f) => ({
       severity: f.severity,
       kind: f.kind,
@@ -476,6 +642,7 @@ export function toJsonReport(syn) {
       validators: f.validators,
       challengers: f.challengers,
       confidence: f.confidence,
+      group: f.group ?? null,
       blocking: isBlocking(f),
       // Did any reviewer go on record about THIS finding? A round-2 reviewer's
       // own added finding has no validators and no challengers by
