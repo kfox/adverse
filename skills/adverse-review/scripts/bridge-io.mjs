@@ -88,3 +88,16 @@ export function readPlanLanes(file, prefix) {
 }
 
 export const splitPersonas = (lanes) => splitLanes(lanes).map((l) => l.persona);
+
+// One place the roster's problems become this process's exit code. The first
+// problem decides it, and src/roster.mjs orders them so a run that could not
+// read its configuration (exit 2) is reported before a payload that does not
+// describe a review (exit 1). Warnings are reached only when nothing refused
+// the run — a warning printed beside a fatal error is a warning nobody reads.
+export function reportRoster({ problems, warnings }, prefix) {
+  if (problems.length) {
+    for (const p of problems) process.stderr.write(`${prefix}: ${p.message}\n`);
+    process.exit(problems[0].exit);
+  }
+  for (const w of warnings) process.stderr.write(`${prefix}: ${w}\n`);
+}

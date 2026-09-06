@@ -295,7 +295,8 @@ src/                          # Shared core, used by both CLI and Skill
   triage.mjs                  # Claim/kind checks, clustering, root-cause grouping
   ledger.mjs                  # Adjudication log + the convergence stop condition
   scope.mjs                   # Does this change have a trust boundary in it?
-  scaling.mjs                 # How much review does this change deserve?
+  scaling.mjs                 # How much review does this change deserve? + reading a plan back
+  roster.mjs                  # Who counts as a reviewer: personas, split lanes, silent lanes
   html.mjs                    # Self-contained HTML dashboard renderer
   cli.mjs                     # Argv parsing + command dispatch
   fsSafe.mjs                  # Open-and-check without a TOCTOU gap
@@ -306,7 +307,7 @@ bin/
 skills/adverse-review/
   SKILL.md                    # Claude Code playbook (the "code" of the Skill)
   scripts/
-    bridge-io.mjs             # Shared bridge helpers: readJson, usage, persona guards
+    bridge-io.mjs             # Shared bridge helpers: readJson, usage, write and roster guards
     collect.mjs               # Skill bridge: source collection
     combine.mjs               # Skill bridge: combine per-persona JSON
     triage.mjs                # Skill bridge: claim/kind checks, grouping, briefing

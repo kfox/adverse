@@ -39,14 +39,14 @@ import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
-import { readJson, readPlanLanes, splitPersonas, usage } from './bridge-io.mjs';
+import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
 const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
-const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
+const { checkRoster } = await importFromSrc('roster.mjs');
 const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, checkKind, clusterFindings,
         crossReferenceFindings, groupFindings, makeClaimChecker, normalizeAnchor } =
   await importFromSrc('triage.mjs');
@@ -89,72 +89,33 @@ if (base.startsWith('-')) {
 
 const { checkClaim, checkCounterpart } = makeClaimChecker({ repo, base });
 
-const reviews = values.round1.map((f) => readJson(f, 'triage'));
-// The persona string is model-written and keys the briefing's verdicts,
-// clusters (reporters.size >= 2), and cross-references (a.reporter !==
-// b.reporter) — a re-cased name would mint a phantom reviewer whose agreement
-// with its own other half reads as two independent lanes. Same registry check
-// as combine.mjs, at the earlier reader.
-const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
-for (const r of reviews) {
-  if (!KNOWN_PERSONAS.has(r?.persona)) {
-    process.stderr.write(`triage: unknown persona ${JSON.stringify(r?.persona)}`
-      + ` (expected one of ${DEFAULT_PERSONAS.join(', ')})\n`);
-    process.exit(1);
-  }
-}
+const sources = values.round1;
+const reviews = sources.map((f) => readJson(f, 'triage'));
 
-// Same guard combine.mjs has always had, missing here until now: without it,
-// ANY duplicate persona — a genuinely split lane, a re-run whose old files
-// were never cleaned, a stale run's payload swept in by a wide glob — merges
-// silently via mergeSplitReviews below. That silent merge is exactly how a
-// contaminated briefing (8 reviewers instead of the planned 4) went undetected
-// in the run that motivated this check. `--merge-personas <persona>` names
-// the lane the plan actually split, so an undeclared duplicate is an error
-// instead of a phantom extra reviewer.
-// `--plan` carries two answers and this read only one. `agents > 1` says which
-// lanes were split; `run` says which lanes exist. The roster half landed in
-// combine.mjs and not here — and triage is the bridge that builds the round-2
-// PROMPT, so a payload from a lane the plan never ran was shaping the
-// cross-review one step before combine got the chance to refuse it.
+// Who counts as a reviewer — src/roster.mjs, the same rules combine.mjs
+// applies to the same payloads one phase later. triage is the bridge that
+// builds the round-2 PROMPT, so a payload from a lane the plan never ran was
+// shaping the cross-review one step before combine got the chance to refuse
+// it.
+//
+// `--plan` carries both answers this needs: `agents > 1` says which lanes were
+// split, `run` says which lanes exist.
 const planLanes = values.plan ? readPlanLanes(values.plan, 'triage') : null;
-const notRun = planLanes
-  ? new Set(planLanes.filter((l) => !l.run).map((l) => l.persona)) : null;
+reportRoster(checkRoster(
+  reviews.map((r, i) => ({ persona: r?.persona, src: sources[i] })),
+  { lanes: planLanes, explicitMerges: values['merge-personas'] ?? [] },
+), 'triage');
 
-const mergePersonas = new Set([
-  ...(values['merge-personas'] ?? []),
-  ...(planLanes ? splitPersonas(planLanes) : []),
-]);
-for (const p of mergePersonas) {
-  if (!KNOWN_PERSONAS.has(p)) {
-    process.stderr.write(`triage: ${p}: not a persona (${DEFAULT_PERSONAS.join(', ')})\n`);
+// Identity is settled above; this is the other half of a usable payload. A
+// non-array `findings` reached a `for…of` and threw a TypeError with a stack
+// trace, against a contract that says a bridge which could not read its input
+// exits 2 and never crashes.
+for (let i = 0; i < reviews.length; i += 1) {
+  const supplied = reviews[i].findings;
+  if (supplied !== undefined && !Array.isArray(supplied)) {
+    process.stderr.write(`triage: ${sources[i]}: \`findings\` is not an array`
+      + ` (got ${JSON.stringify(supplied)})\n`);
     process.exit(2);
-  }
-}
-for (const r of reviews) {
-  if (notRun?.has(r.persona)) {
-    process.stderr.write(`triage: the plan recorded '${r.persona}' as not run, so a payload from`
-      + ' it is a stale file or a spoof, not a reviewer.\n'
-      + '  If you deliberately ran this lane anyway, regenerate plan.json or drop --plan.\n');
-    process.exit(1);
-  }
-}
-
-const countByPersona = new Map();
-for (const r of reviews) countByPersona.set(r.persona, (countByPersona.get(r.persona) ?? 0) + 1);
-for (const [persona, count] of countByPersona) {
-  if (mergePersonas.has(persona)) {
-    if (count !== 2) {
-      process.stderr.write(`triage: --merge-personas ${persona}: expected exactly 2 payloads for the split lane, got ${count}.`
-        + (count < 2
-          ? ' What is missing reviewed nothing — re-run it, or pass --degraded to synthesize.\n'
-          : ' Extra payloads mean a stale file or a double glob — clean the run directory.\n'));
-      process.exit(1);
-    }
-  } else if (count > 1) {
-    process.stderr.write(`triage: duplicate persona '${persona}' across inputs`
-      + ' (a deliberately split lane needs --merge-personas <persona>)\n');
-    process.exit(1);
   }
 }
 

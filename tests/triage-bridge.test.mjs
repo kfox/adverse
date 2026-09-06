@@ -561,6 +561,50 @@ test('a --plan persona outside the registry is refused, not read as a phantom la
   assert.match(r.stderr, /not a persona/);
 });
 
+test('a lane the plan ran that sent no payload is warned about here too, not only in combine', () => {
+  // The roster rules lived in two copies and this half existed in only one of
+  // them. triage builds the round-2 PROMPT, so a lane missing from its input
+  // is the earlier and worse place for the silence to go unremarked.
+  const p = path.join(repo, 'round1-silent.json');
+  writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));
+  const plan = writePlan(repo, [
+    { persona: 'auditor', run: true, agents: 1, reason: 'r' },
+    { persona: 'steward', run: true, agents: 1, reason: 'r' },
+  ]);
+  const out = path.join(repo, 'briefing-silent.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--plan', plan, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /the plan ran steward but no payload arrived/);
+});
+
+test('the not-run refusal names the override and the payload, as combine\'s always did', () => {
+  const p = path.join(repo, 'round1-notrun.json');
+  writeFileSync(p, JSON.stringify({ persona: 'pragmatist', verdict: 'approve', summary: 's', findings: [] }));
+  const plan = writePlan(repo, [{ persona: 'pragmatist', run: false, agents: 0, reason: 'skip' }]);
+  const out = path.join(repo, 'briefing-notrun.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--plan', plan, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /recorded 'pragmatist' as not run/);
+  assert.match(r.stderr, /thorough pass/);
+  assert.match(r.stderr, /round1-notrun\.json/);
+});
+
+test('a non-array `findings` is refused with a sentence, not a TypeError stack', () => {
+  const p = path.join(repo, 'round1-notarray.json');
+  writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: 7 }));
+  const out = path.join(repo, 'briefing-notarray.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /`findings` is not an array/);
+  assert.doesNotMatch(r.stderr, /TypeError|at file:/);
+});
+
 test('a --plan persona outside the registry is refused even when the lane was NOT split', () => {
   // The registry check used to reach plan lanes only through
   // `--merge-personas`, which a lane with `agents: 1` never becomes — so this
