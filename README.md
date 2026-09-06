@@ -287,6 +287,7 @@ skills/adverse-review/
     collect.mjs               # Skill bridge: source collection
     combine.mjs               # Skill bridge: combine per-persona JSON
     triage.mjs                # Skill bridge: claim/kind checks, clustering, briefing
+    validate.mjs              # Skill bridge: schema-check a reviewer-written round1/round2/verify payload
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
     plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap

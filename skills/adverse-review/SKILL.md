@@ -272,7 +272,10 @@ one per persona — two for a lane the plan split. Each gets:
     whatever the diff makes them want to see);
   - the diffstat and file list from Phase 1;
   - the gate summary `$GATE`, with the instruction **not** to report anything
-    those tools already prove.
+    those tools already prove;
+  - the exact path to **write its own JSON object to** with the Write tool —
+    `$ADVERSE_RUN/round1-<persona>.json` (`-a`/`-b` for a split lane) — not to
+    reply with the JSON in chat.
 - **Model**: `opus` unless the user asked otherwise. If the user picks a smaller
   model, pass it to every persona — mixing models across personas defeats the
   single-model design.
@@ -285,14 +288,15 @@ it cannot check a claim it was never shown.
 **A split lane** (two agents, from the Phase 1 plan) partitions
 `$ADVERSE_RUN/files.txt` roughly in half between its two agents. Tell each
 agent which files are its half; both run under the **same persona name**, each
-in its own checkout (`$WORKTREES/<persona>-a`, `-b`), and their replies are
-saved as `round1-<persona>-a.json` and `round1-<persona>-b.json`. The synthesizer counts distinct personas, not
-agents, so a split lane cannot inflate consensus. If one member of a split
-lane fails, the lane is **degraded** unless that member's half is re-run —
-half the files got no reviewer, and an undeclared gap reads exactly like a
-clean review.
+in its own checkout (`$WORKTREES/<persona>-a`, `-b`), and each writes its own
+`round1-<persona>-a.json` / `round1-<persona>-b.json`. The synthesizer counts
+distinct personas, not agents, so a split lane cannot inflate consensus. If
+one member of a split lane fails, the lane is **degraded** unless that
+member's half is re-run — half the files got no reviewer, and an undeclared
+gap reads exactly like a clean review.
 
-Each subagent must respond with a single JSON object:
+Each subagent's JSON object, written to its own path rather than returned in
+chat, has this shape:
 
 ```json
 {
@@ -319,12 +323,33 @@ claim-checks them, round 2 navigates by them instead of by a source block, and
 `kind` decides whether a finding can block. Tell reviewers that an unanchored
 finding is a finding nobody can verify.
 
-Save each parsed object to `$ADVERSE_RUN/round1-<persona>.json`.
+**The reviewer writes the file — you never retype it.** The orchestrator used
+to copy each subagent's JSON reply into a file by hand, and that hand was a
+defect source in its own right: a retyped `detail` field truncated mid-word, a
+finding remembered instead of read back, a fix recorded that had never
+actually been written down. Once each agent has its own path (above) and the
+Write tool, the orchestrator's job is to check what landed, not to produce it:
 
-If a subagent returns malformed JSON, **retry that one persona once** with the
-validator error appended. If the retry also fails, drop that persona **and pass
-it to `synthesize.mjs` as `--degraded <persona>`** in Phase 5. If fewer than 2
-personas survive, abort — synthesis needs at least 2 voices.
+```bash
+node ${SKILL_DIR}/scripts/validate.mjs --phase round1 "$ADVERSE_RUN"/round1-*.json
+```
+
+It reports `ok (<persona>)` per file on stdout, or the schema error on stderr —
+the same message a retry needs. Exit 2 means a file is missing or unreadable,
+which for this phase means **the agent never wrote it**; do not reconstruct it
+from the transcript, retry the persona instead.
+
+If a subagent's file is missing, or `validate.mjs` rejects it, **retry that one
+persona once**, appending the validator's stderr line and a reminder to use
+Write rather than reply in chat. If the retry also fails, drop that persona
+**and pass it to `synthesize.mjs` as `--degraded <persona>`** in Phase 5. If
+fewer than 2 personas survive, abort — synthesis needs at least 2 voices.
+
+The one narrow exception: a subagent environment with no Write tool. There,
+extract the JSON **verbatim from that subagent's own final reply** and write
+it unedited to the path — copying its bytes, not reconstructing them, is what
+keeps this from becoming the retyping problem under a different name — then
+validate it exactly as above.
 
 Dropping a lane silently is the failure this flag exists to prevent: a lane
 that failed did not find nothing, it did not look, and both produce zero
@@ -416,6 +441,7 @@ Pragmatist**, spawn a subagent with the same persona system prompt and:
 1. `${SKILL_DIR}/scripts/prompts/round2.txt`
 2. `$ADVERSE_RUN/briefing.json`
 3. the repo path and `$BASE`
+4. the path to write its own JSON object to: `$ADVERSE_RUN/round2-<persona>.json`
 
 **The Pragmatist skips round 2.** Its findings are advisory: cross-validation
 exists to decide what blocks, and nothing it reports can. Its round-1 output
@@ -432,7 +458,12 @@ every cross-reference. That ruling is the point: when two personas found one
 root cause under two titles, the validate edge is what turns two lone opinions
 into consensus.
 
-Save each to `$ADVERSE_RUN/round2-<persona>.json`.
+Each reviewer writes its own file at the path it was given, same as round 1 —
+the orchestrator does not retype it. Validate before repair:
+
+```bash
+node ${SKILL_DIR}/scripts/validate.mjs --phase round2 "$ADVERSE_RUN"/round2-*.json
+```
 
 If the user asked for a faster review, skip phases 4–5. The synthesizer treats
 a missing round 2 as an empty cross-review.
@@ -612,13 +643,16 @@ that persona's system prompt and:
 1. `${SKILL_DIR}/scripts/prompts/verify.txt`
 2. the briefing entries for its own findings, plus the ledger decisions
 3. the fix diff: `git diff <commit before fixes>..HEAD`
+4. the path to write its own JSON object to: `$ADVERSE_RUN/verify-<persona>.json`
 
 Verification uses the **original reporter's** persona, not a dedicated
 verifier: judging whether a finding is closed needs the lens that produced it.
 
-Each returns `{persona, verified: [{id, title, status, reason}], added: [...]}`
-where `status` is `closed`, `open`, or `moot`. Save each to
-`$ADVERSE_RUN/verify-<persona>.json`, same as round 1.
+Each writes its own `{persona, verified: [{id, title, status, reason}], added:
+[...]}` to that path — same as round 1, the orchestrator does not retype it —
+where `status` is `closed`, `open`, or `moot`. `verify.mjs` below validates it
+against the schema before anything downstream trusts it; there is no separate
+check to run first.
 
 The `added` half is not a formality. **A fix written under pressure to close a
 finding is unreviewed code**, written by whoever was most convinced the finding
