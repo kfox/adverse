@@ -11,6 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -73,6 +74,26 @@ test('a missing file throws where openSync would, with no descriptor to leak', (
   const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-fssafe-'));
   try {
     assert.throws(() => openRegularFileSync(path.join(dir, 'not-created')), /ENOENT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a FIFO is refused immediately rather than blocking forever', () => {
+  // Opening a FIFO for reading blocks until a writer appears, and the paths
+  // this opens come from reviewer JSON. A committed FIFO in a checkout (git
+  // stores mode 010000) hung the triage bridge with no output and no timeout.
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-fssafe-'));
+  try {
+    const pipe = path.join(dir, 'pipe');
+    try {
+      execFileSync('mkfifo', [pipe]);
+    } catch {
+      return; // no mkfifo on this platform; nothing to assert
+    }
+    const started = Date.now();
+    assert.equal(openRegularFileSync(pipe), null, 'a FIFO is not a regular file');
+    assert.ok(Date.now() - started < 2000, 'must not block waiting for a writer');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

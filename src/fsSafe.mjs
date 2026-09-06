@@ -14,7 +14,16 @@
 
 import { constants, closeSync, fstatSync, openSync } from 'node:fs';
 
-const READ_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+// O_NONBLOCK matters as much as O_NOFOLLOW here. Opening a FIFO for reading
+// BLOCKS until a writer appears, and the paths this opens come from reviewer
+// JSON — a checkout containing a committed FIFO (git stores mode 010000), or a
+// path pointing at one, hung the triage bridge forever with no output and no
+// timeout. The descriptor is only ever fstat'd and read as a regular file, so
+// non-blocking costs nothing: `openRegularFileSync` rejects anything that is
+// not a regular file, and a regular file ignores the flag.
+const READ_FLAGS = constants.O_RDONLY
+  | (constants.O_NOFOLLOW ?? 0)
+  | (constants.O_NONBLOCK ?? 0);
 
 // Throws exactly where `openSync` would (ENOENT, ELOOP for a symlink,
 // EACCES, …). Returns null only once the path opened but the descriptor
