@@ -372,8 +372,19 @@ export function synthesize(round1, round2 = {},
   });
 
   // 5. Verdicts and consensus label
-  const verdicts = {};
-  const summaries = {};
+  // Null prototype: `p` is a persona name out of reviewer JSON, and on a plain
+  // object `verdicts.__proto__ = 'reject'` hits Object.prototype's setter
+  // instead of creating an own property. The assignment then vanishes — no
+  // error, no key — so `Object.values` never saw the verdict, the reject was
+  // dropped from the consensus score, and the banner rendered
+  // `SHIP (unanimous, 2/2)` with `Open blocking: 0` above a live CRITICAL that
+  // a third reviewer had rejected. Reachable through `adverse synthesize
+  // --round1 <file>`, which JSON.parses its input (and JSON.parse DOES create
+  // an own `__proto__`) and applies no roster check. The skill bridge is
+  // covered by combine.mjs's own null-prototype map and roster.mjs, which is
+  // why this sink survived: the protected path was the only one being tested.
+  const verdicts = Object.create(null);
+  const summaries = Object.create(null);
   for (const [p, r] of Object.entries(round1)) {
     // Normalized here, not only in the combine bridge, so the CLI path gets
     // the same rule: an off-contract verdict scores as reject, never as a
