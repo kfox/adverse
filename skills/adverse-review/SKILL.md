@@ -707,7 +707,8 @@ ledger attached, and loop:
 
 ```bash
 node ${SKILL_DIR}/scripts/verify.mjs --verify "$ADVERSE_RUN"/verify-*.json \
-    --outdir "$ADVERSE_RUN"
+    --outdir "$ADVERSE_RUN" --briefing "$ADVERSE_RUN"/briefing.json
+
 node ${SKILL_DIR}/scripts/triage.mjs \
     --round1 "$ADVERSE_RUN"/round1-*.verified.json \
     --repo . --base "$BASE" --gate "$GATE" --ledger "$LEDGER" \
@@ -716,11 +717,25 @@ node ${SKILL_DIR}/scripts/triage.mjs \
 
 `verify.mjs` validates each payload against the schema before anything trusts
 it — the same discipline every other leg of this flow already has — then
-reshapes it into the round-1 shape triage.mjs reads: `added` becomes
-`findings`, and `verified` rides along unchanged for Phase 7 to read (triage
-has no way to re-litigate an old finding's status; that decision is still
-yours to make). Its exit codes follow the same contract as every other bridge:
+reshapes it into the round-1 shape triage.mjs reads. `added` becomes
+`findings` — **and so does every `verified` entry still `open`**, because that
+is the reviewer saying the fix did not work, and the stop condition is
+arithmetic over `findings`. A verification that cannot reach `findings` cannot
+hold the loop open, which is how a run once converged with exit 0 on a payload
+whose own verdict was `reject`.
+
+Pass `--briefing` (the previous iteration's, still on disk at this point) so a
+reopened finding keeps the severity, kind and anchor it was first reported
+with. Without it each one falls back to a blocking `warning`/`behavioral`:
+noisy rather than silent, and recoverable by passing the flag.
+
+The full `verified` array also rides along on the reshaped file, so you can
+read every disposition — closed and moot included — while deciding what to
+record in Phase 7. It is not carried into `report.json`: the dispositions that
+have to reach the arithmetic are the open ones, and those are findings now.
+Its exit codes follow the same contract as every other bridge:
 2 means it never read a payload, 1 means it read one that failed the schema.
+
 
 Findings the ledger records as settled will not be re-litigated; anything
 recorded `fixed` that comes back is flagged `REGRESSED` and is the loudest

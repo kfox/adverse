@@ -120,3 +120,96 @@ test('an unreadable --verify file is exit 2, not exit 1 — this run could not r
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- the reshape the stop condition actually reads --------------------------
+//
+// `findings: payload.added` dropped every `verified` entry, so a payload whose
+// own verdict was `reject` reshaped into an empty findings array — and
+// `convergenceStatus` computes `done` over exactly that array, consulting no
+// verdict. converge.mjs then exited 0 on a fix a reviewer had just said failed.
+
+test('a still-open verification is re-emitted as a finding, not dropped', () => {
+  const dir = freshTmp();
+  try {
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [
+        { id: 'F1', title: 'the fix did not take', status: 'open', reason: 'still reproduces' },
+        { id: 'F2', title: 'closed one', status: 'closed', reason: 'confirmed' },
+      ],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir]);
+    assert.equal(r.status, 0, r.stderr);
+
+    const out = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf-8'));
+    assert.equal(out.verdict, 'reject');
+    assert.equal(out.findings.length, 1, 'the open verification must reach `findings`');
+
+    const [f] = out.findings;
+    assert.equal(f.title, 'the fix did not take');
+    assert.match(f.detail, /STILL OPEN/);
+    assert.match(f.detail, /still reproduces/, "the reviewer's reason is the evidence");
+    // isBlocking is `kind is not advisory && severity is not info`. Both halves
+    // have to hold or this finding cannot hold the loop open.
+    assert.notEqual(f.severity, 'info');
+    assert.notEqual(f.kind, 'design');
+
+    // A closed verification is not a finding — only the failures come back.
+    assert.equal(out.verified.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--briefing restores a reopened finding\'s original severity and anchor', () => {
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{
+        id: 'F1', severity: 'critical', kind: 'defect',
+        file: 'src/a.mjs', line: 42, counterpart: null, title: 'orig', fix: 'do the thing',
+      }],
+    }));
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F1', title: 'orig', status: 'open', reason: 'nope' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+    assert.equal(r.status, 0, r.stderr);
+
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf-8')).findings;
+    assert.equal(f.severity, 'critical', 'a critical must not be downgraded by the round trip');
+    assert.equal(f.kind, 'defect');
+    assert.equal(f.file, 'src/a.mjs');
+    assert.equal(f.line, 42);
+    assert.equal(f.fix, 'do the thing');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('without --briefing a reopened finding still blocks', () => {
+  const dir = freshTmp();
+  try {
+    const src = path.join(dir, 'verify-steward.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'steward',
+      verified: [{ id: 'F9', title: 'unknown anchor', status: 'open', reason: 'r' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /re-emitted as findings/);
+
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-steward.verified.json'), 'utf-8')).findings;
+    assert.notEqual(f.severity, 'info');
+    assert.notEqual(f.kind, 'design');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
