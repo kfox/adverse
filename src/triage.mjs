@@ -63,12 +63,17 @@ export function normalizeAnchor(f) {
 // finding that does not keep its kind's promise is ANNOTATED as
 // under-anchored, never dropped — the reporter may have found something real
 // and merely labeled it carelessly, and only a reviewer can tell those apart.
-const KIND_REQUIREMENTS = {
+// Null prototype: `kind` is reviewer-supplied, and a plain object answers
+// `constructor` and `toString` with something truthy — so `KIND_REQUIREMENTS[kind]`
+// found a "requirement" for a kind that does not exist and skipped the
+// UNKNOWN branch that exists to treat it as blocking. Same class as the
+// `VALIDATORS` lookup in scripts/validate.mjs; this is the second site.
+const KIND_REQUIREMENTS = Object.assign(Object.create(null), {
   defect:     { file: true, line: true,  counterpart: false },
   behavioral: { file: true, line: false, counterpart: false },
   contract:   { file: true, line: false, counterpart: true  },
   design:     { file: false, line: false, counterpart: false },
-};
+});
 
 export function checkKind(kind, file, line, counterpart, { advisoryKinds = ADVISORY_KINDS } = {}) {
   if (kind === undefined || kind === null || kind === '') {
@@ -120,10 +125,18 @@ export function clusterFindings(findings, { windowLines = CLUSTER_WINDOW_LINES }
         });
       }
     };
+    // Near the PREVIOUS finding and still inside the window measured from the
+    // run's START. Chaining on the predecessor alone let a run grow without
+    // bound — ten findings six lines apart span sixty — so "same file, within
+    // CLUSTER_WINDOW_LINES" was true of every adjacent pair and false of the
+    // cluster, which is the bound the name promises and the one grouping
+    // relies on. One reviewer filing a ladder of nits could bridge every other
+    // lane's findings in a hot file into a single component.
     for (const f of sorted.slice(1)) {
       const prev = run[run.length - 1];
       const near = f.line !== null && prev.line !== null
-        && Math.abs(f.line - prev.line) <= windowLines;
+        && Math.abs(f.line - prev.line) <= windowLines
+        && Math.abs(f.line - run[0].line) <= windowLines;
       if (near) { run.push(f); continue; }
       flush();
       run = [f];
@@ -191,16 +204,41 @@ function citesPath(detail, file) {
 // Candidates are grouped by target FILE rather than by target finding, so the
 // substring scan runs once per distinct path instead of once per pair.
 
-// Every integer appearing in `text`, as a set. This replaces a
-// `new RegExp(`\\b${b.line}\\b`)` built from reviewer-supplied data: `line`
-// is not type-checked at the source, so `"line": "(20"` threw
-// `SyntaxError: Invalid regular expression` out of the constructor and took
-// the whole triage bridge with it, and `"line": "([a-z]+)+~"` compiled fine
-// and then backtracked forever. A set of numbers can do neither, and scanning
-// each detail once is O(len) instead of one compile-and-test per candidate.
+// Line numbers CITED in `text`, as a set.
+//
+// Two properties matter and the first version had only one. It replaced a
+// `new RegExp(`\\b${b.line}\\b`)` built from reviewer data — `"line": "(20"`
+// threw out of the constructor and took the bridge with it, `"([a-z]+)+~"`
+// backtracked forever — and a set of numbers can do neither.
+//
+// But `/\d+/g` matched every integer anywhere in the prose, including digits
+// inside identifiers (`SHA256` yielded 256) and any figure a reviewer happened
+// to quote. `lineEchoed` is what lets a SAME-FILE pair form an edge at all, so
+// a weak match reopened exactly the bypass the same-file rule closes. A cited
+// line has a shape — `path.mjs:123`, `line 123`, `L123` — and requiring it
+// asks the question actually being asked: did this reviewer point at that
+// line, or merely use its digits in a sentence.
+const LINE_REFERENCE = /(?::|\blines?\s+|\bL)(\d+)(?![\w.])/gi;
+
 function numbersIn(text) {
-  return new Set((text.match(/\d+/g) ?? []).map(Number));
+  const cited = new Set();
+  for (const m of text.matchAll(LINE_REFERENCE)) cited.add(Number(m[1]));
+  return cited;
 }
+
+// A citation target has to be a file the claim-checker actually found. Nothing
+// constrained the SHAPE of `file`, so a finding citing `"the"` was matched as a
+// whole token in every other reviewer's prose and became the in-edge of the
+// entire panel — a DISPROVED anchor anchoring a four-lane critical root cause,
+// which is the headline of the round-2 prompt.
+//
+// Keyed on the claim check rather than on a path-shaped regex because a regex
+// gets this wrong in both directions: `Makefile`, `LICENSE` and `Dockerfile`
+// are real files with no slash and no extension, and `the` would pass any
+// length floor. "The claim-checker opened it" is the question actually being
+// asked. A finding with no claimCheck at all (a direct unit-test caller) is
+// left alone.
+const anchorHolds = (f) => f.claimCheck === undefined || f.claimCheck.status === 'ok';
 
 export function crossReferenceFindings(findings) {
   const numbersByFinding = new Map(
@@ -209,7 +247,7 @@ export function crossReferenceFindings(findings) {
 
   const byFile = new Map();
   for (const b of findings) {
-    if (typeof b.file !== 'string' || !b.file) continue;
+    if (typeof b.file !== 'string' || !b.file || !anchorHolds(b)) continue;
     if (!byFile.has(b.file)) byFile.set(b.file, []);
     byFile.get(b.file).push(b);
   }
@@ -239,7 +277,18 @@ export function crossReferenceFindings(findings) {
     candidates.sort((x, y) => (y.lineEchoed ? 1 : 0) - (x.lineEchoed ? 1 : 0));
     crossReferences.push(...candidates.slice(0, MAX_CO_CITATIONS_PER_FINDING));
   }
-  return crossReferences;
+
+  // In-degree, capped the same way. The out-degree cap alone bounded how far
+  // one finding could REACH and said nothing about how many could reach IT, so
+  // a single well-placed target still collected an edge from every other
+  // finding in the run and sat at the centre of the resulting component.
+  const inDegree = new Map();
+  return crossReferences.filter((e) => {
+    const seen = inDegree.get(e.to) ?? 0;
+    if (seen >= MAX_CO_CITATIONS_PER_FINDING) return false;
+    inDegree.set(e.to, seen + 1);
+    return true;
+  });
 
 }
 
@@ -334,27 +383,29 @@ function makeForest(ids) {
     return true;
   };
 
-  return { find, merge };
+  return { find, merge, parent };
 }
 
 // The connected components the two edge sets imply, as arrays of findings.
 // Clusters merge unconditionally; co-citations are size-gated. Why each, in
 // the comments below.
 function connectedComponents(findings, { clusters, crossReferences }) {
-  const { find, merge } = makeForest(findings.map((f) => f.id));
+  const { find, merge, parent } = makeForest(findings.map((f) => f.id));
 
-  // Proximity edges merge unconditionally: a cluster is same-file, within
-  // CLUSTER_WINDOW_LINES, and cross-reporter, so it is already bounded
-  // evidence, and a big one is a genuine pile-up that `oversized` should
-  // describe rather than hide.
+  // Bounded like the co-citation path. The original premise — that a cluster is
+  // "already bounded evidence" because it is same-file and cross-reporter —
+  // was false while a run could chain past its own window, and even with the
+  // span now bounded, an unbounded MERGE still lets several clusters in one
+  // hot file chain into a component larger than any of them.
   //
-  // The ids are chained rather than starred from `ids[0]`, because `union`
-  // does nothing when either id is absent from `parent` — so anchoring every
-  // edge on one id meant an unknown first id silently discarded EVERY edge in
-  // that cluster, and a dropped cluster looks exactly like one never proposed.
+  // Chained rather than star-unioned from `ids[0]`: `merge` does nothing when
+  // either id is absent, so anchoring every edge on one id meant an unknown
+  // first id silently discarded every edge in that cluster. Unknown ids are
+  // dropped from the chain rather than breaking it, so one unknown id in the
+  // MIDDLE no longer splits a real cluster in two.
   for (const c of clusters) {
-    const ids = c.ids ?? [];
-    for (let i = 1; i < ids.length; i += 1) merge(ids[i - 1], ids[i]);
+    const ids = (c.ids ?? []).filter((id) => parent.has(id));
+    for (let i = 1; i < ids.length; i += 1) merge(ids[i - 1], ids[i], MAX_CONFIRMABLE_MEMBERS);
   }
 
   // Co-citation edges are size-gated, because they are unbounded evidence: one

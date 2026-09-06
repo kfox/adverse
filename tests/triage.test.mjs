@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  MAX_CO_CITATIONS_PER_FINDING, MAX_CONFIRMABLE_MEMBERS, checkKind, clusterFindings,
+  CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, MAX_CONFIRMABLE_MEMBERS, checkKind, clusterFindings,
   crossReferenceFindings, groupFindings,
   makeClaimChecker, normalizeAnchor,
 } from '../src/triage.mjs';
@@ -237,17 +237,51 @@ test('groupFindings: an edge naming an unknown id is ignored, not crashed on', (
   assert.deepEqual(groups, []);
 });
 
-test('groupFindings: a proximity pile-up past the cap is reported but marked oversized', () => {
-  // Clusters merge unconditionally: same file, within CLUSTER_WINDOW_LINES,
-  // cross-reporter is already bounded evidence, and a big one is a real
-  // pile-up that `oversized` should describe rather than hide.
+test('groupFindings: a proximity pile-up cannot merge past the cap either', () => {
+  // Cluster edges were exempt from the size bound, on the premise that a
+  // cluster is "already bounded evidence". It is not: one reviewer filing a
+  // ladder of nits in a hot file bridged every other lane's findings into a
+  // single component, and `anchorMember` handed the attacker the title for
+  // free by sorting worst-severity first.
   const n = MAX_CONFIRMABLE_MEMBERS + 1;
   const findings = Array.from({ length: n }, (_, i) =>
     f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: 'one.py', line: i }));
   const clusters = [{ file: 'one.py', ids: findings.map((x) => x.id) }];
-  const [g] = groupFindings(findings, { clusters });
-  assert.equal(g.members.length, n);
-  assert.equal(g.oversized, true);
+
+  for (const g of groupFindings(findings, { clusters })) {
+    assert.ok(g.members.length <= MAX_CONFIRMABLE_MEMBERS,
+      `cluster edges must not build a ${g.members.length}-member component`);
+  }
+});
+
+test('clusterFindings: a run cannot chain past the window it is named for', () => {
+  // The run grew by comparing each finding to its PREDECESSOR, so ten findings
+  // six lines apart spanned sixty — "within CLUSTER_WINDOW_LINES" was true of
+  // every adjacent pair and false of the cluster.
+  const step = Math.floor(CLUSTER_WINDOW_LINES / 2);
+  const findings = Array.from({ length: 8 }, (_, i) =>
+    f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: 'a.py', line: 100 + i * step }));
+
+  for (const c of clusterFindings(findings)) {
+    const lines = c.ids.map((id) => findings.find((x) => x.id === id).line);
+    assert.ok(Math.max(...lines) - Math.min(...lines) <= CLUSTER_WINDOW_LINES,
+      `cluster spans ${Math.max(...lines) - Math.min(...lines)} lines, window is ${CLUSTER_WINDOW_LINES}`);
+  }
+});
+
+test('groupFindings: an unknown id in the MIDDLE of a cluster does not split it', () => {
+  // Chaining fixed the unknown-FIRST-id case and left this one: `merge` does
+  // nothing when either id is absent, so an unknown id partway along broke the
+  // chain and produced two groups where the run was one.
+  const findings = [
+    f({ id: 'F1', reporter: 'auditor', file: 'a.py', line: 1 }),
+    f({ id: 'F2', reporter: 'steward', file: 'a.py', line: 2 }),
+    f({ id: 'F3', reporter: 'adversary', file: 'a.py', line: 3 }),
+  ];
+  const clusters = [{ file: 'a.py', ids: ['F1', 'GHOST', 'F2', 'F3'] }];
+  const groups = groupFindings(findings, { clusters });
+  assert.equal(groups.length, 1, 'one unknown id must not split a real cluster');
+  assert.deepEqual(groups[0].members.sort(), ['F1', 'F2', 'F3']);
 });
 
 test('groupFindings: a co-citation chain cannot grow a component past the cap', () => {
@@ -569,4 +603,63 @@ test('crossReferenceFindings: the cap keeps line-echoed edges over name-drops', 
   const kept = crossReferenceFindings([source, ...weak, strong]).filter((e) => e.from === 'F1');
   assert.equal(kept.length, MAX_CO_CITATIONS_PER_FINDING);
   assert.ok(kept.some((e) => e.to === 'S1' && e.lineEchoed), 'the line-echoed edge must survive');
+});
+
+// --- co-citation: what may be a citation target -------------------------------
+
+test('crossReferenceFindings: a DISPROVED anchor cannot be a citation target', () => {
+  // Nothing constrained the SHAPE of `file`, so a finding citing an ordinary
+  // English word was matched as a whole token in every other reviewer's prose
+  // and became the in-edge of the whole panel — a file the claim-checker had
+  // already disproved, anchoring a four-lane critical root cause.
+  const attacker = { id: 'F1', reporter: 'adversary', file: 'the', line: 1,
+                     detail: 'x', claimCheck: { status: 'DISPROVED' } };
+  const honest = Array.from({ length: 5 }, (_, i) => ({
+    id: `F${i + 2}`, reporter: 'auditor', file: `h${i}.mjs`, line: i + 1,
+    detail: 'the fix does not cover the whole class', claimCheck: { status: 'ok' },
+  }));
+  const edges = crossReferenceFindings([attacker, ...honest]);
+  assert.equal(edges.filter((e) => e.to === 'F1').length, 0,
+    'a disproved anchor must collect no citations');
+});
+
+test('crossReferenceFindings: in-degree is capped, not just out-degree', () => {
+  // The out-degree cap bounded how far one finding could REACH and said
+  // nothing about how many could reach IT, so one well-placed target still sat
+  // at the centre of the component.
+  const target = { id: 'T', reporter: 'adversary', file: 'hot.mjs', line: 5, detail: 'x' };
+  const sources = Array.from({ length: 9 }, (_, i) => ({
+    id: `S${i}`, reporter: 'auditor', file: `s${i}.mjs`, line: i + 1,
+    detail: 'this is really about hot.mjs',
+  }));
+  const edges = crossReferenceFindings([target, ...sources]);
+  assert.equal(edges.filter((e) => e.to === 'T').length, MAX_CO_CITATIONS_PER_FINDING);
+});
+
+test('crossReferenceFindings: lineEchoed needs a cited line, not any integer', () => {
+  // `/\d+/g` matched every integer anywhere in the prose — digits inside
+  // identifiers (SHA256 yielded 256) and any figure a reviewer quoted. Since
+  // lineEchoed is what lets a SAME-FILE pair form an edge at all, a weak match
+  // reopened the bypass the same-file rule closes.
+  const target = { id: 'T', reporter: 'adversary', file: 'a.mjs', line: 256, detail: 'x' };
+  const incidental = { id: 'S', reporter: 'auditor', file: 'a.mjs', line: 900,
+                       detail: 'the SHA256 digest in a.mjs is recomputed 256 times' };
+  assert.equal(crossReferenceFindings([target, incidental]).length, 0,
+    'digits in prose and identifiers are not a line citation');
+
+  const cited = { id: 'S', reporter: 'auditor', file: 'a.mjs', line: 900,
+                  detail: 'this is the same defect as a.mjs:256' };
+  const edges = crossReferenceFindings([target, cited]);
+  assert.equal(edges.length, 1);
+  assert.equal(edges[0].lineEchoed, true);
+});
+
+test('checkKind: an inherited Object.prototype key is not a known kind', () => {
+  // A plain lookup object answers `constructor` and `toString` with something
+  // truthy, so KIND_REQUIREMENTS[kind] found a "requirement" for a kind that
+  // does not exist and skipped the UNKNOWN branch that treats it as blocking.
+  for (const kind of ['constructor', 'toString', '__proto__', 'valueOf']) {
+    assert.equal(checkKind(kind, 'a.py', 1, null).status, 'UNKNOWN',
+      `kind ${kind} must be unrecognized`);
+  }
 });
