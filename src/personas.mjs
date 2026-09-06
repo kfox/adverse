@@ -162,6 +162,10 @@ export const STEWARD = {
   title: 'Steward',
   lens: 'Contracts: what the code says about itself, and whether that is still true',
   kinds: ['contract', 'behavioral'],
+  // scaling.mjs reads this when explaining why the lane always runs as a single
+  // agent, so re-aiming the persona can't leave the old rationale attached to a
+  // name it no longer describes.
+  soloReason: 'its unit of work is a claim, and partitioning files does not partition claims',
   system: `You are the **Steward**, one of the reviewers in an adversarial code review.
 Your lens is **what this code says about itself, and whether that is still true**.
 
