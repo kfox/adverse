@@ -460,3 +460,22 @@ test('--escalate --sh together with --json is a usage error — pick one output 
   const r = runPlan(['--escalate', '--expect', 'auditor', '--sh', '--json', 'whatever.json']);
   assert.equal(r.status, 2);
 });
+
+test('--agents refuses a plan lane whose persona is not in the registry', () => {
+  // The `agents` count was validated and `persona` was not, and SKILL.md
+  // Phase 1 word-splits this output into `git worktree add "$WORKTREES/$agent"`
+  // — so a persona carrying whitespace or a path separator becomes checkout
+  // paths.
+  for (const persona of ['auditor extra', '../../escape', 'Auditor', '']) {
+    const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-persona-'));
+    try {
+      const plan = path.join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify({ lanes: [{ persona, run: true, agents: 1 }] }));
+      const r = runPlan(['--agents', plan]);
+      assert.equal(r.status, 2, `persona ${JSON.stringify(persona)} must be refused`);
+      assert.match(r.stderr, /is not one of/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});

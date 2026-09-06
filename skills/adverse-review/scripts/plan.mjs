@@ -42,6 +42,7 @@ import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { escalate, planReview } = await importFromSrc('scaling.mjs');
+const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 
 const { values, positionals } = parseArgs({
   options: {
@@ -76,6 +77,18 @@ function readPlanFile(file) {
   if (!plan || !Array.isArray(plan.lanes)) {
     process.stderr.write(`plan: ${file}: not a plan.json (missing \`lanes\`)\n`);
     process.exit(2);
+  }
+  // The `agents` count was checked and `persona` was not, and SKILL.md Phase 1
+  // feeds `--agents` output straight into an unquoted `for agent in $(…)` loop
+  // that runs `git worktree add "$WORKTREES/$agent"` — so a persona carrying
+  // whitespace or a path separator becomes checkout paths. triage.mjs already
+  // applies the roster guard to --merge-personas; this bridge did not.
+  for (const lane of plan.lanes) {
+    if (!DEFAULT_PERSONAS.includes(lane?.persona)) {
+      process.stderr.write(`plan: ${file}: lane persona ${JSON.stringify(lane?.persona)} is not one of `
+        + `${DEFAULT_PERSONAS.join(', ')}\n`);
+      process.exit(2);
+    }
   }
   return plan;
 }

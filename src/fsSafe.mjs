@@ -21,7 +21,16 @@ const READ_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 // isn't a regular file (a directory, FIFO, device, socket).
 export function openRegularFileSync(filePath) {
   const fd = openSync(filePath, READ_FLAGS);
-  if (fstatSync(fd).isFile()) return fd;
+  // `fstatSync` can throw (EIO, EBADF), and this module exists to make the
+  // claim-checker's read safe — so the one path out of it that was not a clean
+  // return must not be the one that leaks. Triage opens a descriptor per cited
+  // path, so a run where fstat keeps failing exhausted them.
+  try {
+    if (fstatSync(fd).isFile()) return fd;
+  } catch (e) {
+    closeQuietly(fd);
+    throw e;
+  }
   closeSync(fd);
   return null;
 }

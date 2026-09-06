@@ -23,7 +23,13 @@ import { importFromSrc } from './package-root.mjs';
 
 const { validatePhase1, validatePhase2, validateVerify } = await importFromSrc('prompts.mjs');
 
-const VALIDATORS = { round1: validatePhase1, round2: validatePhase2, verify: validateVerify };
+// Null prototype, the same defence combine.mjs already applies to its
+// persona-keyed map. A plain object answers `__proto__` and `constructor` with
+// something truthy, so `--phase __proto__` satisfied the membership guard
+// below and then crashed — violating this bridge's own contract that exit 2
+// means "could not read an input" and never a stack trace.
+const VALIDATORS = Object.assign(Object.create(null),
+  { round1: validatePhase1, round2: validatePhase2, verify: validateVerify });
 
 const { values, positionals } = parseArgs({
   options: { phase: { type: 'string' } },
