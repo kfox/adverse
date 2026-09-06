@@ -286,6 +286,7 @@ skills/adverse-review/
     synthesize.mjs            # Skill bridge: deterministic synthesis
     plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
+    verify.mjs                # Skill bridge: validate a verify payload, reshape for triage
     dump-prompts.mjs          # Regenerate prompt files from src/ (a test enforces it)
     prompts/                  # Generated — edit src/, then re-run dump-prompts.mjs
       auditor.txt, adversary.txt, steward.txt, pragmatist.txt

@@ -607,7 +607,8 @@ Verification uses the **original reporter's** persona, not a dedicated
 verifier: judging whether a finding is closed needs the lens that produced it.
 
 Each returns `{persona, verified: [{id, title, status, reason}], added: [...]}`
-where `status` is `closed`, `open`, or `moot`.
+where `status` is `closed`, `open`, or `moot`. Save each to
+`$ADVERSE_RUN/verify-<persona>.json`, same as round 1.
 
 The `added` half is not a formality. **A fix written under pressure to close a
 finding is unreviewed code**, written by whoever was most convinced the finding
@@ -616,9 +617,28 @@ pass that only ever confirms closures would launder new defects into the tree
 one iteration at a time.
 
 Feed `verified` + `added` back through triage → synthesize → Phase 7, with the
-ledger attached, and loop. Findings the ledger records as settled will not be
-re-litigated; anything recorded `fixed` that comes back is flagged `REGRESSED`
-and is the loudest thing in the run.
+ledger attached, and loop:
+
+```bash
+node ${SKILL_DIR}/scripts/verify.mjs --verify "$ADVERSE_RUN"/verify-*.json \
+    --outdir "$ADVERSE_RUN"
+node ${SKILL_DIR}/scripts/triage.mjs \
+    --round1 "$ADVERSE_RUN"/round1-*.verified.json \
+    --repo . --base "$BASE" --gate "$GATE" --ledger "$LEDGER" \
+    --out "$ADVERSE_RUN"/briefing.json
+```
+
+`verify.mjs` validates each payload against the schema before anything trusts
+it — the same discipline every other leg of this flow already has — then
+reshapes it into the round-1 shape triage.mjs reads: `added` becomes
+`findings`, and `verified` rides along unchanged for Phase 7 to read (triage
+has no way to re-litigate an old finding's status; that decision is still
+yours to make). Its exit codes follow the same contract as every other bridge:
+2 means it never read a payload, 1 means it read one that failed the schema.
+
+Findings the ledger records as settled will not be re-litigated; anything
+recorded `fixed` that comes back is flagged `REGRESSED` and is the loudest
+thing in the run.
 
 ## Phase 10 — hand over
 
@@ -683,7 +703,7 @@ re-learning the same lesson and re-reporting the same class of finding.
 | `triage.mjs` reports many `DISPROVED` | Surface it. A reviewer inventing line numbers is worth the user knowing. |
 | `triage.mjs` reports `REGRESSED` | Lead with it. A fix that did not take is more important than any new finding. |
 | `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge and continue. |
-| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
+| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
 | `converge.mjs` exits 3 | The cap, not success. Say plainly what is still open. |
 | Ledger version mismatch | Do not delete it. Tell the user which version it is; the schema changed under them. |
 | `node` not on PATH | Tell the user to install Node 22+. Do not improvise a fallback. |
