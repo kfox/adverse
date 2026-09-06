@@ -474,6 +474,38 @@ test('checkClaim: .git is refused through a symlink and through traversal, not j
   }
 });
 
+// The segment match is only half the refusal; this pins the other half, and it
+// is the half that runs everywhere. The casing test below can only assert on a
+// case-INSENSITIVE filesystem, so it skips on the Linux CI — leaving the fix
+// for a credential leak exercised on no runner at all. This case has no such
+// hole: with `--separate-git-dir`, the real git dir sits INSIDE the checkout
+// under a name that is not `.git` (here `gitdata`), so no segment match can
+// ever see it and only `git rev-parse --absolute-git-dir` can.
+test('checkClaim: a git dir inside the checkout is refused even when it is not named .git', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-sepgit-'));
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'base',
+      `--separate-git-dir=${path.join(dir, 'gitdata')}`, '.'],
+      { cwd: dir, stdio: 'pipe' });
+    git(dir, 'config', 'user.email', 'test@example.invalid');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    writeFileSync(path.join(dir, 'a.py'), 'line 1\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'base');
+    git(dir, 'config', 'http.https://github.com/.extraheader', GIT_CONFIG_SENTINEL);
+
+    const sep = makeClaimChecker({ repo: dir, base: 'base' });
+    const c = sep.checkClaim('gitdata/config', 1);
+    assert.equal(c.status, 'DISPROVED');
+    assert.match(c.why, /repository metadata/);
+    assert.equal(c.citedLine, undefined);
+    assert.equal(sep.checkClaim('a.py', 1).status, 'ok', 'ordinary source still reads');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The refusal compared segments to the literal '.git', and APFS and NTFS are
 // case-INSENSITIVE while `realpathSync` on darwin returns the caller's casing
 // rather than the on-disk casing. So `.GIT/config` opened the same file and
