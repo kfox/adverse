@@ -736,6 +736,33 @@ run that taught nothing generalizable should say so and stop. The point is that
 the panel gets better at reviewing this codebase every time it runs, rather than
 re-learning the same lesson and re-reporting the same class of finding.
 
+## Compaction-safe checkpoints
+
+A convergence-loop run often outlives one context window, and the orchestrator
+cannot trigger `/compact` itself — only the operator watching context pressure
+can. This table exists so they know when it's cheap: a checkpoint is safe when
+every fact the loop needs next already lives in a file, a commit, or the
+ledger, rather than only in conversation state.
+
+| Phase | Safe to compact | Why |
+|---|---|---|
+| 0 — scope, run dir, gate | At its end, before Phase 1 | Nothing has been spent yet; `$BASE`, `$GATE`, `$LEDGER` are all cheap to recompute if lost. |
+| 1 — file list & plan | Once `plan.json` is written | The plan is a file now, not a fact anyone has to remember. |
+| 2 — round 1 | **Never** until every persona's file passes `validate.mjs` | An unsaved or unvalidated reviewer payload is exactly the state a mid-phase compaction loses — a subagent still working has nothing durable yet. |
+| 3 — triage | Once `briefing.json` is written | Triage's whole output is a file; Phase 4 reads it, not the conversation. |
+| 4 — round 2 | **Never** until every `round2-<persona>.json` passes `validate.mjs`, and never between triage and synthesize | Same unsaved-payload risk as Phase 2, plus `$ROUNDS`/`$CAP`/`$R2_REASON` exist only as shell variables until Phase 6 writes the report that carries them forward. |
+| 5 — repair, combine | Once `round1.json` and `round2.json` are written | The repaired and combined files are the only state Phase 6 needs. |
+| 6 — synthesize | Once `report.json` / `report.md` are written | This is the artifact the whole triage → synthesize span exists to produce. |
+| 7 — decide, record | **Never mid-fix-batch.** Safe once decisions are `--record`ed to the ledger *and* the fix commit lands with the gate re-run green | Before that, "which findings are fixed" and "what the diff contains" exist only as edits in flight — exactly the state Phases 8–9 depend on. |
+| 8 — check convergence | Anytime after it runs | Its exit code is derived entirely from the ledger and `report.json`, both already durable. |
+| 9 — verify | **Never** until every `verify-<persona>.json` passes validation | Same unsaved-reviewer-payload rule as Phases 2 and 4. |
+| 10 — hand over | Anytime | Everything is in the ledger, the branch, and (if opened) the PR. |
+| 11 — harvest lessons | Once the lesson is written to its destination file | Before that, what was learned only exists in conversation. |
+
+Underneath all twelve rows, the same three rules: **never mid-fix-batch, never
+with an unsaved reviewer payload, never between triage and synthesize.**
+Everywhere else, disk already holds what the loop needs next.
+
 ## Failure handling
 
 | Failure | What to do |
