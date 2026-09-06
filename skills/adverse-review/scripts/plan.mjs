@@ -1,13 +1,29 @@
 #!/usr/bin/env node
 // Skill bridge: how much review does this change deserve?
 //
-// Two modes, like converge.mjs:
+// Four modes:
 //
 //   (default)                    plan the review from the diff: which lanes,
 //                                how many agents each, rounds, iteration cap
 //   --escalate round1-*.json     re-plan rounds and the cap from what round 1
 //                                actually found (--expect names the lanes the
-//                                plan ran, so a missing payload fails closed)
+//                                plan ran, so a missing payload fails closed);
+//                                add --sh to print ROUNDS/CAP/R2_REASON as
+//                                shell assignments instead of --json/prose
+//   --agents plan.json           print a plan.json's worktree agent list —
+//                                persona, or persona-a/persona-b/… for a lane
+//                                split across more than one agent
+//   --expect plan.json           print a plan.json's run-lane roster, comma-
+//                                joined — the exact string --escalate
+//                                --expect wants, so it is read back rather
+//                                than retyped from the plan's `lanes`
+//
+// These print modes exist so the SKILL's own prose never hand-computes a
+// value plan.json already holds: five separate `node -p`/inline-JS snippets
+// (the worktree loop, the round-2 roster, and the ROUNDS/CAP/R2_REASON
+// triple) used to do that, and one of them hardcoded the split width as the
+// literal 2 — silently wrong the day SPLIT_AGENTS in scaling.mjs changes
+// (kfox/adverse#19, items 1 and 2).
 //
 // The plan is advice, not a gate: exit 0 = plan printed, 2 = usage error.
 // Size comes from `git diff --numstat`, never from the diff text — see
@@ -35,6 +51,8 @@ const { values, positionals } = parseArgs({
     pin:      { type: 'string', multiple: true },
     escalate: { type: 'boolean' },
     expect:   { type: 'string' },
+    agents:   { type: 'string' },
+    sh:       { type: 'boolean' },
     json:     { type: 'boolean' },
   },
   allowPositionals: true,
@@ -45,9 +63,71 @@ function emit(payload, human) {
   process.stdout.write(values.json ? JSON.stringify(payload, null, 2) + '\n' : human);
 }
 
+// A single quoted, `eval`-safe shell literal: wrap in single quotes and
+// escape any embedded one by closing the quote, emitting an escaped quote,
+// and reopening it — the standard POSIX trick, since a shell string has no
+// in-quote escape of its own.
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+function readPlanFile(file) {
+  const plan = readJson(file, 'plan');
+  if (!plan || !Array.isArray(plan.lanes)) {
+    process.stderr.write(`plan: ${file}: not a plan.json (missing \`lanes\`)\n`);
+    process.exit(2);
+  }
+  return plan;
+}
+
+// --- --agents <plan.json>: the worktree loop's agent list --------------------
+//
+// One name per running lane, or one per agent (persona-a, persona-b, …) for
+// a lane the plan split across more than one — read from that lane's own
+// `agents` count, never from a repeated literal 2, so a lane split three or
+// more ways (a future SPLIT_AGENTS change) still gets the right worktrees.
+
+if (values.agents !== undefined) {
+  if (values.escalate || positionals.length) {
+    usage('Usage: plan.mjs --agents <plan.json>');
+  }
+  const plan = readPlanFile(values.agents);
+  const names = plan.lanes.filter((l) => l.run).flatMap((l) => {
+    // `Array.from({ length: undefined })` silently makes an EMPTY array, not
+    // an error — a malformed `agents` field would drop the lane's worktree
+    // entirely instead of failing loudly.
+    if (!Number.isInteger(l.agents) || l.agents < 1) {
+      process.stderr.write(`plan: ${values.agents}: lane '${l.persona}' has an invalid \`agents\` count `
+        + `(${JSON.stringify(l.agents)})\n`);
+      process.exit(2);
+    }
+    return l.agents === 1 ? [l.persona]
+      : Array.from({ length: l.agents }, (_, i) => `${l.persona}-${String.fromCharCode(97 + i)}`);
+  });
+  process.stdout.write(`${names.join(' ')}\n`);
+  process.exit(0);
+}
+
+// --- --expect <plan.json> (outside --escalate): the run-lane roster ---------
+//
+// Prints the same comma-joined persona string --escalate --expect takes as
+// input, read back out of a plan.json's `lanes` instead of retyped by hand.
+
+if (values.expect !== undefined && !values.escalate) {
+  if (positionals.length) {
+    usage('Usage: plan.mjs --expect <plan.json>');
+  }
+  const plan = readPlanFile(values.expect);
+  process.stdout.write(`${plan.lanes.filter((l) => l.run).map((l) => l.persona).join(',')}\n`);
+  process.exit(0);
+}
+
 // --- escalate mode -----------------------------------------------------------
 
 if (values.escalate) {
+  if (values.sh && values.json) {
+    usage('Usage: plan.mjs --escalate --expect auditor,steward,… (--json | --sh) round1-<persona>*.json …');
+  }
   const expectList = (values.expect ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   if (!positionals.length || !expectList.length) {
     // --expect is required, not optional: without a roster, a lane whose file
@@ -60,6 +140,12 @@ if (values.escalate) {
   // default plan would hide the error behind a plausible answer.
   const payloads = positionals.map((path) => readJson(path, 'plan'));
   const result = escalate(payloads, { expected: expectList });
+  if (values.sh) {
+    process.stdout.write(`ROUNDS=${result.rounds}\n`);
+    process.stdout.write(`CAP=${result.maxIterations}\n`);
+    process.stdout.write(`R2_REASON=${shQuote(result.roundsReason)}\n`);
+    process.exit(0);
+  }
   emit(result,
     `round 2: ${result.rounds === 2 ? 'run' : 'skip'} — ${result.roundsReason}\n`
     + `max iterations: ${result.maxIterations}`
