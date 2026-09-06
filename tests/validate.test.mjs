@@ -137,3 +137,42 @@ test('requires at least one file', () => {
   assert.equal(r.status, 2);
   assert.match(r.stderr, /Usage:/);
 });
+
+test('--phase __proto__ is a usage error, not a stack trace', () => {
+  // A plain object answers `__proto__` and `constructor` with something
+  // truthy, so an inherited property satisfied the membership guard and the
+  // script then crashed past its own contract: exit 2 means "could not read an
+  // input", never an uncaught throw.
+  // The file must EXIST, or readJson exits 2 first and the guard is never
+  // reached — which is how this looked fine while being broken.
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-validate-proto-'));
+  try {
+    const file = path.join(dir, 'round1-auditor.json');
+    writeFileSync(file, JSON.stringify(goodPhase1));
+    for (const phase of ['__proto__', 'constructor', 'toString', 'valueOf']) {
+      const r = run(['--phase', phase, file]);
+      assert.equal(r.status, 2, `--phase ${phase} must be a usage error, got ${r.status}`);
+      assert.match(r.stderr, /--phase must be one of/);
+      assert.doesNotMatch(r.stderr, /is not a function|TypeError/, 'no crash');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a filename implying a persona outside the registry is refused', () => {
+  // validatePhase1 only checks that the payload's persona equals the one its
+  // FILENAME implies, so a file claiming to be an invented lane agreed with
+  // itself and validated clean — this bridge blessing a lane that does not
+  // exist, one step before combine is asked to trust the glob.
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-validate-roster-'));
+  try {
+    const file = path.join(dir, 'round1-referee.json');
+    writeFileSync(file, JSON.stringify({ ...goodPhase1, persona: 'referee' }));
+    const r = run(['--phase', 'round1', file]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /is not one of/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

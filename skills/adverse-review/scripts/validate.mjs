@@ -22,8 +22,15 @@ import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { validatePhase1, validatePhase2, validateVerify } = await importFromSrc('prompts.mjs');
+const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 
-const VALIDATORS = { round1: validatePhase1, round2: validatePhase2, verify: validateVerify };
+// Null prototype, the same defence combine.mjs already applies to its
+// persona-keyed map. A plain object answers `__proto__` and `constructor` with
+// something truthy, so `--phase __proto__` satisfied the membership guard
+// below and then crashed — violating this bridge's own contract that exit 2
+// means "could not read an input" and never a stack trace.
+const VALIDATORS = Object.assign(Object.create(null),
+  { round1: validatePhase1, round2: validatePhase2, verify: validateVerify });
 
 const { values, positionals } = parseArgs({
   options: { phase: { type: 'string' } },
@@ -42,9 +49,21 @@ function personaFromPath(file) {
   return base.replace(new RegExp(`^${values.phase}-`), '').replace(/-[ab]$/, '');
 }
 
+const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
+
 let failed = 0;
 for (const file of positionals) {
   const persona = personaFromPath(file);
+  // `validatePhase1` only checks that the payload's `persona` equals the one
+  // its FILENAME implies, so `round1-referee.json` claiming to be `referee`
+  // agreed with itself and validated clean — this bridge blessing a lane that
+  // does not exist, one step before combine.mjs is asked to trust the glob.
+  if (!KNOWN_PERSONAS.has(persona)) {
+    failed += 1;
+    process.stderr.write(`${file}: filename implies persona '${persona}', which is not one of `
+      + `${DEFAULT_PERSONAS.join(', ')}\n`);
+    continue;
+  }
   const err = validate(readJson(file, 'validate'), persona);
   if (err) {
     failed += 1;

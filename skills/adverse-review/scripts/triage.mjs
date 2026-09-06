@@ -39,7 +39,7 @@ import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
-import { readJson, splitPersonasFromPlan, usage } from './bridge-io.mjs';
+import { readJson, readPlanLanes, splitPersonas, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
@@ -47,8 +47,11 @@ const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
 const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
-const { CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings, groupFindings, makeClaimChecker } =
+const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, checkKind, clusterFindings,
+        crossReferenceFindings, groupFindings, makeClaimChecker, normalizeAnchor } =
   await importFromSrc('triage.mjs');
+
+
 
 // `allowPositionals` is not optional here. `--round1 run/round1-*.json` is the
 // documented invocation and the natural one to type; the shell expands it, and
@@ -109,9 +112,18 @@ for (const r of reviews) {
 // in the run that motivated this check. `--merge-personas <persona>` names
 // the lane the plan actually split, so an undeclared duplicate is an error
 // instead of a phantom extra reviewer.
+// `--plan` carries two answers and this read only one. `agents > 1` says which
+// lanes were split; `run` says which lanes exist. The roster half landed in
+// combine.mjs and not here — and triage is the bridge that builds the round-2
+// PROMPT, so a payload from a lane the plan never ran was shaping the
+// cross-review one step before combine got the chance to refuse it.
+const planLanes = values.plan ? readPlanLanes(values.plan, 'triage') : null;
+const notRun = planLanes
+  ? new Set(planLanes.filter((l) => !l.run).map((l) => l.persona)) : null;
+
 const mergePersonas = new Set([
   ...(values['merge-personas'] ?? []),
-  ...(values.plan ? splitPersonasFromPlan(values.plan, 'triage') : []),
+  ...(planLanes ? splitPersonas(planLanes) : []),
 ]);
 for (const p of mergePersonas) {
   if (!KNOWN_PERSONAS.has(p)) {
@@ -119,6 +131,15 @@ for (const p of mergePersonas) {
     process.exit(2);
   }
 }
+for (const r of reviews) {
+  if (notRun?.has(r.persona)) {
+    process.stderr.write(`triage: the plan recorded '${r.persona}' as not run, so a payload from`
+      + ' it is a stale file or a spoof, not a reviewer.\n'
+      + '  If you deliberately ran this lane anyway, regenerate plan.json or drop --plan.\n');
+    process.exit(1);
+  }
+}
+
 const countByPersona = new Map();
 for (const r of reviews) countByPersona.set(r.persona, (countByPersona.get(r.persona) ?? 0) + 1);
 for (const [persona, count] of countByPersona) {
@@ -137,28 +158,46 @@ for (const [persona, count] of countByPersona) {
   }
 }
 
+// Anchors are normalized BEFORE anything reads them. `line`, `file`,
+// `counterpart` and `detail` come out of a model, and downstream they reach a
+// bounds test, a path resolver and a prose scan that each assumed a type
+// nothing had established. Rejected values are collected rather than
+// swallowed: a finding whose anchor was thrown away must not read like a
+// finding that never had one.
 const findings = [];
+const rejectedAnchors = [];
 let n = 0;
 for (const review of reviews) {
   for (const f of review.findings ?? []) {
     n += 1;
+    const id = `F${n}`;
+    const { file, line, counterpart, detail, fix, rejected } = normalizeAnchor(f);
+    if (rejected.length) rejectedAnchors.push(`${id}.${rejected.join('+')}`);
     findings.push({
-      id: `F${n}`,
+      id,
       reporter: review.persona,
+      // On the FINDING, not only on stdout. A coerced-away anchor left the
+      // briefing looking exactly like a finding whose reporter never supplied
+      // one — and briefing.json is what round 2 reads, so the reviewer judging
+      // "is this under-anchored?" could not see that an anchor had been
+      // offered and thrown away. That is the distinction `rejected` exists to
+      // preserve, reaching only the terminal it was printed to.
+      rejectedAnchors: rejected.length ? rejected : undefined,
       severity: f.severity,
       kind: f.kind ?? null,
-      file: f.file ?? null,
-      line: f.line ?? null,
-      counterpart: f.counterpart ?? null,
+      file,
+      line,
+      counterpart,
       title: f.title,
-      detail: f.detail,
-      fix: f.fix ?? null,
-      claimCheck: checkClaim(f.file ?? null, f.line ?? null),
-      counterpartCheck: checkCounterpart(f.counterpart ?? null),
-      kindCheck: checkKind(f.kind, f.file ?? null, f.line ?? null, f.counterpart ?? null, { advisoryKinds: ADVISORY_KINDS }),
+      detail,
+      fix,
+      claimCheck: checkClaim(file, line),
+      counterpartCheck: checkCounterpart(counterpart),
+      kindCheck: checkKind(f.kind, file, line, counterpart, { advisoryKinds: ADVISORY_KINDS }),
     });
   }
 }
+
 
 // Same-file-and-nearby-lines, and cross-file co-citation: the two consensus
 // edges a title-only join cannot see. Pure over `findings`, so both live in
@@ -257,7 +296,12 @@ process.stdout.write(
   `triaged ${findings.length} findings from ${reviews.length} reviewers -> ${values.out}\n`
   + `  clusters (same file, <=${CLUSTER_WINDOW_LINES} lines apart, 2+ reporters): ${clusters.length}\n`
   + `  claim-check disproved: ${disproved.length}${ids(disproved)}\n`
-  + `  cross-file co-citations (candidate shared root cause): ${crossReferences.length}`
+  + `  malformed anchors coerced away (field kept null): ${rejectedAnchors.length}`
+  + `${rejectedAnchors.length ? ` (${rejectedAnchors.join(', ')})` : ''}\n`
+
+  + `  co-citations (cross-file, or same-file with the line echoed; max`
+  + ` ${MAX_CO_CITATIONS_PER_FINDING}/finding): ${crossReferences.length}`
+
   + `${crossReferences.length ? ` (${crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
   + `  candidate root causes (proposed, for round 2 to confirm or split): ${groups.length}`
   + `${groups.length ? ` (${groups.map((g) => `${g.id}=${g.members.join('+')}${g.oversized ? ' OVERSIZED' : ''}`).join(', ')})` : ''}\n`

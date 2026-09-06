@@ -2,7 +2,7 @@
 // works as an email/chat attachment, in CI artifacts, or pasted into a wiki.
 // Vanilla HTML + scoped CSS + a few lines of JS — no framework, no build step.
 
-import { ADVISORY_KINDS } from './taxonomy.mjs';
+import { ADVISORY_KINDS, assertCoversStatuses } from './taxonomy.mjs';
 
 const SEVERITY_BADGE = {
   critical: { label: 'CRITICAL', color: '#b91c1c', bg: '#fee2e2' },
@@ -24,13 +24,15 @@ const VERDICT_BADGE = {
   unknown:     { label: '—',           color: '#374151', bg: '#f3f4f6' },
 };
 
-const ROOT_CAUSE_STATUS = {
+// Keyed off taxonomy's ROOT_CAUSE_STATUSES — checked at module load, not
+// merely asserted in a comment.
+const ROOT_CAUSE_STATUS = assertCoversStatuses({
   confirmed: 'Confirmed by round 2 — one fix, one disposition',
   contested: 'Contested — reviewers disagree; decide each citation',
   oversized: 'Too many citations to collapse; decide each citation',
   proposed: 'Candidate — round 2 did not rule; decide each citation',
   split: 'Dissolved by round 2 — separate problems',
-};
+}, 'src/html.mjs');
 
 function esc(s) {
   return String(s ?? '')
@@ -55,11 +57,13 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     </tr>`;
   }).join('\n');
 
-  const groups = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
+  // `byConfidence`, not `groups`: `groups` in this codebase are root-cause
+  // groups, and these are confidence buckets.
+  const byConfidence = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
   const advisory = [];
   for (const f of syn.findings) {
     if (ADVISORY_KINDS.has(f.kind)) advisory.push(f);
-    else groups[f.confidence].push(f);
+    else byConfidence[f.confidence].push(f);
   }
 
   const rootCauses = syn.rootCauses ?? [];
@@ -73,7 +77,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
       </section>`);
   }
   for (const conf of ['cross-validated', 'consensus', 'disputed', 'solo']) {
-    const items = groups[conf];
+    const items = byConfidence[conf];
     if (!items.length) continue;
     sections.push(`
       <section class="findings-group">
@@ -201,9 +205,16 @@ function renderRootCause(rc) {
   const sev = SEVERITY_BADGE[rc.severity] ?? SEVERITY_BADGE.info;
   const citations = rc.citations.map((c) => {
     const loc = c.file ? `${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}` : '';
+    // A contract citation without its counterpart is half a claim: "X
+    // contradicts Y" with Y missing. The field is on the record precisely so a
+    // group decision copied from here can still match next iteration.
+    const against = c.counterpart
+      ? ` <span class="loc">contradicts ${esc(c.counterpart)}</span>` : '';
     return `<li><strong>${esc(c.id)}</strong> <span class="cite-meta">${esc(c.reporter)} · `
       + `${esc(c.severity ?? 'no severity')}·${esc(c.kind ?? 'unclassified')}</span> ${esc(c.title)}`
       + (loc ? ` <span class="loc">${esc(loc)}</span>` : '')
+      + against
+
       + (c.resolved ? '' : ' <em>— not in the report; this citation named a finding synthesis did not build</em>')
       + '</li>';
   }).join('\n');

@@ -23,7 +23,11 @@
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { readJson, usage } from './bridge-io.mjs';
+import { makeWriteGuard, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { importFromSrc } from './package-root.mjs';
+
+const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
+
 
 // Positionals are round-2 files, so `--round2 run/round2-*.json` works. Same
 // reason as triage.mjs: strict parsing without this throws on the second path
@@ -50,11 +54,29 @@ const groupIds = new Set((briefing.groups ?? []).map((g) => g.id));
 
 let repaired = 0, unresolved = 0, checked = 0;
 
+const claimDest = makeWriteGuard('repair');
+
 for (const src of values.round2) {
+
   const payload = readJson(src, 'repair');
 
+  // Checked BEFORE the persona is used for anything at all. It used to run
+  // just above the write, which left the whole repair loop below printing an
+  // unvalidated model-written string to the orchestrator's stderr first — the
+  // one surface that reads as the tool's own voice.
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    process.stderr.write(`repair: ${src}: payload is not a JSON object\n`);
+    process.exit(1);
+  }
+  requireKnownPersona(payload.persona, { prefix: 'repair', file: src, personas: DEFAULT_PERSONAS });
+
   for (const key of ['validate', 'challenge']) {
-    for (const edge of payload[key] ?? []) {
+    const edges = payload[key];
+    if (edges !== undefined && !Array.isArray(edges)) {
+      process.stderr.write(`repair: ${src}: \`${key}\` must be an array\n`);
+      process.exit(1);
+    }
+    for (const edge of edges ?? []) {
       checked += 1;
       const canonical = titleById.get(edge.id);
       if (!canonical) {
@@ -86,8 +108,13 @@ for (const src of values.round2) {
     }
   }
 
-  const dest = `${values.outdir}/round2-${payload.persona}.repaired.json`;
+  // `payload.persona` names the file this writes — validated at the top of the
+  // loop, before it reached stderr. A repeated one would silently replace the
+  // lane that wrote first, which is the cheapest way to counterfeit the
+  // distinct-persona count synthesis treats as consensus.
+  const dest = claimDest(`${values.outdir}/round2-${payload.persona}.repaired.json`, src);
   writeFileSync(dest, JSON.stringify(payload, null, 2), 'utf-8');
+
   process.stdout.write(`repaired ${src} -> ${dest}\n`);
 }
 

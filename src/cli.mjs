@@ -305,7 +305,7 @@ async function cmdSynthesize(rest) {
 
   const syn = synthesize(round1, round2, {
     skippedPersonas, failedPersonas, round2Skipped: values['round2-skipped'] ?? null,
-    groups: briefing?.groups ?? [],
+    rootCauseGroups: briefing?.groups ?? [],
   });
   const md = renderMarkdown(syn);
 

@@ -33,7 +33,8 @@
 // are both credible enough (cross-validated or consensus) and consequential
 // enough (not advisory, not `info`) to hold a change open.
 
-import { ADVISORY_KINDS, GROUP_RULINGS, SEVERITY_RANK } from './taxonomy.mjs';
+import { ADVISORY_KINDS, GROUP_RULINGS, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
+         assertCoversStatuses } from './taxonomy.mjs';
 
 // Verdict → score mapping. The natural symmetric choice: approve and reject
 // cancel each other out, conditional carries half-weight on the approve side.
@@ -179,7 +180,17 @@ function buildFinding(persona, raw) {
 // Every state but `confirmed` leaves the members exactly as they were, so a
 // missing, contested, or oversized ruling costs the speedup and never a
 // finding.
+// How many independent personas must rule `one` before a candidate root cause
+// becomes a confirmed one. Two, for the same reason the report's own
+// confidence labels need two: a confirmed group is one fix and one disposition
+// covering N findings, and a single unopposed voice — potentially the sole
+// reporter of every member — deciding that inverts the design's own rule that
+// cross-validation is what makes agreement trustworthy. Falling short is
+// `proposed`, which costs only the remediation shortcut and never a finding.
+const MIN_CONFIRMING_VOICES = 2;
+
 function buildRootCauses(groups, round2, findByTitle) {
+
   const rulingsById = new Map();
   for (const [persona, cross] of Object.entries(round2)) {
     for (const r of cross?.groups ?? []) {
@@ -192,10 +203,7 @@ function buildRootCauses(groups, round2, findByTitle) {
   return groups.map((g) => {
     const rulings = rulingsById.get(g.id) ?? [];
     const verdicts = new Set(rulings.map((r) => r.ruling));
-    const status = rulings.length === 0 ? 'proposed'
-      : verdicts.size > 1 ? 'contested'
-        : verdicts.has('split') ? 'split'
-          : g.oversized ? 'oversized' : 'confirmed';
+
 
     // A citation naming a title synthesis never built is reported unresolved
     // rather than dropped: the finding may have been rejected upstream for a
@@ -209,23 +217,73 @@ function buildRootCauses(groups, round2, findByTitle) {
         confidence: f?.confidence ?? null,
         blocking: f ? isBlocking(f) : null,
         fix: f?.fix ?? null,
+        // The briefing's `reporter` is what the payload CLAIMED; the finding's
+        // own `reporters` is what synthesis actually resolved. Where they
+        // disagree, the group was reporting the unverified one.
+        reporters: f?.reporters ?? null,
       };
     });
+
+    // Anchor first, then worst severity, then the order triage assigned. Every
+    // scalar below reads this list, so the group's headline and its fix cannot
+    // describe different citations — which they did whenever the first citation
+    // by ID order was not the worst one, i.e. most of the time.
+    const ranked = [...citations].sort((a, b) =>
+      (b.id === g.anchor ? 1 : 0) - (a.id === g.anchor ? 1 : 0)
+      || severityRank(a.severity) - severityRank(b.severity));
+
+    // Resolved reporters where synthesis has them, the citation's claim only
+    // where it does not — an unresolved citation should not erase a reporter,
+    // but it should not silently vouch for one either.
+    const reporters = [...new Set(citations.flatMap((c) => c.reporters ?? [c.reporter]))];
+
+    // A ruling from a persona that is the only reporter of every citation is a
+    // persona confirming that its own findings are one thing. `validate` and
+    // `challenge` already skip a persona's edge on a finding it reported
+    // itself; a group ruling had no such guard.
+    const selfRuled = rulings
+      .filter((r) => citations.every((c) => {
+        const rs = c.reporters ?? [c.reporter];
+        return rs.length === 1 && rs[0] === r.persona;
+      }))
+      .map((r) => r.persona);
+    const voices = new Set(
+      rulings.filter((r) => !selfRuled.includes(r.persona)).map((r) => r.persona));
+
+    // A confirmed group is ONE fix and ONE disposition covering N citations,
+    // so confirming it is the consequential direction and needs the same
+    // cross-validation the rest of the design treats as the trustworthy
+    // signal. `split` and `contested` need no quorum: both dissolve the group
+    // and leave every citation individually decidable, which is where this
+    // tool always fails toward.
+    const status = rulings.length === 0 ? 'proposed'
+      : verdicts.size > 1 ? 'contested'
+        : verdicts.has('split') ? 'split'
+          : g.oversized ? 'oversized'
+            : voices.size >= MIN_CONFIRMING_VOICES ? 'confirmed' : 'proposed';
+    /* c8 ignore next */
+    if (!ROOT_CAUSE_STATUSES.includes(status)) throw new Error(`unknown root-cause status ${status}`);
 
     return {
       ...g,
       status,
       rulings,
       citations,
-      reporters: [...new Set(citations.map((c) => c.reporter))],
+      reporters,
+      // Why a unanimous `one` did not confirm, when it did not — otherwise the
+      // operator sees `proposed` next to an agreeing ruling and no reason.
+      confirmation: { voices: voices.size, required: MIN_CONFIRMING_VOICES, selfRuled },
       blocking: citations.some((c) => c.blocking === true),
-      fix: citations.find((c) => c.fix)?.fix ?? null,
+      fix: ranked.find((c) => c.fix)?.fix ?? null,
     };
+
+
   });
 }
 
 export function synthesize(round1, round2 = {},
-  { failedPersonas = [], skippedPersonas = [], round2Skipped = null, groups = [] } = {}) {
+  { failedPersonas = [], skippedPersonas = [], round2Skipped = null,
+    rootCauseGroups = [] } = {}) {
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
@@ -333,7 +391,8 @@ export function synthesize(round1, round2 = {},
   const openBlocking = findings.filter(isOpenBlocking);
 
   // 6. Root causes, and the back-reference from each finding to its group.
-  const rootCauses = buildRootCauses(Array.isArray(groups) ? groups : [], round2, findByTitle);
+  const rootCauses = buildRootCauses(
+    Array.isArray(rootCauseGroups) ? rootCauseGroups : [], round2, findByTitle);
   for (const rc of rootCauses) {
     // A dissolved group is not a grouping. Back-referencing it would put
     // "part of G2" on findings a reviewer has just said are unrelated.
@@ -405,13 +464,16 @@ const ADVISORY_PREAMBLE =
   + 'structure, so a loop that waits for them to run out never ends. Take them '
   + 'or file them; do not let them gate the merge._';
 
-const ROOT_CAUSE_STATUS = {
+// Keyed off taxonomy's ROOT_CAUSE_STATUSES — checked, not merely asserted in a
+// comment. A status added there without a label here throws at module load
+// rather than falling back to the raw status name.
+const ROOT_CAUSE_STATUS = assertCoversStatuses({
   confirmed: 'confirmed by round 2 — one fix, one disposition',
   contested: 'CONTESTED — reviewers disagree on whether this is one thing; decide each citation',
   oversized: 'too many citations to collapse into one disposition; decide each citation',
   proposed: 'candidate — round 2 did not rule; decide each citation',
   split: 'dissolved by round 2 — these are separate problems',
-};
+}, 'src/synthesis.mjs');
 
 // One block per root cause: the canonical statement, the fix once, and the
 // citation fanout. `split` groups are still listed, because a proposal the
@@ -431,11 +493,31 @@ function renderRootCauses(rootCauses) {
     lines.push(`_${ROOT_CAUSE_STATUS[rc.status] ?? rc.status} · ${rc.citations.length} citations `
       + `from ${rc.reporters.length} reviewer${rc.reporters.length === 1 ? '' : 's'} `
       + `(${rc.reporters.join(', ')}) · ${rc.blocking ? 'blocking' : 'advisory only'}_`);
+    // Why a group that every ruling called `one` is still only `proposed`.
+    // Without this the label reads as "round 2 did not rule" directly above a
+    // ruling that plainly did, and the quorum looks like a bug.
+    const c = rc.confirmation;
+    if (c && rc.status === 'proposed' && rc.rulings.length) {
+      const short = c.voices < c.required
+        ? `${c.voices} independent voice${c.voices === 1 ? '' : 's'} of ${c.required} needed`
+        : 'not confirmed';
+      lines.push('');
+      lines.push(`> ⚖️ **Not confirmed:** ${short}.`
+        + (c.selfRuled.length
+          ? ` ${c.selfRuled.join(', ')} ruled on a group it is the only reporter of, which is not a voice.`
+          : ''));
+    }
     lines.push('');
     for (const c of rc.citations) {
       const loc = c.file ? ` — \`${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}\`` : '';
+      // `counterpart` is half a contract citation's identity — the claim is "X
+      // contradicts Y" — and it is carried on the record specifically so a
+      // group decision copied out of here can still match next iteration.
+      // Both renderers dropped it.
+      const against = c.counterpart ? ` — contradicts \`${c.counterpart}\`` : '';
       lines.push(`- **${c.id}** (${c.reporter}, ${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}) `
-        + `${c.title}${loc}`
+        + `${c.title}${loc}${against}`
+
         + (c.resolved ? '' : ' — _not in the report; this citation named a finding synthesis did not build_'));
     }
     if (rc.fix) {
@@ -465,18 +547,40 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
     `**Findings:** ${crit} critical · ${warn} warning · ${info} info ` +
       `(${syn.findings.length} total across ${Object.keys(syn.verdicts).length} reviewers)  `,
   );
+  // `disputed` is reported beside this number, not folded into it. A finding
+  // one persona challenged is labelled `disputed` the moment the FIRST
+  // challenger appears, before reporters are counted, so `isOpenBlocking`
+  // excludes a critical three lanes reported and one disagreed with — and the
+  // headline read zero while the stop condition still held the loop open on
+  // it. The two disagreeing silently is worse than either number alone.
+  const disputedBlocking = syn.findings.filter((f) => isBlocking(f) && f.confidence === 'disputed');
   lines.push(
     `**Open blocking:** ${open.length} `
       + `(cross-validated or consensus, not advisory, not info)`
       + (open.length ? ` — ${open.map((f) => f.title).join('; ')}` : ''),
   );
+  if (disputedBlocking.length) {
+    lines.push(
+      `**Disputed and still blocking:** ${disputedBlocking.length} `
+        + `(reported and challenged; the stop condition holds the loop open on these) — `
+        + disputedBlocking.map((f) => f.title).join('; ') + '  ',
+    );
+  }
   const rootCauses = syn.rootCauses ?? [];
   if (rootCauses.length) {
+    // A `split` group is one round 2 explicitly said is SEVERAL problems, and
+    // `renderRootCauses` already refuses to back-reference it twenty lines
+    // above. Counting its members as "covered" claimed a grouping the same
+    // file had just dissolved — with G1 confirmed (2 members) and G2 split (2),
+    // the header read "4 findings covered by 1 confirmed root cause".
     const confirmed = rootCauses.filter((rc) => rc.status === 'confirmed');
+    const standing = rootCauses.filter((rc) => rc.status !== 'split');
+    const covered = new Set(standing.flatMap((rc) => rc.members ?? [])).size;
     lines.push(
       `**Root causes:** ${confirmed.length} confirmed of ${rootCauses.length} proposed, `
-        + `covering ${new Set(rootCauses.flatMap((rc) => rc.members)).size} findings  `,
+        + `covering ${covered} findings still grouped  `,
     );
+
   }
   lines.push('');
 
@@ -522,15 +626,18 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   // that a reader meets the four citations of one defect as one defect.
   if ((syn.rootCauses ?? []).length) lines.push(...renderRootCauses(syn.rootCauses));
 
-  const groups = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
+  // `byConfidence`, not `groups`: this file's `groups` are root-cause groups,
+  // and one word naming two unrelated things in one file is how a reader ends
+  // up debugging the wrong one.
+  const byConfidence = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
   const advisory = [];
   for (const f of syn.findings) {
     if (ADVISORY_KINDS.has(f.kind)) advisory.push(f);
-    else groups[f.confidence].push(f);
+    else byConfidence[f.confidence].push(f);
   }
 
   for (const conf of CONFIDENCE_ORDER) {
-    const items = groups[conf];
+    const items = byConfidence[conf];
     if (!items.length) continue;
     lines.push(SECTION_TITLES[conf]);
     lines.push('');

@@ -348,11 +348,23 @@ export function isRegressionCandidate(finding) {
 // back after a root-cause fix is a different kind of news from one that comes
 // back after a symptom-level fix, and until now the ledger could not tell them
 // apart.
+// A group id is machine-minted (`G1`, `G2`, …). It has no reason to be free
+// text at all, and `clipReason` is the wrong tool for it: that function bounds
+// length and strips most control characters but DELIBERATELY keeps `\n`, so
+// prose survives — which is right for `reason` and wrong for an identifier
+// that gets interpolated into tool-authored prose a round-2 reviewer is told
+// to trust.
+const GROUP_ID = /^[A-Za-z0-9_.-]{1,32}$/;
+
 function recordedGroup(group) {
   if (!group || typeof group !== 'object' || Array.isArray(group)) return null;
   const citations = Array.isArray(group.citations) ? group.citations : [];
   return {
-    id: clipReason(group.id ?? '') || null,
+    // `RegExp.test` coerces, so a NUMBER id passed the shape check and was
+    // then stored raw — the value that reaches the note is not the value that
+    // was validated. Check the type first, store the checked string.
+    id: typeof group.id === 'string' && GROUP_ID.test(group.id) ? group.id : null,
+
     title: clipReason(group.title ?? '') || null,
     citations: citations.slice(0, MAX_RECORDED_CITATIONS).map((c) => ({
       id: clipReason(c?.id ?? '') || null,
@@ -362,16 +374,33 @@ function recordedGroup(group) {
   };
 }
 
-function groupNote(group, disposition) {
+function groupNote(group, disposition, { sameReport = false } = {}) {
   if (!group) return '';
-  const where = `root cause ${group.id ?? '(unnamed)'} (${JSON.stringify(group.title ?? '')}), `
-    + `covering ${group.citationCount} citation(s)`;
-  return disposition === 'fixed'
-    ? ` The fix was recorded against ${where} — so if this finding is back, the `
-      + 'ROOT-CAUSE fix did not close every symptom. Say which citation is still live; '
-      + 'that is a different failure from a fix that missed its own finding.'
-    : ` That decision was taken on ${where}, not on this finding alone.`;
+  // Quoted, exactly like the title beside it. `id` was interpolated raw, and
+  // `briefing.json` IS the round-2 prompt, so this is a path from a recorded
+  // value into text a later reviewer reads as the tool's own voice.
+  const where = `root cause ${JSON.stringify(group.id ?? '(unnamed)')} `
+    + `(${JSON.stringify(group.title ?? '')}), covering ${group.citationCount} citation(s)`;
+
+  if (disposition !== 'fixed') {
+    return ` That decision was taken on ${where}, not on this finding alone.`;
+  }
+  // A fix recorded against THIS report has not been re-observed — the report
+  // predates it. The note this is appended to says exactly that, and appending
+  // "the ROOT-CAUSE fix did not close every symptom" contradicted it with a
+  // regression claim about something nobody has looked at yet. REGRESSED is
+  // the loudest signal in the loop, and an alarm raised by construction is how
+  // that signal becomes noise — which is the reason the `sameReport` branch
+  // exists at all.
+  if (sameReport) {
+    return ` That fix was recorded against ${where}. It has not been re-observed`
+      + ' yet either — verify it before judging whether it closed them.';
+  }
+  return ` The fix was recorded against ${where} — so if this finding is back, the `
+    + 'ROOT-CAUSE fix did not close every symptom. Say which citation is still live; '
+    + 'that is a different failure from a fix that missed its own finding.';
 }
+
 
 // Annotate findings with the decision that already covers them.
 //
@@ -451,7 +480,8 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
               : 'This was recorded FIXED in an earlier iteration. If it is still real, '
                 + 'the fix did not work — say exactly what the fix missed. That is more '
                 + 'important than any new finding on this pass.')
-          + groupNote(group, m.entry.disposition),
+          + groupNote(group, m.entry.disposition, { sameReport }),
+
       },
     };
   });

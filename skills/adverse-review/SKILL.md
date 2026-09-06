@@ -389,7 +389,9 @@ What it gives you:
   something real and merely labeled it carelessly, and only a reviewer can tell
   those apart.
 - **Clusters** (same file, within 15 lines, different reporters) and
-  **cross-file co-citations** (one finding's prose names another's file). These
+  **co-citations** (one finding's prose names another's file as a whole path
+  token — cross-file, or same-file when the other finding's line is cited too,
+  and only ever targeting a file the claim check actually opened). These
   are candidate *one defect seen twice* — exactly the pairs a title join drops.
 - **Candidate root causes** (`groups`), the transitive closure of those two
   edge sets. If A clusters with B and B's prose cites C, all three arrive as
@@ -398,7 +400,9 @@ What it gives you:
   anchor. This is a *proposal*: round 2 rules on it (Phase 4), and until it
   does, the members are reported and decided one at a time exactly as before.
   A group marked `oversized` carries too many citations for one disposition to
-  be honest and will never collapse, however round 2 rules it.
+  be honest and will never collapse, however round 2 rules it — and that cap is
+  relative as well as absolute, so a group that is most of a small review is
+  oversized even when it is well under the fixed limit.
 - **In-diff classification.** `inDiff: "outside"` is **annotated, never
   rejected**: a latent bug the change newly makes reachable lives in unchanged
   lines by definition, and in the run that motivated this flow the only
@@ -462,11 +466,20 @@ root cause under two titles, the validate edge is what turns two lone opinions
 into consensus.
 
 It must also **rule on every candidate root cause** in `groups`, as
-`{id, ruling: "one" | "split", reason}`. Only a group every ruling calls `one`
-becomes a single fix with a single disposition; a group that is unruled,
-contested, or oversized stays a candidate and its citations are decided one at
-a time. So a missing ruling costs the remediation speedup, never a finding —
-which is why the key is optional and why leaving it off is still a waste.
+`{id, ruling: "one" | "split", reason}`. A group becomes a single fix with a
+single disposition only when **two independent personas** both call it `one` —
+the same cross-validation the report's confidence labels require, for the same
+reason: a confirmed group is one decision covering N findings, and one
+unopposed voice deciding that is exactly the consensus-of-one this design
+refuses everywhere else. A ruling from the persona that is the sole reporter of
+every citation is not a voice.
+
+Everything short of that stays a candidate and its citations are decided one at
+a time: unruled, contested, oversized, or agreed by only one lane. `split`
+needs no quorum — it dissolves the group, which is the direction this tool
+always fails in. So a missing ruling costs the remediation speedup, never a
+finding — which is why the key is optional and why leaving it off is still a
+waste, and why the report tells you when a group fell short and by how much.
 
 Each reviewer writes its own file at the path it was given, same as round 1 —
 the orchestrator does not retype it. Validate before repair:
@@ -508,8 +521,15 @@ node ${SKILL_DIR}/scripts/combine.mjs --round1 "$ADVERSE_RUN"/round1-*.json \
     # lane --degraded. Without --plan (or an explicit --merge-personas), a
     # duplicate persona is an error (a file passed twice).
 node ${SKILL_DIR}/scripts/combine.mjs --round2 "$ADVERSE_RUN"/round2-*.repaired.json \
+    --plan "$ADVERSE_RUN/plan.json" \
     --out "$ADVERSE_RUN"/round2.json
+    # --plan on round 2 is the ROSTER half only — round 2 spawns one agent per
+    # persona, so there is nothing to merge, and --merge-personas is still
+    # refused here. What it buys is the gate: a payload from a lane the plan
+    # recorded `run: false` is a stale file or a spoof, and this is the one
+    # place that can tell.
 ```
+
 
 Combine the `.repaired.json` files, not the raw ones. That is the whole reason
 Phase 5 exists.
@@ -600,10 +620,19 @@ as one entry per citation, every entry carrying the same `disposition`,
 `reason`, and the same `group` block:
 
 ```json
-{"id": "F2", "title": "…", "disposition": "fixed", "reason": "restored the guard",
+{"id": "F2", "title": "…", "kind": "defect", "severity": "critical",
+ "confidence": "consensus", "file": "src/auth.py", "line": 88, "counterpart": null,
+ "disposition": "fixed", "reason": "restored the guard",
  "group": {"id": "G1", "title": "the unreachable guard",
            "citations": [{"id": "F1", "title": "…"}, {"id": "F2", "title": "…"}]}}
 ```
+
+Every identity field is there on purpose. `kind`, `severity`, `file`, `line`
+and `counterpart` are exactly what `scoreMatch` matches on next iteration — an
+entry written from a shorter example matches nothing, and the finding you just
+decided is re-raised on the next pass. `report.json`'s
+`root_causes[].citations[]` already carry all of them, so copy from there
+rather than retyping.
 
 One decision made, N entries recorded. The expansion is not busywork: identity
 across iterations is still per-finding, so each citation needs its own entry to
@@ -707,7 +736,8 @@ ledger attached, and loop:
 
 ```bash
 node ${SKILL_DIR}/scripts/verify.mjs --verify "$ADVERSE_RUN"/verify-*.json \
-    --outdir "$ADVERSE_RUN"
+    --outdir "$ADVERSE_RUN" --briefing "$ADVERSE_RUN"/briefing.json
+
 node ${SKILL_DIR}/scripts/triage.mjs \
     --round1 "$ADVERSE_RUN"/round1-*.verified.json \
     --repo . --base "$BASE" --gate "$GATE" --ledger "$LEDGER" \
@@ -716,11 +746,25 @@ node ${SKILL_DIR}/scripts/triage.mjs \
 
 `verify.mjs` validates each payload against the schema before anything trusts
 it — the same discipline every other leg of this flow already has — then
-reshapes it into the round-1 shape triage.mjs reads: `added` becomes
-`findings`, and `verified` rides along unchanged for Phase 7 to read (triage
-has no way to re-litigate an old finding's status; that decision is still
-yours to make). Its exit codes follow the same contract as every other bridge:
+reshapes it into the round-1 shape triage.mjs reads. `added` becomes
+`findings` — **and so does every `verified` entry still `open`**, because that
+is the reviewer saying the fix did not work, and the stop condition is
+arithmetic over `findings`. A verification that cannot reach `findings` cannot
+hold the loop open, which is how a run once converged with exit 0 on a payload
+whose own verdict was `reject`.
+
+Pass `--briefing` (the previous iteration's, still on disk at this point) so a
+reopened finding keeps the severity, kind and anchor it was first reported
+with. Without it each one falls back to a blocking `warning`/`behavioral`:
+noisy rather than silent, and recoverable by passing the flag.
+
+The full `verified` array also rides along on the reshaped file, so you can
+read every disposition — closed and moot included — while deciding what to
+record in Phase 7. It is not carried into `report.json`: the dispositions that
+have to reach the arithmetic are the open ones, and those are findings now.
+Its exit codes follow the same contract as every other bridge:
 2 means it never read a payload, 1 means it read one that failed the schema.
+
 
 Findings the ledger records as settled will not be re-litigated; anything
 recorded `fixed` that comes back is flagged `REGRESSED` and is the loudest

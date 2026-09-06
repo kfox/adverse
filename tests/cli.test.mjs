@@ -227,15 +227,22 @@ test('synthesize --briefing carries the root causes into every output', () => {
       auditor: { persona: 'auditor', verdict: 'conditional', summary: '', findings: [finding('guard is unreachable', 'warning', 'a.py', 10)] },
       adversary: { persona: 'adversary', verdict: 'reject', summary: '', findings: [finding('the guard is a bypass', 'critical', 'a.py', 14)] },
     }));
+    // Two independent voices: confirming a group is one disposition covering N
+    // findings, so it takes the same cross-validation the report's confidence
+    // labels take.
     writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
       steward: { persona: 'steward', validate: [], challenge: [], added: [],
                  groups: [{ id: 'G1', ruling: 'one', reason: 'one unreachable guard' }] },
+      pragmatist: { persona: 'pragmatist', validate: [], challenge: [], added: [],
+                    groups: [{ id: 'G1', ruling: 'one', reason: 'agreed' }] },
     }));
+
     writeFileSync(path.join(out, 'briefing.json'), JSON.stringify({
       findings: [], groups: [{
         id: 'G1', title: 'the guard is a bypass', severity: 'critical', kinds: ['defect'],
         files: ['a.py'], reporters: ['auditor', 'adversary'], members: ['F1', 'F2'],
-        via: ['cluster'], oversized: false,
+        via: ['cluster'], oversized: false, anchor: 'F2',
+
         citations: [
           { id: 'F1', reporter: 'auditor', kind: 'defect', severity: 'warning', file: 'a.py', line: 10, title: 'guard is unreachable' },
           { id: 'F2', reporter: 'adversary', kind: 'defect', severity: 'critical', file: 'a.py', line: 14, title: 'the guard is a bypass' },

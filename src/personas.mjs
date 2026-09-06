@@ -251,6 +251,11 @@ export const PRAGMATIST = {
   title: 'Pragmatist',
   lens: 'Structure, coupling, and design fit',
   kinds: ['design'],
+  // Same contract as the Steward's above: scaling.mjs reads this when it
+  // explains why the lane runs as a single agent. The registry had one entry
+  // and one exception, with this lane's rationale still hard-coded at the call
+  // site — which is the drift the registry was introduced to prevent.
+  soloReason: 'structure findings are cross-file, so partitioning harms them',
   system: `You are the **Pragmatist**, one of the reviewers in an adversarial code review.
 Your lens is **shape**: will the structure of this code hold up under the next change,
 the next contributor, the next refactor.
