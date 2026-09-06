@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { importFromSrc } from './package-root.mjs';
 
 const { PERSONAS } = await importFromSrc('personas.mjs');
-const { PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS, VERIFY_INSTRUCTIONS } =
+const { FIX_INSTRUCTIONS, PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS, VERIFY_INSTRUCTIONS } =
   await importFromSrc('prompts.mjs');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -41,6 +41,7 @@ for (const p of Object.values(PERSONAS)) {
 writeFileSync(path.join(outDir, 'round1.txt'), PHASE1_INSTRUCTIONS, 'utf-8');
 writeFileSync(path.join(outDir, 'round2.txt'), PHASE2_BRIEFING_INSTRUCTIONS, 'utf-8');
 writeFileSync(path.join(outDir, 'verify.txt'), VERIFY_INSTRUCTIONS, 'utf-8');
+writeFileSync(path.join(outDir, 'fix.txt'), FIX_INSTRUCTIONS, 'utf-8');
 
 // --- subagent definitions ----------------------------------------------------
 // Deliberately no `model:` in the frontmatter. The Agent tool's own `model`
@@ -74,5 +75,8 @@ for (const p of Object.values(PERSONAS)) {
   writeFileSync(path.join(agentsDir, `${p.name}.md`), agentDefinition(p), 'utf-8');
 }
 
-process.stdout.write(`wrote ${Object.keys(PERSONAS).length + 3} prompt files to ${outDir}\n`);
+// One per persona, plus round1, round2, verify and fix.
+const SHARED_PROMPT_FILES = 4;
+process.stdout.write(
+  `wrote ${Object.keys(PERSONAS).length + SHARED_PROMPT_FILES} prompt files to ${outDir}\n`);
 process.stdout.write(`wrote ${Object.keys(PERSONAS).length} agent definitions to ${agentsDir}\n`);

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Skill bridge: validate a reviewer-written round-1/round-2/verify payload.
+// Skill bridge: validate an agent-written round-1/round-2/verify/fix payload.
 //
 // Phases 2, 4, and 9 used to have the orchestrating model retype or reassemble
 // each subagent's JSON reply on the way to disk. That hand was a defect
@@ -21,7 +21,8 @@ import { parseArgs } from 'node:util';
 import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { validatePhase1, validatePhase2, validateVerify } = await importFromSrc('prompts.mjs');
+const { validateFix, validatePhase1, validatePhase2, validateVerify } =
+  await importFromSrc('prompts.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 
 // Null prototype, the same defence combine.mjs already applies to its
@@ -29,8 +30,22 @@ const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 // something truthy, so `--phase __proto__` satisfied the membership guard
 // below and then crashed — violating this bridge's own contract that exit 2
 // means "could not read an input" and never a stack trace.
-const VALIDATORS = Object.assign(Object.create(null),
-  { round1: validatePhase1, round2: validatePhase2, verify: validateVerify });
+//
+// `byPersona` is not a convenience flag. Three of these four phases are written
+// by a lane, and this bridge's whole design is that the persona comes from the
+// filename rather than a flag the orchestrator has to retype. A FIX payload has
+// no persona: a fix agent is a batch of repair work, not a lane, and its
+// identity is the `agent` label inside the file. Left to the filename rule,
+// `fix-sid-bounds.json` would imply the persona `sid-bounds` and every fix
+// payload would be refused as an unknown lane — so the table records which
+// phases are lane-scoped instead of letting the naming convention decide by
+// accident.
+const VALIDATORS = Object.assign(Object.create(null), {
+  round1: { validate: validatePhase1, byPersona: true },
+  round2: { validate: validatePhase2, byPersona: true },
+  verify: { validate: validateVerify, byPersona: true },
+  fix:    { validate: validateFix,    byPersona: false },
+});
 
 const { values, positionals } = parseArgs({
   options: { phase: { type: 'string' } },
@@ -38,9 +53,9 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
 });
 
-const validate = values.phase && VALIDATORS[values.phase];
-if (!validate || !positionals.length) {
-  usage('Usage: validate.mjs --phase round1|round2|verify <file.json> [file2.json …]\n'
+const phase = values.phase && VALIDATORS[values.phase];
+if (!phase || !positionals.length) {
+  usage('Usage: validate.mjs --phase round1|round2|verify|fix <file.json> [file2.json …]\n'
     + `  --phase must be one of: ${Object.keys(VALIDATORS).join('|')}`);
 }
 
@@ -53,6 +68,21 @@ const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
 
 let failed = 0;
 for (const file of positionals) {
+  if (!phase.byPersona) {
+    const payload = readJson(file, 'validate');
+    const err = phase.validate(payload);
+    if (err) {
+      failed += 1;
+      process.stderr.write(`${file}: ${err}\n`);
+    } else {
+      // The label is the payload's own `agent`, which validateFix constrains to
+      // a token — this line is read by the orchestrator, and a newline in an
+      // off-disk string is how a payload gets to look like the tool speaking.
+      process.stdout.write(`${file}: ok (${payload.agent})\n`);
+    }
+    continue;
+  }
+
   const persona = personaFromPath(file);
   // `validatePhase1` only checks that the payload's `persona` equals the one
   // its FILENAME implies, so `round1-referee.json` claiming to be `referee`
@@ -64,7 +94,7 @@ for (const file of positionals) {
       + `${DEFAULT_PERSONAS.join(', ')}\n`);
     continue;
   }
-  const err = validate(readJson(file, 'validate'), persona);
+  const err = phase.validate(readJson(file, 'validate'), persona);
   if (err) {
     failed += 1;
     process.stderr.write(`${file}: ${err}\n`);

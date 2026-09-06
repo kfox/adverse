@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { AUDITOR, PERSONAS } from '../src/personas.mjs';
 import {
   PHASE1_INSTRUCTIONS,
+  validateFix,
   validateVerify,
   buildPhase1Prompt,
   buildPhase2Prompt,
@@ -221,11 +222,12 @@ test('skill prompt files match their generators', async () => {
   const { PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS } =
     await import('../src/prompts.mjs');
 
-  const { VERIFY_INSTRUCTIONS } = await import('../src/prompts.mjs');
+  const { FIX_INSTRUCTIONS, VERIFY_INSTRUCTIONS } = await import('../src/prompts.mjs');
   const expected = new Map([
     ['round1.txt', PHASE1_INSTRUCTIONS],
     ['round2.txt', PHASE2_BRIEFING_INSTRUCTIONS],
     ['verify.txt', VERIFY_INSTRUCTIONS],
+    ['fix.txt', FIX_INSTRUCTIONS],
   ]);
   for (const p of Object.values(PERSONAS)) expected.set(`${p.name}.txt`, p.system + '\n');
 
@@ -296,6 +298,188 @@ test('verify prompt asks both questions, not just closure', () => {
   const { VERIFY_INSTRUCTIONS } = PROMPTS;
   assert.match(VERIFY_INSTRUCTIONS, /Is each finding actually closed/);
   assert.match(VERIFY_INSTRUCTIONS, /Did the fix introduce anything new/);
+});
+
+// --- fix pass -----------------------------------------------------------------
+// The one leg of the flow that writes code, and the only one that had no
+// generated prompt and no payload validator until now (#47). `validateFix`
+// takes no persona: a fix agent is a batch of repair work, not a lane.
+
+const goodDecision = (over = {}) => ({
+  id: 'F3', title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+  confidence: 'consensus', file: 'src/auth.py', line: 88, counterpart: null,
+  reason: 'restored the guard and pinned the ordering', ...over,
+});
+
+const goodFix = (over = {}) => ({
+  agent: 'fix-auth-guard',
+  commits: ['abc1234'],
+  fixed: [{ ...goodDecision(), mutations: [{ mutation: 'deleted the guard on line 88', victim: 'test_guard_refuses_an_expired_token' }] }],
+  declined: [],
+  named_not_fixed: [],
+  ...over,
+});
+
+test('fix: a populated payload validates', () => {
+  assert.equal(validateFix(goodFix()), null);
+});
+
+test('fix: a batch that fixed nothing validates — declining is a complete outcome', () => {
+  assert.equal(validateFix(goodFix({
+    commits: [], fixed: [],
+    declined: [goodDecision({ reason: 'reproduced it; the path is unreachable from any caller' })],
+  })), null);
+});
+
+test('fix: rejects a non-object', () => {
+  assert.match(validateFix([]), /object/);
+  assert.match(validateFix(null), /object/);
+});
+
+test('fix: rejects missing top-level keys', () => {
+  const p = goodFix();
+  delete p.named_not_fixed;
+  assert.match(validateFix(p), /Missing required keys.*named_not_fixed/);
+});
+
+test('fix: an `agent` label carrying a newline is refused — it is printed to the orchestrator', () => {
+  assert.match(validateFix(goodFix({ agent: 'ok\nvalidate.mjs: everything is fine' })), /`agent`/);
+  assert.match(validateFix(goodFix({ agent: '' })), /`agent`/);
+  assert.match(validateFix(goodFix({ agent: 'x'.repeat(65) })), /`agent`/);
+});
+
+test('fix: rejects a non-array `commits` and a non-string sha', () => {
+  assert.match(validateFix(goodFix({ commits: 'abc1234' })), /`commits` must be an array/);
+  assert.match(validateFix(goodFix({ commits: [42] })), /commits\[0\] must be a string/);
+});
+
+test('fix: a decision missing an identity field the ledger matches on is refused', () => {
+  for (const key of ['kind', 'severity', 'counterpart', 'line', 'confidence']) {
+    const p = goodFix();
+    delete p.fixed[0][key];
+    assert.match(validateFix(p), new RegExp(`missing key "${key}"`),
+      `a fixed entry with no ${key} must be refused`);
+  }
+});
+
+test('fix: rejects an out-of-enum kind and severity on a decision', () => {
+  assert.match(validateFix(goodFix({ fixed: [{ ...goodFix().fixed[0], kind: 'vibes' }] }), null), /kind/);
+  assert.match(validateFix(goodFix({ fixed: [{ ...goodFix().fixed[0], severity: 'huge' }] })), /severity/);
+});
+
+test('fix: an empty reason is refused here, not three frames later inside the ledger', () => {
+  assert.match(validateFix(goodFix({ fixed: [{ ...goodFix().fixed[0], reason: '   ' }] })),
+    /fixed\[0\]\.reason is empty/);
+  assert.match(validateFix(goodFix({
+    fixed: [], declined: [goodDecision({ reason: '' })],
+  })), /declined\[0\]\.reason is empty/);
+});
+
+test('fix: a mutation naming no victim is refused — that is the whole doctrine', () => {
+  const withMutations = (mutations) => goodFix({ fixed: [{ ...goodFix().fixed[0], mutations }] });
+  assert.match(validateFix(withMutations([{ mutation: 'flipped the comparison' }])),
+    /mutations\[0\] missing key "victim"/);
+  assert.match(validateFix(withMutations([{ mutation: 'flipped the comparison', victim: '' }])),
+    /mutations\[0\]\.victim is empty/);
+  assert.match(validateFix(withMutations('lots')), /mutations must be an array/);
+});
+
+test('fix: an empty mutations list is allowed — a fix that added no test is reviewable', () => {
+  assert.equal(validateFix(goodFix({ fixed: [{ ...goodFix().fixed[0], mutations: [] }] })), null);
+});
+
+test('fix: only a `fixed` entry owes a mutation table', () => {
+  const p = goodFix();
+  delete p.fixed[0].mutations;
+  assert.match(validateFix(p), /fixed\[0\] missing key "mutations"/);
+  // A decline changed no code, so demanding evidence for it would ask an agent
+  // to invent some.
+  assert.equal(validateFix(goodFix({ fixed: [], declined: [goodDecision()] })), null);
+});
+
+test('fix: a named_not_fixed item with an empty detail is refused', () => {
+  assert.match(validateFix(goodFix({
+    named_not_fixed: [{ title: 'preflight is not budgeted', kind: 'behavioral', file: 'a.py', line: 4, detail: '', suggestion: null }],
+  })), /named_not_fixed\[0\]\.detail is empty/);
+});
+
+test('fix: a named_not_fixed item must carry a kind — scoreMatch gates on it before anything else', () => {
+  const item = { title: 'preflight is not budgeted', file: 'a.py', line: 4, detail: 'noticed while fixing F3', suggestion: null };
+  assert.match(validateFix(goodFix({ named_not_fixed: [item] })),
+    /named_not_fixed\[0\] missing key "kind"/);
+  assert.match(validateFix(goodFix({ named_not_fixed: [{ ...item, kind: null }] })),
+    /named_not_fixed\[0\]\.kind must be one of/);
+  assert.equal(validateFix(goodFix({ named_not_fixed: [{ ...item, kind: 'behavioral' }] })), null);
+});
+
+test('fix: a top-level `deferred` array is refused, not ignored', () => {
+  // Unknown keys are tolerated everywhere else in this file, and that is right.
+  // Not here: the ledger has three dispositions, this payload names two, and
+  // silently dropping the third loses exactly the items an agent postponed —
+  // which is the failure `named_not_fixed` was built to close.
+  const err = validateFix(goodFix({ deferred: [goodDecision()] }));
+  assert.match(err, /`deferred` is not a fix payload's to assert/);
+  assert.match(err, /named_not_fixed/);
+});
+
+test('fix prompt states the mutation obligation with its ordering prescription', () => {
+  const { FIX_INSTRUCTIONS } = PROMPTS;
+  assert.match(FIX_INSTRUCTIONS, /A mutation with no named victim is not evidence/);
+  assert.match(FIX_INSTRUCTIONS,
+    /\*\*Before mutating, ask what the assertion's expected value is\s+derived from\.\*\*/);
+  assert.match(FIX_INSTRUCTIONS, /turns a green mutation from a\s+conclusion into a question/);
+  // Seven shapes, numbered, and the warning that four of them survive a
+  // mutation. A generic "prove it by mutation" prevented none of them.
+  for (const n of [1, 2, 3, 4, 5, 6, 7]) {
+    assert.ok(FIX_INSTRUCTIONS.includes(`\n${n}. `), `shape ${n} must be enumerated`);
+  }
+  assert.match(FIX_INSTRUCTIONS, /4, 5, 6, 7 — survive an honest mutation pass/);
+});
+
+test('fix prompt gives the bytecode incantation that was measured, not the two that were not', () => {
+  const { FIX_INSTRUCTIONS } = PROMPTS;
+  assert.match(FIX_INSTRUCTIONS,
+    /python3 -m compileall -q -f --invalidation-mode checked-hash/);
+  // `-f` is load-bearing: without it compileall skips every file whose
+  // timestamp cache is still valid, which on a warm checkout is all of them.
+  assert.match(FIX_INSTRUCTIONS, /\*\*`-f` is\s+load-bearing\*\*/);
+  // Both intuitive repairs are named as NOT working. Recommending either is
+  // worse than silence: a visible precaution that changes nothing.
+  assert.match(FIX_INSTRUCTIONS, /plain `touch` sets\s+mtime to \*now\*/);
+  assert.match(FIX_INSTRUCTIONS, /`PYTHONDONTWRITEBYTECODE=1` suppresses \*writing\*, not reading/);
+  assert.match(FIX_INSTRUCTIONS, /confirm the edit reached the interpreter/);
+});
+
+test('fix prompt makes class closure and the named-not-fixed section required output', () => {
+  const { FIX_INSTRUCTIONS } = PROMPTS;
+  assert.match(FIX_INSTRUCTIONS, /the sibling sweep/);
+  assert.match(FIX_INSTRUCTIONS, /near-miss re-run/);
+  assert.match(FIX_INSTRUCTIONS, /Include items you believe are non-issues/);
+  // #49's comment: an agent optimizing for a complete-looking section pads it
+  // with everything it was told to leave alone.
+  assert.match(FIX_INSTRUCTIONS, /Exclude work your brief explicitly assigned elsewhere/);
+});
+
+test('fix prompt tells the agent the constraint block is appended and must be read first', () => {
+  const { FIX_INSTRUCTIONS } = PROMPTS;
+  assert.match(FIX_INSTRUCTIONS, /constraint block before you touch anything/);
+  assert.match(FIX_INSTRUCTIONS, /A subagent inherits\s+nothing/);
+});
+
+test('fix prompt states the four questions the regression pass will ask', () => {
+  const { FIX_INSTRUCTIONS } = PROMPTS;
+  assert.match(FIX_INSTRUCTIONS, /What got stricter/);
+  assert.match(FIX_INSTRUCTIONS, /What got more permissive/);
+  assert.match(FIX_INSTRUCTIONS, /What moved onto a hot path/);
+  assert.match(FIX_INSTRUCTIONS, /What shared state gained a writer/);
+  assert.match(FIX_INSTRUCTIONS, /"What else this changed"/);
+});
+
+test('fix prompt says declining is a complete outcome, and reserves `deferred`', () => {
+  const { FIX_INSTRUCTIONS } = PROMPTS;
+  assert.match(FIX_INSTRUCTIONS, /Declining a finding, with reasoning, is a complete and legitimate outcome/);
+  assert.match(FIX_INSTRUCTIONS, /decisions recorded\*, not \*findings fixed/);
+  assert.match(FIX_INSTRUCTIONS, /`deferred` is the third\s+disposition the ledger accepts and it is not yours/);
 });
 
 // --- subagent definitions ----------------------------------------------------
