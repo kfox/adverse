@@ -39,7 +39,7 @@ import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
-import { readJson, usage } from './bridge-io.mjs';
+import { readJson, splitPersonasFromPlan, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
@@ -64,6 +64,7 @@ const { values, positionals } = parseArgs({
     ledger: { type: 'string' },
     out:    { type: 'string' },
     'merge-personas': { type: 'string', multiple: true },
+    plan:   { type: 'string' },
   },
   strict: true,
   allowPositionals: true,
@@ -71,7 +72,7 @@ const { values, positionals } = parseArgs({
 
 values.round1 = [...(values.round1 ?? []), ...positionals];
 if (!values.round1.length || !values.repo || !values.out) {
-  usage('Usage: triage.mjs --round1 a.json [--round1 b.json …] [--merge-personas <persona>]… --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>');
+  usage('Usage: triage.mjs --round1 a.json [--round1 b.json …] [--merge-personas <persona>]… [--plan plan.json] --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>');
 }
 
 const repo = path.resolve(values.repo);
@@ -108,10 +109,13 @@ for (const r of reviews) {
 // in the run that motivated this check. `--merge-personas <persona>` names
 // the lane the plan actually split, so an undeclared duplicate is an error
 // instead of a phantom extra reviewer.
-const mergePersonas = new Set(values['merge-personas'] ?? []);
+const mergePersonas = new Set([
+  ...(values['merge-personas'] ?? []),
+  ...(values.plan ? splitPersonasFromPlan(values.plan, 'triage') : []),
+]);
 for (const p of mergePersonas) {
   if (!KNOWN_PERSONAS.has(p)) {
-    process.stderr.write(`triage: --merge-personas ${p}: not a persona (${DEFAULT_PERSONAS.join(', ')})\n`);
+    process.stderr.write(`triage: ${p}: not a persona (${DEFAULT_PERSONAS.join(', ')})\n`);
     process.exit(2);
   }
 }

@@ -331,3 +331,107 @@ test('a third payload under a merged persona is refused — exactly two halves, 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- --plan: derive the split roster from plan.json, instead of retyping it -
+
+function writePlan(dir, lanes) {
+  const p = path.join(dir, 'plan.json');
+  writeFileSync(p, JSON.stringify({ lanes }));
+  return p;
+}
+
+test('--plan derives --merge-personas from lanes the plan split (agents > 1)', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'auditor-a.json', { persona: 'auditor', verdict: 'approve', summary: 'half one', findings: [] });
+    const b = reviewAs(dir, 'auditor-b.json', { persona: 'auditor', verdict: 'reject', summary: 'half two', findings: [] });
+    const plan = writePlan(dir, [
+      { persona: 'auditor', run: true, agents: 2, reason: 'split' },
+      { persona: 'steward', run: true, agents: 1, reason: 'not split' },
+    ]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    const combined = JSON.parse(readFileSync(out, 'utf-8'));
+    assert.deepEqual(Object.keys(combined), ['auditor']);
+    assert.equal(combined.auditor.verdict, 'reject');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--plan and --merge-personas union rather than override each other', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'auditor-a.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
+    const b = reviewAs(dir, 'auditor-b.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
+    const s1 = reviewAs(dir, 'steward-a.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
+    const s2 = reviewAs(dir, 'steward-b.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
+    // The plan only knows about the auditor split; steward is named by hand.
+    const plan = writePlan(dir, [{ persona: 'auditor', run: true, agents: 2, reason: 'split' }]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, s1, s2, '--plan', plan, '--merge-personas', 'steward', '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(out, 'utf-8'))).sort(), ['auditor', 'steward']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a lane the plan did NOT split still trips the duplicate guard under --plan', () => {
+  const dir = freshTmp();
+  try {
+    const s1 = reviewAs(dir, 'steward-a.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
+    const s2 = reviewAs(dir, 'steward-b.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
+    const plan = writePlan(dir, [{ persona: 'steward', run: true, agents: 1, reason: 'not split' }]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', s1, s2, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /duplicate persona 'steward'/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--plan is refused for --round2, same as --merge-personas', () => {
+  const dir = freshTmp();
+  try {
+    const a = review(dir, 'auditor');
+    const plan = writePlan(dir, [{ persona: 'auditor', run: true, agents: 2, reason: 'split' }]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round2', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /applies only to --round1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a plan.json with a persona outside the registry is refused, not read as a phantom lane', () => {
+  const dir = freshTmp();
+  try {
+    const a = review(dir, 'auditor');
+    const plan = writePlan(dir, [{ persona: 'referee', run: true, agents: 2, reason: 'split' }]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a persona/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --plan file with no `lanes` array is a usage error, not a silent no-op', () => {
+  const dir = freshTmp();
+  try {
+    const a = review(dir, 'auditor');
+    const plan = path.join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ oops: true }));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a plan\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -480,6 +480,71 @@ test('--merge-personas naming a non-persona is a usage error, exit 2', () => {
   assert.match(r.stderr, /not a persona/);
 });
 
+// --- --plan: derive the split roster from plan.json, instead of retyping it -
+
+function writePlan(dir, lanes) {
+  const p = path.join(dir, 'plan.json');
+  writeFileSync(p, JSON.stringify({ lanes }));
+  return p;
+}
+
+test('--plan derives the split roster from lanes the plan split (agents > 1)', () => {
+  const a = path.join(repo, 'round1-plan-a.json');
+  const b = path.join(repo, 'round1-plan-b.json');
+  writeFileSync(a, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 'half one', findings: [] }));
+  writeFileSync(b, JSON.stringify({ persona: 'auditor', verdict: 'reject', summary: 'half two', findings: [] }));
+  const plan = writePlan(repo, [
+    { persona: 'auditor', run: true, agents: 2, reason: 'split' },
+    { persona: 'steward', run: true, agents: 1, reason: 'not split' },
+  ]);
+  const out = path.join(repo, 'briefing-plan.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', a, '--round1', b, '--plan', plan, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 0, r.stderr);
+  const briefing = JSON.parse(readFileSync(out, 'utf-8'));
+  assert.equal(briefing.verdicts.auditor.verdict, 'reject');
+});
+
+test('a lane the plan did NOT split still trips the duplicate guard under --plan', () => {
+  const s1 = path.join(repo, 'round1-plan-s1.json');
+  const s2 = path.join(repo, 'round1-plan-s2.json');
+  writeFileSync(s1, JSON.stringify({ persona: 'steward', verdict: 'approve', summary: 's', findings: [] }));
+  writeFileSync(s2, JSON.stringify({ persona: 'steward', verdict: 'approve', summary: 's', findings: [] }));
+  const plan = writePlan(repo, [{ persona: 'steward', run: true, agents: 1, reason: 'not split' }]);
+  const out = path.join(repo, 'briefing-plan-dup.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', s1, '--round1', s2, '--plan', plan, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /duplicate persona 'steward'/);
+});
+
+test('a --plan persona outside the registry is refused, not read as a phantom lane', () => {
+  const p = path.join(repo, 'round1-plan-bad.json');
+  writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));
+  const plan = writePlan(repo, [{ persona: 'referee', run: true, agents: 2, reason: 'split' }]);
+  const out = path.join(repo, 'briefing-plan-bad.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--plan', plan, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /not a persona/);
+});
+
+test('a --plan file with no `lanes` array is a usage error, not a silent no-op', () => {
+  const p = path.join(repo, 'round1-plan-malformed.json');
+  writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));
+  const plan = path.join(repo, 'plan-malformed.json');
+  writeFileSync(plan, JSON.stringify({ oops: true }));
+  const out = path.join(repo, 'briefing-plan-malformed.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--plan', plan, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /not a plan\.json/);
+});
+
 test('an unsplit lane\'s off-contract verdict is normalized in the briefing too', () => {
   const { briefing } = runTriage(repo, [
     { persona: 'auditor', verdict: 'REJECT', summary: 's', findings: [] },

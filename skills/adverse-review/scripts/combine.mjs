@@ -22,7 +22,7 @@
 import { parseArgs } from 'node:util';
 import { writeFileSync } from 'node:fs';
 
-import { readJson, usage } from './bridge-io.mjs';
+import { readJson, splitPersonasFromPlan, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
@@ -34,13 +34,14 @@ const { values, positionals } = parseArgs({
     round2: { type: 'string', multiple: true },
     out:    { type: 'string' },
     'merge-personas': { type: 'string', multiple: true },
+    plan:   { type: 'string' },
   },
   allowPositionals: true,
   strict: true,
 });
 
 if (!values.out) {
-  usage('Usage: combine.mjs (--round1 a.json b.json … [--merge-personas <persona>]…) | (--round2 a.json b.json …) --out <combined.json>');
+  usage('Usage: combine.mjs (--round1 a.json b.json … [--merge-personas <persona>]… [--plan plan.json]) | (--round2 a.json b.json …) --out <combined.json>');
 }
 
 const hasRound1 = values.round1 !== undefined;
@@ -51,17 +52,20 @@ if (hasRound1 === hasRound2) {
 }
 
 const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
-const mergePersonas = new Set(values['merge-personas'] ?? []);
+const mergePersonas = new Set([
+  ...(values['merge-personas'] ?? []),
+  ...(values.plan ? splitPersonasFromPlan(values.plan, 'combine') : []),
+]);
 // A split lane exists only in round 1; round 2 spawns one agent per persona
 // from the briefing. Round-2 payloads carry validates/challenges, not
 // findings, so a merge would silently drop the second payload's work.
 if (mergePersonas.size && hasRound2) {
-  process.stderr.write('combine: --merge-personas applies only to --round1\n');
+  process.stderr.write('combine: --merge-personas/--plan applies only to --round1\n');
   process.exit(2);
 }
 for (const p of mergePersonas) {
   if (!KNOWN_PERSONAS.has(p)) {
-    process.stderr.write(`combine: --merge-personas ${p}: not a persona (${DEFAULT_PERSONAS.join(', ')})\n`);
+    process.stderr.write(`combine: ${p}: not a persona (${DEFAULT_PERSONAS.join(', ')})\n`);
     process.exit(2);
   }
 }
