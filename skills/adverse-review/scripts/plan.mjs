@@ -41,8 +41,7 @@ import { readFileSync } from 'node:fs';
 import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { escalate, planReview } = await importFromSrc('scaling.mjs');
-const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
+const { agentNames, escalate, parsePlan, planReview, runLanes } = await importFromSrc('scaling.mjs');
 
 const { values, positionals } = parseArgs({
   options: {
@@ -72,51 +71,25 @@ function shQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
+// The lane shape, the persona registry and the `agents` count are all
+// src/scaling.mjs's rules now — `planReview` writes this file, so it owns what
+// counts as one. This bridge only turns a thrown message into its exit code.
 function readPlanFile(file) {
-  const plan = readJson(file, 'plan');
-  if (!plan || !Array.isArray(plan.lanes)) {
-    process.stderr.write(`plan: ${file}: not a plan.json (missing \`lanes\`)\n`);
+  try {
+    return parsePlan(readJson(file, 'plan'));
+  } catch (e) {
+    process.stderr.write(`plan: ${file}: ${e.message}\n`);
     process.exit(2);
   }
-  // The `agents` count was checked and `persona` was not, and SKILL.md Phase 1
-  // feeds `--agents` output straight into an unquoted `for agent in $(…)` loop
-  // that runs `git worktree add "$WORKTREES/$agent"` — so a persona carrying
-  // whitespace or a path separator becomes checkout paths. triage.mjs already
-  // applies the roster guard to --merge-personas; this bridge did not.
-  for (const lane of plan.lanes) {
-    if (!DEFAULT_PERSONAS.includes(lane?.persona)) {
-      process.stderr.write(`plan: ${file}: lane persona ${JSON.stringify(lane?.persona)} is not one of `
-        + `${DEFAULT_PERSONAS.join(', ')}\n`);
-      process.exit(2);
-    }
-  }
-  return plan;
 }
 
 // --- --agents <plan.json>: the worktree loop's agent list --------------------
-//
-// One name per running lane, or one per agent (persona-a, persona-b, …) for
-// a lane the plan split across more than one — read from that lane's own
-// `agents` count, never from a repeated literal 2, so a lane split three or
-// more ways (a future SPLIT_AGENTS change) still gets the right worktrees.
 
 if (values.agents !== undefined) {
   if (values.escalate || positionals.length) {
     usage('Usage: plan.mjs --agents <plan.json>');
   }
-  const plan = readPlanFile(values.agents);
-  const names = plan.lanes.filter((l) => l.run).flatMap((l) => {
-    // `Array.from({ length: undefined })` silently makes an EMPTY array, not
-    // an error — a malformed `agents` field would drop the lane's worktree
-    // entirely instead of failing loudly.
-    if (!Number.isInteger(l.agents) || l.agents < 1) {
-      process.stderr.write(`plan: ${values.agents}: lane '${l.persona}' has an invalid \`agents\` count `
-        + `(${JSON.stringify(l.agents)})\n`);
-      process.exit(2);
-    }
-    return l.agents === 1 ? [l.persona]
-      : Array.from({ length: l.agents }, (_, i) => `${l.persona}-${String.fromCharCode(97 + i)}`);
-  });
+  const names = agentNames(readPlanFile(values.agents).lanes);
   process.stdout.write(`${names.join(' ')}\n`);
   process.exit(0);
 }
@@ -130,8 +103,8 @@ if (values.expect !== undefined && !values.escalate) {
   if (positionals.length) {
     usage('Usage: plan.mjs --expect <plan.json>');
   }
-  const plan = readPlanFile(values.expect);
-  process.stdout.write(`${plan.lanes.filter((l) => l.run).map((l) => l.persona).join(',')}\n`);
+  const lanes = runLanes(readPlanFile(values.expect).lanes);
+  process.stdout.write(`${lanes.map((l) => l.persona).join(',')}\n`);
   process.exit(0);
 }
 

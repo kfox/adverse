@@ -39,16 +39,14 @@ import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
-import { readJson, readPlanLanes, splitPersonas, usage } from './bridge-io.mjs';
+import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
+const { checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
-const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
-const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
-const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
-const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, checkKind, clusterFindings,
-        crossReferenceFindings, groupFindings, makeClaimChecker, normalizeAnchor } =
+const { buildBriefing } = await importFromSrc('briefing.mjs');
+const { checkRoster } = await importFromSrc('roster.mjs');
+const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, makeClaimChecker } =
   await importFromSrc('triage.mjs');
 
 
@@ -89,142 +87,56 @@ if (base.startsWith('-')) {
 
 const { checkClaim, checkCounterpart } = makeClaimChecker({ repo, base });
 
-const reviews = values.round1.map((f) => readJson(f, 'triage'));
-// The persona string is model-written and keys the briefing's verdicts,
-// clusters (reporters.size >= 2), and cross-references (a.reporter !==
-// b.reporter) — a re-cased name would mint a phantom reviewer whose agreement
-// with its own other half reads as two independent lanes. Same registry check
-// as combine.mjs, at the earlier reader.
-const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
-for (const r of reviews) {
-  if (!KNOWN_PERSONAS.has(r?.persona)) {
-    process.stderr.write(`triage: unknown persona ${JSON.stringify(r?.persona)}`
-      + ` (expected one of ${DEFAULT_PERSONAS.join(', ')})\n`);
-    process.exit(1);
-  }
-}
+const sources = values.round1;
+const reviews = sources.map((f) => readJson(f, 'triage'));
 
-// Same guard combine.mjs has always had, missing here until now: without it,
-// ANY duplicate persona — a genuinely split lane, a re-run whose old files
-// were never cleaned, a stale run's payload swept in by a wide glob — merges
-// silently via mergeSplitReviews below. That silent merge is exactly how a
-// contaminated briefing (8 reviewers instead of the planned 4) went undetected
-// in the run that motivated this check. `--merge-personas <persona>` names
-// the lane the plan actually split, so an undeclared duplicate is an error
-// instead of a phantom extra reviewer.
-// `--plan` carries two answers and this read only one. `agents > 1` says which
-// lanes were split; `run` says which lanes exist. The roster half landed in
-// combine.mjs and not here — and triage is the bridge that builds the round-2
-// PROMPT, so a payload from a lane the plan never ran was shaping the
-// cross-review one step before combine got the chance to refuse it.
+// Who counts as a reviewer — src/roster.mjs, the same rules combine.mjs
+// applies to the same payloads one phase later. triage is the bridge that
+// builds the round-2 PROMPT, so a payload from a lane the plan never ran was
+// shaping the cross-review one step before combine got the chance to refuse
+// it.
+//
+// `--plan` carries both answers this needs: `agents > 1` says which lanes were
+// split, `run` says which lanes exist.
 const planLanes = values.plan ? readPlanLanes(values.plan, 'triage') : null;
-const notRun = planLanes
-  ? new Set(planLanes.filter((l) => !l.run).map((l) => l.persona)) : null;
+reportRoster(checkRoster(
+  reviews.map((r, i) => ({ persona: r?.persona, src: sources[i] })),
+  { lanes: planLanes, explicitMerges: values['merge-personas'] ?? [] },
+), 'triage');
 
-const mergePersonas = new Set([
-  ...(values['merge-personas'] ?? []),
-  ...(planLanes ? splitPersonas(planLanes) : []),
-]);
-for (const p of mergePersonas) {
-  if (!KNOWN_PERSONAS.has(p)) {
-    process.stderr.write(`triage: ${p}: not a persona (${DEFAULT_PERSONAS.join(', ')})\n`);
-    process.exit(2);
+// Identity is settled above; this is the other half of a usable payload. A
+// non-array `findings` reached a `for…of` and threw a TypeError with a stack
+// trace, which is not an exit code at all.
+//
+// Exit 1, not 2. SKILL.md draws that line for exactly this case — "2 means it
+// never read a payload, 1 means it read one that failed the schema" — and this
+// payload parsed fine and then failed the schema, which is what validate.mjs
+// reports the same way. bridge-io's exit 2 belongs to the read that never
+// happened, not to what the bytes turned out to say.
+//
+// The ELEMENTS too, not only the array. Guarding the container and not its
+// contents closed one instance and left the class open: `"findings": [null]`
+// still reached normalizeAnchor and threw at src/triage.mjs:49, which is the
+// same crash under a different input.
+for (let i = 0; i < reviews.length; i += 1) {
+  const supplied = reviews[i].findings;
+  if (supplied === undefined) continue;
+  if (!Array.isArray(supplied)) {
+    process.stderr.write(`triage: ${sources[i]}: \`findings\` is not an array`
+      + ` (got ${JSON.stringify(supplied)})\n`);
+    process.exit(1);
   }
-}
-for (const r of reviews) {
-  if (notRun?.has(r.persona)) {
-    process.stderr.write(`triage: the plan recorded '${r.persona}' as not run, so a payload from`
-      + ' it is a stale file or a spoof, not a reviewer.\n'
-      + '  If you deliberately ran this lane anyway, regenerate plan.json or drop --plan.\n');
+  const bad = supplied.findIndex((f) => !f || typeof f !== 'object' || Array.isArray(f));
+  if (bad !== -1) {
+    process.stderr.write(`triage: ${sources[i]}: findings[${bad}] is not an object`
+      + ` (got ${JSON.stringify(supplied[bad])})\n`);
     process.exit(1);
   }
 }
 
-const countByPersona = new Map();
-for (const r of reviews) countByPersona.set(r.persona, (countByPersona.get(r.persona) ?? 0) + 1);
-for (const [persona, count] of countByPersona) {
-  if (mergePersonas.has(persona)) {
-    if (count !== 2) {
-      process.stderr.write(`triage: --merge-personas ${persona}: expected exactly 2 payloads for the split lane, got ${count}.`
-        + (count < 2
-          ? ' What is missing reviewed nothing — re-run it, or pass --degraded to synthesize.\n'
-          : ' Extra payloads mean a stale file or a double glob — clean the run directory.\n'));
-      process.exit(1);
-    }
-  } else if (count > 1) {
-    process.stderr.write(`triage: duplicate persona '${persona}' across inputs`
-      + ' (a deliberately split lane needs --merge-personas <persona>)\n');
-    process.exit(1);
-  }
-}
-
-// Anchors are normalized BEFORE anything reads them. `line`, `file`,
-// `counterpart` and `detail` come out of a model, and downstream they reach a
-// bounds test, a path resolver and a prose scan that each assumed a type
-// nothing had established. Rejected values are collected rather than
-// swallowed: a finding whose anchor was thrown away must not read like a
-// finding that never had one.
-const findings = [];
-const rejectedAnchors = [];
-let n = 0;
-for (const review of reviews) {
-  for (const f of review.findings ?? []) {
-    n += 1;
-    const id = `F${n}`;
-    const { file, line, counterpart, detail, fix, rejected } = normalizeAnchor(f);
-    if (rejected.length) rejectedAnchors.push(`${id}.${rejected.join('+')}`);
-    findings.push({
-      id,
-      reporter: review.persona,
-      // On the FINDING, not only on stdout. A coerced-away anchor left the
-      // briefing looking exactly like a finding whose reporter never supplied
-      // one — and briefing.json is what round 2 reads, so the reviewer judging
-      // "is this under-anchored?" could not see that an anchor had been
-      // offered and thrown away. That is the distinction `rejected` exists to
-      // preserve, reaching only the terminal it was printed to.
-      rejectedAnchors: rejected.length ? rejected : undefined,
-      severity: f.severity,
-      kind: f.kind ?? null,
-      file,
-      line,
-      counterpart,
-      title: f.title,
-      detail,
-      fix,
-      claimCheck: checkClaim(file, line),
-      counterpartCheck: checkCounterpart(counterpart),
-      kindCheck: checkKind(f.kind, file, line, counterpart, { advisoryKinds: ADVISORY_KINDS }),
-    });
-  }
-}
-
-
-// Same-file-and-nearby-lines, and cross-file co-citation: the two consensus
-// edges a title-only join cannot see. Pure over `findings`, so both live in
-// src/triage.mjs where a unit test can exercise them directly.
-const clusters = clusterFindings(findings, { windowLines: CLUSTER_WINDOW_LINES });
-const crossReferences = crossReferenceFindings(findings);
-
-// Both edge sets answer "these two reporters may be describing one thing", and
-// neither closes the relation: A~B and B~C left three findings to remediate,
-// decide, and ledger separately. Connected components close it and carry every
-// member along as a citation. Proposed only — round 2 rules on each group.
-const groups = groupFindings(findings, { clusters, crossReferences, advisoryKinds: ADVISORY_KINDS });
-
-// Every finding sharing a file with another reporter's, regardless of line
-// distance — a wider net than `clusters`, which `sameFileDifferentRegion`
-// below reports separately.
-const byFile = new Map();
-for (const f of findings) {
-  if (!f.file) continue;
-  if (!byFile.has(f.file)) byFile.set(f.file, []);
-  byFile.get(f.file).push(f);
-}
-
-// What earlier iterations already decided. Positions in the ledger were
-// recorded against the commit the decision was made at, so each one is
-// re-projected to HEAD before matching — otherwise a fix that shifted the file
-// makes every past decision look like a different finding.
+// What earlier iterations already decided. Loading it is file I/O and its
+// refusals are exit codes, so it stays here; what the decisions MEAN to a
+// finding is src/briefing.mjs's job.
 let ledger = emptyLedger();
 if (values.ledger) {
   try {
@@ -245,68 +157,32 @@ if (values.ledger) {
     process.exit(1);
   }
 }
-const traceFor = makeAnchorTracer({ repo, to: 'HEAD' });
-const adjudicatedFindings = annotate(findings, ledger, traceFor);
-for (let i = 0; i < findings.length; i += 1) {
-  if (adjudicatedFindings[i].adjudicated) findings[i].adjudicated = adjudicatedFindings[i].adjudicated;
-}
-const settled = findings.filter((f) => f.adjudicated?.settled);
-// The same predicate convergenceStatus uses, imported rather than re-spelled —
-// this copy had drifted to "annotated and unsettled", which calls a brand-new
-// finding REGRESSED because a line-less decline sits somewhere in its file.
-// briefing.regressed IS the round-2 prompt, so that is a false claim made to a
-// reviewer about work that was never done.
-const regressed = findings.filter(isRegressionCandidate);
 
-const briefing = {
+const { briefing, stats } = buildBriefing(reviews, {
   base,
   gate: values.gate ?? null,
-  // A split lane arrives as two payloads under one persona, and
-  // Object.fromEntries is last-key-wins — which replaced half B's reject with
-  // half A's approve in the one text every round-2 reviewer reads. Merge with
-  // the same semantics combine.mjs uses, from the same export.
-  verdicts: reviews.reduce((acc, r) => {
-    const prev = acc[r.persona];
-    const merged = prev ? mergeSplitReviews(prev, r) : r;
-    acc[r.persona] = { verdict: normalizeVerdict(merged.verdict), summary: merged.summary };
-    return acc;
-  }, Object.create(null)),
-  findings,
-  clusters,
-  crossReferences,
-  groups,
-  settled: settled.map((f) => f.id),
-  regressed: regressed.map((f) => f.id),
-  sameFileDifferentRegion: [...byFile]
-    .filter(([, g]) => new Set(g.map((f) => f.reporter)).size >= 2)
-    .map(([file, g]) => ({ file, ids: g.map((f) => f.id) })),
-};
+  checkClaim,
+  checkCounterpart,
+  ledger,
+  traceFor: makeAnchorTracer({ repo, to: 'HEAD' }),
+});
 
 writeFileSync(values.out, JSON.stringify(briefing, null, 2), 'utf-8');
 
-
-const disproved = findings.filter(
-  (f) => f.claimCheck.status === 'DISPROVED' || f.counterpartCheck?.status === 'DISPROVED',
-);
-const underAnchored = findings.filter((f) => f.kindCheck.status !== 'ok');
-const advisory = findings.filter((f) => f.kindCheck.advisory === true);
-const outside = findings.filter((f) => f.claimCheck.inDiff === 'outside');
 const ids = (list) => (list.length ? ` (${list.map((f) => f.id ?? f).join(', ')})` : '');
 process.stdout.write(
-  `triaged ${findings.length} findings from ${reviews.length} reviewers -> ${values.out}\n`
-  + `  clusters (same file, <=${CLUSTER_WINDOW_LINES} lines apart, 2+ reporters): ${clusters.length}\n`
-  + `  claim-check disproved: ${disproved.length}${ids(disproved)}\n`
-  + `  malformed anchors coerced away (field kept null): ${rejectedAnchors.length}`
-  + `${rejectedAnchors.length ? ` (${rejectedAnchors.join(', ')})` : ''}\n`
-
+  `triaged ${briefing.findings.length} findings from ${stats.reviewers} reviewers -> ${values.out}\n`
+  + `  clusters (same file, <=${CLUSTER_WINDOW_LINES} lines apart, 2+ reporters): ${briefing.clusters.length}\n`
+  + `  claim-check disproved: ${stats.disproved.length}${ids(stats.disproved)}\n`
+  + `  malformed anchors coerced away (field kept null): ${stats.rejectedAnchors.length}`
+  + `${ids(stats.rejectedAnchors)}\n`
   + `  co-citations (cross-file, or same-file with the line echoed; max`
-  + ` ${MAX_CO_CITATIONS_PER_FINDING}/finding): ${crossReferences.length}`
-
-  + `${crossReferences.length ? ` (${crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
-  + `  candidate root causes (proposed, for round 2 to confirm or split): ${groups.length}`
-  + `${groups.length ? ` (${groups.map((g) => `${g.id}=${g.members.join('+')}${g.oversized ? ' OVERSIZED' : ''}`).join(', ')})` : ''}\n`
-  + `  cited outside the diff (annotated, not rejected): ${outside.length}${ids(outside)}\n`
-  + `  under-anchored for their kind (annotated, not rejected): ${underAnchored.length}${ids(underAnchored)}\n`
-  + `  advisory (design — cannot block): ${advisory.length}${ids(advisory)}\n`
-  + `  already settled in an earlier iteration: ${settled.length}${ids(settled)}\n`
-  + `  REGRESSED (recorded fixed, reported again): ${regressed.length}${ids(regressed)}\n`);
+  + ` ${MAX_CO_CITATIONS_PER_FINDING}/finding): ${briefing.crossReferences.length}`
+  + `${briefing.crossReferences.length ? ` (${briefing.crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
+  + `  candidate root causes (proposed, for round 2 to confirm or split): ${briefing.groups.length}`
+  + `${briefing.groups.length ? ` (${briefing.groups.map((g) => `${g.id}=${g.members.join('+')}${g.oversized ? ' OVERSIZED' : ''}`).join(', ')})` : ''}\n`
+  + `  cited outside the diff (annotated, not rejected): ${stats.outside.length}${ids(stats.outside)}\n`
+  + `  under-anchored for their kind (annotated, not rejected): ${stats.underAnchored.length}${ids(stats.underAnchored)}\n`
+  + `  advisory (design — cannot block): ${stats.advisory.length}${ids(stats.advisory)}\n`
+  + `  already settled in an earlier iteration: ${stats.settled.length}${ids(stats.settled)}\n`
+  + `  REGRESSED (recorded fixed, reported again): ${stats.regressed.length}${ids(stats.regressed)}\n`);

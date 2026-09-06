@@ -473,7 +473,10 @@ test('--agents refuses a plan lane whose persona is not in the registry', () => 
       writeFileSync(plan, JSON.stringify({ lanes: [{ persona, run: true, agents: 1 }] }));
       const r = runPlan(['--agents', plan]);
       assert.equal(r.status, 2, `persona ${JSON.stringify(persona)} must be refused`);
-      assert.match(r.stderr, /is not one of/);
+      // Wording follows src/scaling.mjs's `parsePlan`, the one reader of a
+      // plan.json now — this bridge no longer spells the rule itself. The
+      // claim is unchanged: each of these is refused, exit 2.
+      assert.match(r.stderr, /is not a persona/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

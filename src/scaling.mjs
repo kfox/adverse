@@ -73,6 +73,10 @@ export const LARGE_MIN_CHANGED_LINES = 600;
 export const DELETED_LINES_ADVERSARY_FLOOR = 80;
 
 export const SPLIT_AGENTS = 2;
+
+// The a-z suffix in `agentNames` is the real ceiling on how many ways a lane
+// can split, so it is named rather than left implicit in a charCode sum.
+export const MAX_SPLIT_AGENTS = 26;
 // The default must match convergenceStatus's own default in ledger.mjs, or the
 // plan would claim a cap the loop does not enforce.
 export const DEFAULT_MAX_ITERATIONS = 3;
@@ -250,6 +254,97 @@ export function planReview({ files = [], diff = '', numstat = null, numstatMatch
     maxIterations: DEFAULT_MAX_ITERATIONS,
     reasons,
   };
+}
+
+// --- Reading a plan back -----------------------------------------------------
+//
+// `planReview` above writes plan.json; four readers each grew their own idea of
+// what one is, and each checked a different half. bridge-io's `readPlanLanes`
+// validated the lane SHAPE and not the persona registry; plan.mjs's
+// `readPlanFile` validated the REGISTRY and not the shape; only the `--agents`
+// projection ever validated an `agents` count, so every other reader's
+// `agents > 1` test read whatever the field happened to hold. One reader, in
+// the module that writes the file it parses.
+//
+// Throws rather than exiting: `src/` describes a review, the bridges own the
+// process. Same split as `loadLedger`.
+
+// `agents` is OPTIONAL, and its default follows `run` — `agentsFor` above
+// records 0 for a lane that does not run, so 0 is a legitimate count and not a
+// malformed one. A hand-written plan naming only the lane it cares about is
+// legitimate too (combine.mjs's `--plan` contract rests on it), so absence is
+// never an error. Present-but-malformed is: `Array.from({ length: undefined })`
+// silently yields an EMPTY array, so a bad count drops a lane's worktrees
+// instead of failing, and `undefined > 1` quietly un-splits a split lane.
+function parseLane(lane, personas) {
+  if (!lane || typeof lane !== 'object' || Array.isArray(lane)) {
+    throw new Error(`a lane is not an object: ${JSON.stringify(lane)}`);
+  }
+  if (!personas.includes(lane.persona)) {
+    throw new Error(`lane persona ${JSON.stringify(lane.persona)} is not a persona`
+      + ` (expected one of ${personas.join(', ')})`);
+  }
+  // A boolean, and required. plan.mjs's `--agents` projection used to filter
+  // on a TRUTHY `run` while bridge-io tested `=== true`, so a lane recorded
+  // `run: 1` got a worktree from one reader and was refused as "not run" by
+  // the next. Unifying on `=== true` alone would have made that lane silently
+  // vanish from the agent list — a lane nobody notices is missing is the
+  // failure this whole module is written against, so it is an error instead.
+  if (typeof lane.run !== 'boolean') {
+    throw new Error(`lane '${lane.persona}' must say whether it ran`
+      + ` (\`run\` is ${JSON.stringify(lane.run)}, expected true or false)`);
+  }
+  const run = lane.run;
+  // `=== undefined`, not `??`: a key absent from the JSON parses as undefined
+  // and is the legitimate hand-written case, while an explicit `null` is a
+  // count someone wrote down wrong. `??` collapses the two and defaults the
+  // malformed one to a working value.
+  const agents = lane.agents === undefined ? (run ? 1 : 0) : lane.agents;
+  const floor = run ? 1 : 0;
+  // `agentNames` suffixes agents a, b, c … off `String.fromCharCode(97 + i)`,
+  // which runs past 'z' into '{' and '|'. SKILL.md Phase 1 word-splits that
+  // list into `git worktree add "$WORKTREES/$agent"`, so the ceiling is where
+  // the naming scheme stops being one, not where it stops being tidy.
+  if (Number.isInteger(agents) && agents > MAX_SPLIT_AGENTS) {
+    throw new Error(`lane '${lane.persona}' asks for ${agents} agents;`
+      + ` the a-z suffix scheme tops out at ${MAX_SPLIT_AGENTS}`);
+  }
+  if (!Number.isInteger(agents) || agents < floor) {
+    throw new Error(`lane '${lane.persona}' has an invalid \`agents\` count`
+      + ` (${JSON.stringify(lane.agents)})`);
+  }
+  return { ...lane, agents, run };
+}
+
+export function parsePlan(plan, { personas = DEFAULT_PERSONAS } = {}) {
+  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.lanes)) {
+    throw new Error('not a plan.json (missing `lanes`)');
+  }
+  return { ...plan, lanes: plan.lanes.map((l) => parseLane(l, personas)) };
+}
+
+export const runLanes = (lanes) => lanes.filter((l) => l.run);
+
+// The lanes a caller must expect two payloads from. Round 2 spawns one agent
+// per persona regardless, so this is a round-1 question only.
+export const splitLanes = (lanes) => runLanes(lanes).filter((l) => l.agents > 1);
+
+// Keyed on lanes the plan explicitly RULED OUT rather than on lanes it named,
+// because a plan need not be exhaustive: rejecting every persona a hand-written
+// plan happens not to list would refuse real reviewers. A lane recorded
+// `run: false` is the case the plan is actually making a claim about.
+export const skippedLanes = (lanes) => lanes.filter((l) => !l.run);
+
+// One name per running lane, or one per agent (`persona-a`, `persona-b`, …)
+// for a lane split across more than one — read from that lane's own `agents`
+// count, never a repeated literal 2, so raising SPLIT_AGENTS still gets the
+// right worktrees. Up to MAX_SPLIT_AGENTS of them: past 'z' the suffix walks
+// into '{' and '|', so parseLane refuses that count rather than letting this
+// function invent a name for it.
+export function agentNames(lanes) {
+  return runLanes(lanes).flatMap((l) => (l.agents === 1
+    ? [l.persona]
+    : Array.from({ length: l.agents }, (_, i) => `${l.persona}-${String.fromCharCode(97 + i)}`)));
 }
 
 // Re-plan after round 1, the earliest moment finding criticality is knowable.

@@ -22,12 +22,12 @@
 import { parseArgs } from 'node:util';
 import { writeFileSync } from 'node:fs';
 
-import { readJson, readPlanLanes, splitPersonas, usage } from './bridge-io.mjs';
+import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 
 import { importFromSrc } from './package-root.mjs';
 
-const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
+const { checkRoster } = await importFromSrc('roster.mjs');
 
 const { values, positionals } = parseArgs({
   options: {
@@ -52,73 +52,35 @@ if (hasRound1 === hasRound2) {
   process.exit(2);
 }
 
-const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
-
-// The plan carries two answers and this only ever read one. `agents > 1` says
-// which lanes were split; `run` says which lanes EXIST — and discarding that
-// half meant membership in DEFAULT_PERSONAS was the only gate, so a payload
-// from a lane the plan never ran was accepted as a reviewer and counted toward
-// consensus. Both halves come off one read now.
-const planLanes = values.plan ? readPlanLanes(values.plan, 'combine') : null;
-// Keyed on lanes the plan explicitly RULED OUT rather than on lanes it named,
-// because a plan need not be exhaustive: a hand-written one that mentions only
-// the split lane is legitimate, and rejecting every persona it happens not to
-// list would refuse real reviewers. A lane recorded `run: false` is the case
-// the plan is actually making a claim about.
-const notRun = planLanes
-  ? new Set(planLanes.filter((l) => !l.run).map((l) => l.persona)) : null;
-const ranPersonas = planLanes
-  ? planLanes.filter((l) => l.run).map((l) => l.persona) : null;
-
-
 // A split lane exists only in round 1; round 2 spawns one agent per persona
-// from the briefing. Round-2 payloads carry validates/challenges, not
+// from the briefing, and its payloads carry validates/challenges rather than
 // findings, so a merge would silently drop the second payload's work. The
 // ROSTER half of --plan still applies to round 2 — the lanes round 2 runs are
 // a subset of the lanes the plan ran, so the gate is sound either way.
-const mergePersonas = new Set([
-  ...(values['merge-personas'] ?? []),
-  ...(planLanes && hasRound1 ? splitPersonas(planLanes) : []),
-]);
 if (values['merge-personas']?.length && hasRound2) {
   process.stderr.write('combine: --merge-personas applies only to --round1\n');
   process.exit(2);
 }
 
-for (const p of mergePersonas) {
-  if (!KNOWN_PERSONAS.has(p)) {
-    process.stderr.write(`combine: ${p}: not a persona (${DEFAULT_PERSONAS.join(', ')})\n`);
-    process.exit(2);
-  }
-}
-
 const inputs = [...(values.round1 ?? values.round2), ...positionals];
+const planLanes = values.plan ? readPlanLanes(values.plan, 'combine') : null;
+const payloads = inputs.map((src) => ({ src, payload: readJson(src, 'combine') }));
+
+// Who counts as a reviewer — src/roster.mjs, the same rules triage.mjs applies
+// to the same payloads one phase earlier.
+reportRoster(checkRoster(
+  payloads.map(({ src, payload }) => ({ persona: payload?.persona, src })),
+  {
+    lanes: planLanes,
+    explicitMerges: values['merge-personas'] ?? [],
+    round: hasRound2 ? 2 : 1,
+  },
+), 'combine');
 
 // Null prototype: the persona string indexes this map, and a plain object
 // would answer `__proto__` with something truthy.
 const combined = Object.create(null);
-const payloadCount = Object.create(null);
-for (const path of inputs) {
-  const payload = readJson(path, 'combine');
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || typeof payload.persona !== 'string') {
-    process.stderr.write(`combine: ${path}: missing or invalid \`persona\` field\n`);
-    process.exit(1);
-  }
-  if (!KNOWN_PERSONAS.has(payload.persona)) {
-    process.stderr.write(`combine: ${path}: unknown persona '${payload.persona}'`
-      + ` (expected one of ${DEFAULT_PERSONAS.join(', ')})\n`);
-    process.exit(1);
-  }
-  if (notRun?.has(payload.persona)) {
-    process.stderr.write(`combine: ${path}: the plan recorded '${payload.persona}' as not run,`
-      + ' so a payload from it is a stale file or a spoof, not a reviewer.\n'
-      + '  If you deliberately ran this lane anyway (SKILL.md Phase 1 allows overriding the'
-      + ' plan for a thorough pass), the plan is the thing that is out of date: regenerate'
-      + ' plan.json, or drop --plan and pass --merge-personas for any split lane.\n');
-    process.exit(1);
-  }
-
-
+for (const { src, payload } of payloads) {
   if (hasRound1) {
     // Off-contract verdicts degrade to `reject`, loudly: synthesis scores an
     // unknown string as neutral and counts only the literal `reject` as a
@@ -126,52 +88,14 @@ for (const path of inputs) {
     // rejection.
     const norm = normalizeVerdict(payload.verdict);
     if (norm !== payload.verdict) {
-      process.stderr.write(`combine: ${path}: verdict ${JSON.stringify(payload.verdict)} is off-contract; recorded as 'reject'\n`);
+      process.stderr.write(`combine: ${src}: verdict ${JSON.stringify(payload.verdict)} is off-contract; recorded as 'reject'\n`);
       payload.verdict = norm;
     }
   }
+  // Duplicates that are not a declared split lane were refused above, so a
+  // second payload here is a half of one.
   const existing = combined[payload.persona];
-  payloadCount[payload.persona] = (payloadCount[payload.persona] ?? 0) + 1;
-  if (existing && !mergePersonas.has(payload.persona)) {
-    process.stderr.write(`combine: duplicate persona '${payload.persona}' across inputs`
-      + ' (a deliberately split lane needs --merge-personas <persona>)\n');
-    process.exit(1);
-  }
   combined[payload.persona] = existing ? mergeSplitReviews(existing, payload) : payload;
-}
-
-// A lane named in --merge-personas was split in two. One payload is not a
-// merged lane, it is a lane whose other half was never reviewed — refuse, so
-// the orchestrator must re-run the missing half or declare the lane degraded.
-for (const p of mergePersonas) {
-  const got = payloadCount[p] ?? 0;
-  if (got !== 2) {
-    process.stderr.write(`combine: --merge-personas ${p}: expected exactly 2 payloads for the split lane, got ${got}.`
-      + (got < 2
-        ? ' What is missing reviewed nothing — re-run it, or pass --degraded to synthesize.\n'
-        : ' Extra payloads mean a stale file or a double glob — clean the run directory.\n'));
-    process.exit(1);
-  }
-}
-
-// A lane the plan ran that produced no payload reviewed nothing, and "reviewed
-// and found nothing" is the same input downstream as "never looked". Warned
-// rather than refused: the Pragmatist legitimately runs in round 1 and not in
-// round 2, so silence is not always a failure — but it is never something the
-// run should discover by noticing a missing row.
-// Round 2 spawns one agent per persona EXCEPT the Pragmatist, whose findings
-// are advisory and which never cross-reviews — so its absence from a round-2
-// combine is the design working, not a lane that failed. Warning about it on
-// every single run is how a real warning gets skimmed past.
-const CROSS_REVIEWS = (p) => !(hasRound2 && p === 'pragmatist');
-
-if (ranPersonas) {
-  const silent = ranPersonas.filter((p) => CROSS_REVIEWS(p) && !(p in combined));
-
-  if (silent.length) {
-    process.stderr.write(`combine: the plan ran ${silent.join(', ')} but no payload arrived.`
-      + ' If that lane failed, declare it: `synthesize --degraded <persona>`.\n');
-  }
 }
 
 writeFileSync(values.out, JSON.stringify(combined, null, 2), 'utf-8');

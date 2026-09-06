@@ -16,7 +16,8 @@ import { DEFAULT_PERSONAS } from '../src/personas.mjs';
 import {
   DEFAULT_MAX_ITERATIONS, DELETED_LINES_ADVERSARY_FLOOR, ESCALATED_MAX_ITERATIONS,
   LARGE_MIN_CHANGED_LINES, LARGE_MIN_FILES, SMALL_MAX_CHANGED_LINES, SMALL_MAX_FILES,
-  SPLIT_AGENTS, diffSize, escalate, parseNumstat, planReview,
+  MAX_SPLIT_AGENTS, SPLIT_AGENTS, agentNames, diffSize, escalate, parseNumstat, parsePlan, planReview,
+  runLanes, skippedLanes, splitLanes,
 } from '../src/scaling.mjs';
 
 const filesOf = (n) => Array.from({ length: n }, (_, i) => `src/render/mod${i}.mjs`);
@@ -349,4 +350,107 @@ test('a complete expected roster with nothing blocking still skips round 2', () 
     { expected: ['auditor', 'steward'] },
   );
   assert.equal(r.rounds, 1);
+});
+
+
+// --- parsePlan and the projections off it -----------------------------------
+//
+// Three readers used to spell these rules, each validating a different half:
+// the lane shape without the registry, the registry without the shape, and the
+// `agents` count in exactly one of the three. These pin the union.
+
+const lanesOf = (...lanes) => parsePlan({ lanes }).lanes;
+
+test('parsePlan: a plan.json round-trips its own planReview output', () => {
+  const plan = planReview({ files: filesOf(20), numstat: evenNumstat(filesOf(20), 900) });
+  assert.deepEqual(parsePlan(JSON.parse(JSON.stringify(plan))).lanes.map((l) => l.persona),
+    plan.lanes.map((l) => l.persona));
+});
+
+test('parsePlan: a skipped lane\'s `agents: 0` is a legitimate count, not a malformed one', () => {
+  const [lane] = lanesOf({ persona: 'pragmatist', run: false, agents: 0, reason: 'skip' });
+  assert.equal(lane.agents, 0);
+  assert.equal(lane.run, false);
+});
+
+test('parsePlan: a lane omitting `agents` defaults to one when it runs, none when it does not', () => {
+  const [runs, skipped] = lanesOf(
+    { persona: 'auditor', run: true }, { persona: 'pragmatist', run: false });
+  assert.equal(runs.agents, 1);
+  assert.equal(skipped.agents, 0);
+});
+
+test('parsePlan: an explicit null `agents` is malformed, not an omission', () => {
+  assert.throws(() => lanesOf({ persona: 'auditor', run: true, agents: null }),
+    /invalid `agents` count/);
+});
+
+test('parsePlan: a running lane cannot claim zero agents', () => {
+  assert.throws(() => lanesOf({ persona: 'auditor', run: true, agents: 0 }),
+    /invalid `agents` count/);
+});
+
+test('parsePlan: every lane persona is checked against the registry, split or not', () => {
+  for (const agents of [1, 2]) {
+    assert.throws(() => lanesOf({ persona: 'referee', run: true, agents }),
+      /is not a persona/, `agents: ${agents} must still be checked`);
+  }
+});
+
+test('parsePlan: a lane must SAY whether it ran, rather than be read as truthy', () => {
+  // `--agents` filtered on a truthy `run` and bridge-io tested `=== true`, so
+  // `run: 1` got a worktree from one reader and was refused by the next.
+  // Reading it as false would have silently dropped the lane's agents instead.
+  for (const run of ['yes', 1, undefined, null, 0]) {
+    assert.throws(() => lanesOf({ persona: 'auditor', run, agents: 1 }),
+      /must say whether it ran/, `run: ${JSON.stringify(run)}`);
+  }
+});
+
+test('parsePlan: a lane cannot split further than the a-z suffix scheme reaches', () => {
+  assert.throws(() => lanesOf({ persona: 'auditor', run: true, agents: 27 }),
+    /suffix scheme tops out at 26/);
+  assert.equal(agentNames(lanesOf({ persona: 'auditor', run: true, agents: 26 })).at(-1),
+    'auditor-z');
+});
+
+test('parsePlan: a lane that is not an object is refused, not read through', () => {
+  for (const lane of [null, 'auditor', ['auditor']]) {
+    assert.throws(() => parsePlan({ lanes: [lane] }), /a lane is not an object/);
+  }
+});
+
+test('parsePlan: a file with no `lanes` array is refused', () => {
+  for (const plan of [null, { oops: true }, { lanes: 'auditor' }]) {
+    assert.throws(() => parsePlan(plan), /not a plan\.json/);
+  }
+});
+
+test('splitLanes names only lanes that run AND were split', () => {
+  const lanes = lanesOf(
+    { persona: 'auditor', run: true, agents: 2 },
+    { persona: 'adversary', run: false, agents: 2 },
+    { persona: 'steward', run: true, agents: 1 });
+  assert.deepEqual(splitLanes(lanes).map((l) => l.persona), ['auditor']);
+});
+
+test('runLanes and skippedLanes partition the roster', () => {
+  const lanes = lanesOf(
+    { persona: 'auditor', run: true, agents: 1 },
+    { persona: 'pragmatist', run: false, agents: 0 });
+  assert.deepEqual(runLanes(lanes).map((l) => l.persona), ['auditor']);
+  assert.deepEqual(skippedLanes(lanes).map((l) => l.persona), ['pragmatist']);
+});
+
+test('agentNames suffixes a split lane per agent and leaves a solo lane bare', () => {
+  const lanes = lanesOf(
+    { persona: 'auditor', run: true, agents: 2 },
+    { persona: 'steward', run: true, agents: 1 },
+    { persona: 'pragmatist', run: false, agents: 0 });
+  assert.deepEqual(agentNames(lanes), ['auditor-a', 'auditor-b', 'steward']);
+});
+
+test('agentNames reads the lane\'s own count, not a hardcoded two', () => {
+  const lanes = lanesOf({ persona: 'auditor', run: true, agents: 3 });
+  assert.deepEqual(agentNames(lanes), ['auditor-a', 'auditor-b', 'auditor-c']);
 });
