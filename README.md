@@ -293,6 +293,7 @@ src/                          # Shared core, used by both CLI and Skill
   synthesis.mjs               # Deterministic merge + markdown rendering
   trace.mjs                   # Re-project a finding's anchor across commits
   triage.mjs                  # Claim/kind checks, clustering, root-cause grouping
+  briefing.mjs                # Assembles those into the round-2 prompt
   ledger.mjs                  # Adjudication log + the convergence stop condition
   scope.mjs                   # Does this change have a trust boundary in it?
   scaling.mjs                 # How much review does this change deserve? + reading a plan back

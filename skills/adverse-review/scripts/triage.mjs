@@ -42,13 +42,11 @@ import path from 'node:path';
 import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
+const { checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
-const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
-const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
+const { buildBriefing } = await importFromSrc('briefing.mjs');
 const { checkRoster } = await importFromSrc('roster.mjs');
-const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, checkKind, clusterFindings,
-        crossReferenceFindings, groupFindings, makeClaimChecker, normalizeAnchor } =
+const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, makeClaimChecker } =
   await importFromSrc('triage.mjs');
 
 
@@ -119,73 +117,9 @@ for (let i = 0; i < reviews.length; i += 1) {
   }
 }
 
-// Anchors are normalized BEFORE anything reads them. `line`, `file`,
-// `counterpart` and `detail` come out of a model, and downstream they reach a
-// bounds test, a path resolver and a prose scan that each assumed a type
-// nothing had established. Rejected values are collected rather than
-// swallowed: a finding whose anchor was thrown away must not read like a
-// finding that never had one.
-const findings = [];
-const rejectedAnchors = [];
-let n = 0;
-for (const review of reviews) {
-  for (const f of review.findings ?? []) {
-    n += 1;
-    const id = `F${n}`;
-    const { file, line, counterpart, detail, fix, rejected } = normalizeAnchor(f);
-    if (rejected.length) rejectedAnchors.push(`${id}.${rejected.join('+')}`);
-    findings.push({
-      id,
-      reporter: review.persona,
-      // On the FINDING, not only on stdout. A coerced-away anchor left the
-      // briefing looking exactly like a finding whose reporter never supplied
-      // one — and briefing.json is what round 2 reads, so the reviewer judging
-      // "is this under-anchored?" could not see that an anchor had been
-      // offered and thrown away. That is the distinction `rejected` exists to
-      // preserve, reaching only the terminal it was printed to.
-      rejectedAnchors: rejected.length ? rejected : undefined,
-      severity: f.severity,
-      kind: f.kind ?? null,
-      file,
-      line,
-      counterpart,
-      title: f.title,
-      detail,
-      fix,
-      claimCheck: checkClaim(file, line),
-      counterpartCheck: checkCounterpart(counterpart),
-      kindCheck: checkKind(f.kind, file, line, counterpart, { advisoryKinds: ADVISORY_KINDS }),
-    });
-  }
-}
-
-
-// Same-file-and-nearby-lines, and cross-file co-citation: the two consensus
-// edges a title-only join cannot see. Pure over `findings`, so both live in
-// src/triage.mjs where a unit test can exercise them directly.
-const clusters = clusterFindings(findings, { windowLines: CLUSTER_WINDOW_LINES });
-const crossReferences = crossReferenceFindings(findings);
-
-// Both edge sets answer "these two reporters may be describing one thing", and
-// neither closes the relation: A~B and B~C left three findings to remediate,
-// decide, and ledger separately. Connected components close it and carry every
-// member along as a citation. Proposed only — round 2 rules on each group.
-const groups = groupFindings(findings, { clusters, crossReferences, advisoryKinds: ADVISORY_KINDS });
-
-// Every finding sharing a file with another reporter's, regardless of line
-// distance — a wider net than `clusters`, which `sameFileDifferentRegion`
-// below reports separately.
-const byFile = new Map();
-for (const f of findings) {
-  if (!f.file) continue;
-  if (!byFile.has(f.file)) byFile.set(f.file, []);
-  byFile.get(f.file).push(f);
-}
-
-// What earlier iterations already decided. Positions in the ledger were
-// recorded against the commit the decision was made at, so each one is
-// re-projected to HEAD before matching — otherwise a fix that shifted the file
-// makes every past decision look like a different finding.
+// What earlier iterations already decided. Loading it is file I/O and its
+// refusals are exit codes, so it stays here; what the decisions MEAN to a
+// finding is src/briefing.mjs's job.
 let ledger = emptyLedger();
 if (values.ledger) {
   try {
@@ -206,68 +140,32 @@ if (values.ledger) {
     process.exit(1);
   }
 }
-const traceFor = makeAnchorTracer({ repo, to: 'HEAD' });
-const adjudicatedFindings = annotate(findings, ledger, traceFor);
-for (let i = 0; i < findings.length; i += 1) {
-  if (adjudicatedFindings[i].adjudicated) findings[i].adjudicated = adjudicatedFindings[i].adjudicated;
-}
-const settled = findings.filter((f) => f.adjudicated?.settled);
-// The same predicate convergenceStatus uses, imported rather than re-spelled —
-// this copy had drifted to "annotated and unsettled", which calls a brand-new
-// finding REGRESSED because a line-less decline sits somewhere in its file.
-// briefing.regressed IS the round-2 prompt, so that is a false claim made to a
-// reviewer about work that was never done.
-const regressed = findings.filter(isRegressionCandidate);
 
-const briefing = {
+const { briefing, stats } = buildBriefing(reviews, {
   base,
   gate: values.gate ?? null,
-  // A split lane arrives as two payloads under one persona, and
-  // Object.fromEntries is last-key-wins — which replaced half B's reject with
-  // half A's approve in the one text every round-2 reviewer reads. Merge with
-  // the same semantics combine.mjs uses, from the same export.
-  verdicts: reviews.reduce((acc, r) => {
-    const prev = acc[r.persona];
-    const merged = prev ? mergeSplitReviews(prev, r) : r;
-    acc[r.persona] = { verdict: normalizeVerdict(merged.verdict), summary: merged.summary };
-    return acc;
-  }, Object.create(null)),
-  findings,
-  clusters,
-  crossReferences,
-  groups,
-  settled: settled.map((f) => f.id),
-  regressed: regressed.map((f) => f.id),
-  sameFileDifferentRegion: [...byFile]
-    .filter(([, g]) => new Set(g.map((f) => f.reporter)).size >= 2)
-    .map(([file, g]) => ({ file, ids: g.map((f) => f.id) })),
-};
+  checkClaim,
+  checkCounterpart,
+  ledger,
+  traceFor: makeAnchorTracer({ repo, to: 'HEAD' }),
+});
 
 writeFileSync(values.out, JSON.stringify(briefing, null, 2), 'utf-8');
 
-
-const disproved = findings.filter(
-  (f) => f.claimCheck.status === 'DISPROVED' || f.counterpartCheck?.status === 'DISPROVED',
-);
-const underAnchored = findings.filter((f) => f.kindCheck.status !== 'ok');
-const advisory = findings.filter((f) => f.kindCheck.advisory === true);
-const outside = findings.filter((f) => f.claimCheck.inDiff === 'outside');
 const ids = (list) => (list.length ? ` (${list.map((f) => f.id ?? f).join(', ')})` : '');
 process.stdout.write(
-  `triaged ${findings.length} findings from ${reviews.length} reviewers -> ${values.out}\n`
-  + `  clusters (same file, <=${CLUSTER_WINDOW_LINES} lines apart, 2+ reporters): ${clusters.length}\n`
-  + `  claim-check disproved: ${disproved.length}${ids(disproved)}\n`
-  + `  malformed anchors coerced away (field kept null): ${rejectedAnchors.length}`
-  + `${rejectedAnchors.length ? ` (${rejectedAnchors.join(', ')})` : ''}\n`
-
+  `triaged ${briefing.findings.length} findings from ${stats.reviewers} reviewers -> ${values.out}\n`
+  + `  clusters (same file, <=${CLUSTER_WINDOW_LINES} lines apart, 2+ reporters): ${briefing.clusters.length}\n`
+  + `  claim-check disproved: ${stats.disproved.length}${ids(stats.disproved)}\n`
+  + `  malformed anchors coerced away (field kept null): ${stats.rejectedAnchors.length}`
+  + `${ids(stats.rejectedAnchors)}\n`
   + `  co-citations (cross-file, or same-file with the line echoed; max`
-  + ` ${MAX_CO_CITATIONS_PER_FINDING}/finding): ${crossReferences.length}`
-
-  + `${crossReferences.length ? ` (${crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
-  + `  candidate root causes (proposed, for round 2 to confirm or split): ${groups.length}`
-  + `${groups.length ? ` (${groups.map((g) => `${g.id}=${g.members.join('+')}${g.oversized ? ' OVERSIZED' : ''}`).join(', ')})` : ''}\n`
-  + `  cited outside the diff (annotated, not rejected): ${outside.length}${ids(outside)}\n`
-  + `  under-anchored for their kind (annotated, not rejected): ${underAnchored.length}${ids(underAnchored)}\n`
-  + `  advisory (design — cannot block): ${advisory.length}${ids(advisory)}\n`
-  + `  already settled in an earlier iteration: ${settled.length}${ids(settled)}\n`
-  + `  REGRESSED (recorded fixed, reported again): ${regressed.length}${ids(regressed)}\n`);
+  + ` ${MAX_CO_CITATIONS_PER_FINDING}/finding): ${briefing.crossReferences.length}`
+  + `${briefing.crossReferences.length ? ` (${briefing.crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
+  + `  candidate root causes (proposed, for round 2 to confirm or split): ${briefing.groups.length}`
+  + `${briefing.groups.length ? ` (${briefing.groups.map((g) => `${g.id}=${g.members.join('+')}${g.oversized ? ' OVERSIZED' : ''}`).join(', ')})` : ''}\n`
+  + `  cited outside the diff (annotated, not rejected): ${stats.outside.length}${ids(stats.outside)}\n`
+  + `  under-anchored for their kind (annotated, not rejected): ${stats.underAnchored.length}${ids(stats.underAnchored)}\n`
+  + `  advisory (design — cannot block): ${stats.advisory.length}${ids(stats.advisory)}\n`
+  + `  already settled in an earlier iteration: ${stats.settled.length}${ids(stats.settled)}\n`
+  + `  REGRESSED (recorded fixed, reported again): ${stats.regressed.length}${ids(stats.regressed)}\n`);
