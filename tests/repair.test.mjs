@@ -66,6 +66,62 @@ test('an id absent from the briefing is unresolved, reported, and left untouched
   }
 });
 
+test('a ruling on a group the briefing proposed passes through untouched', () => {
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{ id: 'F1', title: 'Canonical Title', reporter: 'auditor' }],
+      groups: [{ id: 'G1', members: ['F1'] }],
+    }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward', validate: [], challenge: [], added: [],
+      groups: [{ id: 'G1', ruling: 'one', reason: 'one guard, seen twice' }],
+    }));
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    const repaired = JSON.parse(readFileSync(path.join(dir, 'round2-steward.repaired.json'), 'utf-8'));
+    assert.deepEqual(repaired.groups, [{ id: 'G1', ruling: 'one', reason: 'one guard, seen twice' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a ruling on a group the briefing never proposed is unresolved and reported', () => {
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: [], groups: [{ id: 'G1', members: [] }] }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward', validate: [], challenge: [], added: [],
+      groups: [{ id: 'G7', ruling: 'one', reason: 'invented' }],
+    }));
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /steward\/groups: unresolvable id "G7"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a briefing predating root-cause groups still repairs, rather than crashing on a missing key', () => {
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: [{ id: 'F1', title: 'T', reporter: 'auditor' }] }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward', validate: [{ id: 'F1', title: 'T', from: 'auditor' }], challenge: [], added: [],
+    }));
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+    assert.equal(r.status, 0, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('missing required arguments is a usage error', () => {
   const r = runRepair(['--briefing', 'x.json']);
   assert.equal(r.status, 2);
