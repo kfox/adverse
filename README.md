@@ -264,7 +264,8 @@ One test is load-bearing rather than incidental: [`tests/prompts.test.mjs`](test
 ```
 src/                          # Shared core, used by both CLI and Skill
   personas.mjs                # Four persona system prompts + the lane partition
-  prompts.mjs                 # Round-1/2/verify prompts, the kind axis, validators
+  taxonomy.mjs                # The kind axis + severity rank, shared with no prompt prose
+  prompts.mjs                 # Round-1/2/verify prompts, validators
   parse.mjs                   # JSON extraction across every wrapper shape
   collect.mjs                 # Directory walk + git-diff source collection
   runner.mjs                  # Subprocess agent invocation + parallel orchestration

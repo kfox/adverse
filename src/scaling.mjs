@@ -55,7 +55,7 @@
 // unscaled choice (see kfox/adverse#12).
 
 import { DEFAULT_PERSONAS, PERSONAS } from './personas.mjs';
-import { ADVISORY_KINDS } from './prompts.mjs';
+import { ADVISORY_KINDS } from './taxonomy.mjs';
 import { assessScope } from './scope.mjs';
 import { isBlocking } from './synthesis.mjs';
 

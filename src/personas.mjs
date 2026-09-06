@@ -2,7 +2,7 @@
 //
 // The differentiation is the lever that lets adverse run on a single model, so
 // a persona earns its slot only by owning ground no other persona covers. The
-// axis is `kind`, from src/prompts.mjs, and the rule is that no kind may be
+// axis is `kind`, from src/taxonomy.mjs, and the rule is that no kind may be
 // unclaimed — NOT that each has a single owner. Kinds are shared, deliberately:
 //
 //   defect      Auditor · Adversary (only with a working attack)
