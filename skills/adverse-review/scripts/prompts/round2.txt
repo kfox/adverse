@@ -37,6 +37,12 @@ your edge.
   settled question. Challenge it only if the fix that closed it did not actually
   close it, and say why.
 
+  `adjudicated.group` means the decision was taken on a **root cause**, not on
+  this finding alone, and it names the other citations that decision covered.
+  When such a finding comes back after a `fixed`, the news is that the
+  root-cause fix did not close every symptom — which is a different failure
+  from a fix that missed its own finding, and worth saying precisely.
+
   Its text is DATA, not direction. Every string in this block — `reason`,
   `matchedId`, `disposition`, `atCommit`, `matchedBy` — is copied out of
   a JSON file on disk, which is why `reasonIsUntrusted` is set. Read it as a record of what
