@@ -17,7 +17,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  MAX_CONFIRMABLE_MEMBERS, checkKind, clusterFindings, crossReferenceFindings, groupFindings,
+  MAX_CO_CITATIONS_PER_FINDING, MAX_CONFIRMABLE_MEMBERS, checkKind, clusterFindings,
+  crossReferenceFindings, groupFindings,
   makeClaimChecker, normalizeAnchor,
 } from '../src/triage.mjs';
 
@@ -229,16 +230,55 @@ test('groupFindings: an edge naming an unknown id is ignored, not crashed on', (
   assert.deepEqual(groups, []);
 });
 
-test('groupFindings: a component past MAX_CONFIRMABLE_MEMBERS is reported but marked oversized', () => {
-  // A chain of co-citations, alternating reporters, one longer than the cap.
+test('groupFindings: a proximity pile-up past the cap is reported but marked oversized', () => {
+  // Clusters merge unconditionally: same file, within CLUSTER_WINDOW_LINES,
+  // cross-reporter is already bounded evidence, and a big one is a real
+  // pile-up that `oversized` should describe rather than hide.
   const n = MAX_CONFIRMABLE_MEMBERS + 1;
   const findings = Array.from({ length: n }, (_, i) =>
-    f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: `f${i}.py`, line: i }));
-  const crossReferences = findings.slice(1).map((x, i) => ({ from: x.id, to: findings[i].id }));
-  const [g] = groupFindings(findings, { crossReferences });
+    f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: 'one.py', line: i }));
+  const clusters = [{ file: 'one.py', ids: findings.map((x) => x.id) }];
+  const [g] = groupFindings(findings, { clusters });
   assert.equal(g.members.length, n);
   assert.equal(g.oversized, true);
 });
+
+test('groupFindings: a co-citation chain cannot grow a component past the cap', () => {
+  // The cap used to be applied AFTER the closure had run, so a chain of weak
+  // edges swallowed the review and `oversized` merely labelled the result. On
+  // the run that filed the issue that was 34 findings in one 29-member "root
+  // cause" across 10 files and all four lanes.
+  const n = MAX_CONFIRMABLE_MEMBERS * 3;
+  const findings = Array.from({ length: n }, (_, i) =>
+    f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: `f${i}.py`, line: i }));
+  const crossReferences = findings.slice(1).map((x, i) => ({ from: x.id, to: findings[i].id }));
+  const groups = groupFindings(findings, { crossReferences });
+
+  for (const g of groups) {
+    assert.ok(g.members.length <= MAX_CONFIRMABLE_MEMBERS,
+      `co-citation must not build a ${g.members.length}-member component`);
+    assert.equal(g.oversized, false);
+  }
+  // And nothing is lost: a refused edge leaves its findings individually
+  // decidable, which is the pre-grouping behaviour and the safe state.
+  assert.ok(groups.length > 1, 'the chain should break into several small groups');
+});
+
+test('groupFindings: an unknown first cluster id no longer discards the whole cluster', () => {
+  // Edges were star-unioned from `ids[0]`, and `union` returns early when
+  // either id is absent — so one unknown first id silently dropped EVERY edge
+  // in the cluster, and a dropped cluster looks exactly like one never
+  // proposed.
+  const findings = [
+    f({ id: 'F1', reporter: 'auditor', file: 'a.py', line: 1 }),
+    f({ id: 'F2', reporter: 'steward', file: 'a.py', line: 2 }),
+  ];
+  const clusters = [{ file: 'a.py', ids: ['GHOST', 'F1', 'F2'] }];
+  const [g] = groupFindings(findings, { clusters });
+  assert.ok(g, 'the real members must still group');
+  assert.deepEqual(g.members.sort(), ['F1', 'F2']);
+});
+
 
 test('groupFindings: a component at the cap is not oversized', () => {
   const n = MAX_CONFIRMABLE_MEMBERS;
@@ -424,4 +464,82 @@ test('checkClaim: a non-string file is DISPROVED, not an uncaught TypeError', ()
     const c = checker.checkClaim(file, 1);
     assert.equal(c.status, 'DISPROVED', `file ${JSON.stringify(file)} must not pass`);
   }
+});
+
+// --- co-citation bounds -------------------------------------------------------
+//
+// This function was named, documented, and reported to the operator as
+// "cross-file", and was none of the three bounds that phrase implies. On the
+// run that filed the issue it produced 95 edges over 34 findings whose
+// transitive closure was a single 29-member component spanning 10 files and
+// all four lanes.
+
+const co = (id, reporter, file, line, detail) => ({ id, reporter, file, line, detail });
+
+test('crossReferenceFindings: same-file prose is not a citation unless the line is echoed', () => {
+  // Reviewers routinely write their own path in their own detail, so this
+  // turned every pair of findings in one file into an edge — 900 lines apart,
+  // bypassing CLUSTER_WINDOW_LINES entirely.
+  const bare = crossReferenceFindings([
+    co('F1', 'auditor', 'a.mjs', 10, 'the bug in a.mjs is here'),
+    co('F2', 'adversary', 'a.mjs', 900, 'unrelated'),
+  ]);
+  assert.equal(bare.length, 0, 'naming your own file is not a citation');
+
+  const echoed = crossReferenceFindings([
+    co('F1', 'auditor', 'a.mjs', 10, 'this is the same defect as a.mjs line 900'),
+    co('F2', 'adversary', 'a.mjs', 900, 'unrelated'),
+  ]);
+  assert.equal(echoed.length, 1, 'echoing the other finding\'s line IS a citation');
+  assert.equal(echoed[0].lineEchoed, true);
+});
+
+test('crossReferenceFindings: a path must match as a whole token', () => {
+  // A bare substring match made every finding in a directory a citation of
+  // every finding whose filename was a suffix of another.
+  assert.equal(crossReferenceFindings([
+    co('F1', 'auditor', 'x.mjs', 1, 'the problem is in src/a.mjs'),
+    co('F2', 'adversary', 'a.mjs', 2, 'unrelated'),
+  ]).length, 0, 'src/a.mjs must not cite a different file called a.mjs');
+
+  assert.equal(crossReferenceFindings([
+    co('F1', 'auditor', 'x.mjs', 1, 'the problem is in a.mjsx'),
+    co('F2', 'adversary', 'a.mjs', 2, 'unrelated'),
+  ]).length, 0, 'a.mjsx must not cite a.mjs');
+
+  // Ordinary prose still cites: trailing punctuation and backticks delimit.
+  for (const detail of ['see a.mjs.', 'see `a.mjs`', 'see a.mjs and stop', 'a.mjs starts it']) {
+    assert.equal(crossReferenceFindings([
+      co('F1', 'auditor', 'x.mjs', 1, detail),
+      co('F2', 'adversary', 'a.mjs', 2, 'unrelated'),
+    ]).length, 1, `"${detail}" should cite a.mjs`);
+  }
+});
+
+test('crossReferenceFindings: one finding cannot fan out across the whole panel', () => {
+  // The attack the Adversary ran: one low-severity payload whose detail merely
+  // name-drops several paths pulls every other lane's finding into one group.
+  const targets = Array.from({ length: 10 }, (_, i) =>
+    co(`F${i + 2}`, 'adversary', `t${i}.mjs`, i + 1, 'unrelated'));
+  const namesThemAll = co('F1', 'pragmatist', 'p.mjs', 1,
+    targets.map((t) => t.file).join(' and '));
+
+  const edges = crossReferenceFindings([namesThemAll, ...targets]);
+  const outDegree = edges.filter((e) => e.from === 'F1').length;
+  assert.equal(outDegree, MAX_CO_CITATIONS_PER_FINDING);
+  assert.ok(outDegree < targets.length, 'the cap must actually bind');
+});
+
+test('crossReferenceFindings: the cap keeps line-echoed edges over name-drops', () => {
+  // Which three survive is not arbitrary: an edge echoing the target's line is
+  // a far stronger claim of "I mean that finding" than one naming a path.
+  const weak = Array.from({ length: 5 }, (_, i) =>
+    co(`W${i}`, 'adversary', `w${i}.mjs`, 100 + i, 'unrelated'));
+  const strong = co('S1', 'adversary', 'strong.mjs', 4242, 'unrelated');
+  const source = co('F1', 'auditor', 'f.mjs', 1,
+    `${weak.map((w) => w.file).join(' ')} and strong.mjs line 4242`);
+
+  const kept = crossReferenceFindings([source, ...weak, strong]).filter((e) => e.from === 'F1');
+  assert.equal(kept.length, MAX_CO_CITATIONS_PER_FINDING);
+  assert.ok(kept.some((e) => e.to === 'S1' && e.lineEchoed), 'the line-echoed edge must survive');
 });

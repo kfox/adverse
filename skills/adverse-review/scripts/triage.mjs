@@ -47,8 +47,10 @@ const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
 const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
-const { CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings, groupFindings,
-        makeClaimChecker, normalizeAnchor } = await importFromSrc('triage.mjs');
+const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, checkKind, clusterFindings,
+        crossReferenceFindings, groupFindings, makeClaimChecker, normalizeAnchor } =
+  await importFromSrc('triage.mjs');
+
 
 
 // `allowPositionals` is not optional here. `--round1 run/round1-*.json` is the
@@ -272,7 +274,9 @@ process.stdout.write(
   + `  malformed anchors coerced away (field kept null): ${rejectedAnchors.length}`
   + `${rejectedAnchors.length ? ` (${rejectedAnchors.join(', ')})` : ''}\n`
 
-  + `  cross-file co-citations (candidate shared root cause): ${crossReferences.length}`
+  + `  co-citations (cross-file, or same-file with the line echoed; max`
+  + ` ${MAX_CO_CITATIONS_PER_FINDING}/finding): ${crossReferences.length}`
+
   + `${crossReferences.length ? ` (${crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
   + `  candidate root causes (proposed, for round 2 to confirm or split): ${groups.length}`
   + `${groups.length ? ` (${groups.map((g) => `${g.id}=${g.members.join('+')}${g.oversized ? ' OVERSIZED' : ''}`).join(', ')})` : ''}\n`

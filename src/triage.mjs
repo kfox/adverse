@@ -132,11 +132,64 @@ export function clusterFindings(findings, { windowLines = CLUSTER_WINDOW_LINES }
   return clusters;
 }
 
-// Cross-file co-citation. Proximity cannot see two personas describing one
-// root cause that spans files — a docstring in one file contradicting a
-// design note in another. If finding A's prose cites finding B's file (and,
-// when both name lines, B's line too), that is a candidate same-root-cause
-// edge that the title join and the line clustering would both drop.
+// How many co-citation edges one finding may emit. Unbounded, a single
+// `detail` that name-drops several paths fanned out across the whole panel:
+// on the run that filed kfox/adverse#38, F31 alone emitted 15 out-edges and
+// F24 emitted 14, purely from prose naming filenames, and the transitive
+// closure of the result was a 29-member "root cause" spanning 10 files and all
+// four lanes — which is not a root cause, it is the review. The strongest
+// three claims are kept; the rest were never evidence of a shared cause.
+export const MAX_CO_CITATIONS_PER_FINDING = 3;
+
+// Bounds the substring scan per detail. A payload is model-written and its
+// length is not otherwise capped, and this scan runs once per distinct cited
+// path.
+const MAX_SCANNED_DETAIL_CHARS = 20_000;
+
+// A path token is delimited by anything that cannot continue a path. `.` is
+// deliberately NOT a continuation character, so "…in a.mjs." matches while
+// "a.mjsx" and "src/a.mjs" (searching for `a.mjs`) do not — the second is the
+// case that matters, since a bare substring match made every finding in a
+// directory a citation of every other.
+const PATH_CHAR = /[A-Za-z0-9_/\\-]/;
+
+// Whether `detail` names `file` as a whole path token rather than merely
+// containing its characters somewhere.
+function citesPath(detail, file) {
+  const text = detail.length > MAX_SCANNED_DETAIL_CHARS
+    ? detail.slice(0, MAX_SCANNED_DETAIL_CHARS) : detail;
+  let at = text.indexOf(file);
+  while (at !== -1) {
+    const before = at === 0 ? '' : text[at - 1];
+    const after = text[at + file.length] ?? '';
+    if (!PATH_CHAR.test(before) && !PATH_CHAR.test(after)) return true;
+    at = text.indexOf(file, at + 1);
+  }
+  return false;
+}
+
+// Co-citation. Proximity cannot see two personas describing one root cause
+// that spans files — a docstring in one file contradicting a design note in
+// another. If finding A's prose cites finding B's file as a path token, that
+// is a candidate same-root-cause edge that the title join and the line
+// clustering would both drop.
+//
+// Three bounds, each of which this function was missing when it was named,
+// documented and reported to the operator as "cross-file":
+//
+//   1. It was not cross-file. The filter excluded same-ID, same-reporter and
+//      file-less pairs and never compared `a.file` to `b.file`, and reviewers
+//      routinely write their own path in their own prose — so two findings in
+//      one file 900 lines apart became an edge, bypassing CLUSTER_WINDOW_LINES,
+//      the bound the proximity clusterer exists to enforce. A same-file pair
+//      now has to echo the other finding's LINE, which is the reviewer
+//      actually pointing at it rather than naming the file they are already in.
+//   2. It was a bare substring match. Now a whole path token.
+//   3. It had no out-degree cap. Now MAX_CO_CITATIONS_PER_FINDING.
+//
+// Candidates are grouped by target FILE rather than by target finding, so the
+// substring scan runs once per distinct path instead of once per pair.
+
 // Every integer appearing in `text`, as a set. This replaces a
 // `new RegExp(`\\b${b.line}\\b`)` built from reviewer-supplied data: `line`
 // is not type-checked at the source, so `"line": "(20"` threw
@@ -149,28 +202,44 @@ function numbersIn(text) {
 }
 
 export function crossReferenceFindings(findings) {
-  const crossReferences = [];
   const numbersByFinding = new Map(
     findings.map((f) => [f.id, numbersIn(typeof f.detail === 'string' ? f.detail : '')]),
   );
 
+  const byFile = new Map();
+  for (const b of findings) {
+    if (typeof b.file !== 'string' || !b.file) continue;
+    if (!byFile.has(b.file)) byFile.set(b.file, []);
+    byFile.get(b.file).push(b);
+  }
+
+  const crossReferences = [];
   for (const a of findings) {
     if (typeof a.detail !== 'string' || !a.detail) continue;
-    for (const b of findings) {
-      if (a.id === b.id || a.reporter === b.reporter || typeof b.file !== 'string' || !b.file) continue;
-      if (!a.detail.includes(b.file)) continue;
-      const lineEchoed = isAnchorLine(b.line) && numbersByFinding.get(a.id).has(b.line);
+    const numbers = numbersByFinding.get(a.id);
 
-      crossReferences.push({
-        from: a.id,
-        to: b.id,
-        file: b.file,
-        lineEchoed,
-        reporters: [a.reporter, b.reporter],
-      });
+    const candidates = [];
+    for (const [file, targets] of byFile) {
+      if (!citesPath(a.detail, file)) continue;
+      for (const b of targets) {
+        if (a.id === b.id || a.reporter === b.reporter) continue;
+        const lineEchoed = isAnchorLine(b.line) && numbers.has(b.line);
+        // Naming the file you are already in is not a citation of anything.
+        // Echoing the other finding's line in it is — that is the reviewer
+        // pointing at the finding rather than at their own location.
+        if (a.file === b.file && !lineEchoed) continue;
+        candidates.push({ from: a.id, to: b.id, file, lineEchoed, reporters: [a.reporter, b.reporter] });
+      }
     }
+
+    // Strongest first, then the order they were gathered in — deterministic,
+    // because a candidate set that reordered between runs would change which
+    // edges survive the cap, and grouping rides on these.
+    candidates.sort((x, y) => (y.lineEchoed ? 1 : 0) - (x.lineEchoed ? 1 : 0));
+    crossReferences.push(...candidates.slice(0, MAX_CO_CITATIONS_PER_FINDING));
   }
   return crossReferences;
+
 }
 
 // How many citations a proposed root cause may carry and still be a candidate
@@ -226,23 +295,59 @@ function anchorMember(members, { advisoryKinds }) {
 // speaks with one voice.
 export function groupFindings(findings, { clusters = [], crossReferences = [], advisoryKinds } = {}) {
   const parent = new Map(findings.map((f) => [f.id, f.id]));
+  const size = new Map(findings.map((f) => [f.id, 1]));
 
   const find = (x) => {
     let root = x;
+
     while (parent.get(root) !== root) root = parent.get(root);
     while (parent.get(x) !== root) { const next = parent.get(x); parent.set(x, root); x = next; }
     return root;
   };
-  const union = (a, b) => {
-    if (!parent.has(a) || !parent.has(b)) return;
+  // `limit` refuses a merge that would push the component past a size, instead
+  // of merging and labelling the result. Returns whether it merged.
+  const union = (a, b, limit = Infinity) => {
+    if (!parent.has(a) || !parent.has(b)) return false;
     const [ra, rb] = [find(a), find(b)];
-    if (ra !== rb) parent.set(rb, ra);
+    if (ra === rb) return false;
+    if (size.get(ra) + size.get(rb) > limit) return false;
+    parent.set(rb, ra);
+    size.set(ra, size.get(ra) + size.get(rb));
+    return true;
   };
 
+  // Proximity edges merge unconditionally: a cluster is same-file, within
+  // CLUSTER_WINDOW_LINES, and cross-reporter, so it is already bounded
+  // evidence, and a big one is a genuine pile-up that `oversized` should
+  // describe rather than hide.
+  //
+  // The ids are chained rather than starred from `ids[0]`, because `union`
+  // does nothing when either id is absent from `parent` — so anchoring every
+  // edge on one id meant an unknown first id silently discarded EVERY edge in
+  // that cluster, and a dropped cluster looks exactly like one never proposed.
   for (const c of clusters) {
-    for (const id of (c.ids ?? []).slice(1)) union(c.ids[0], id);
+    const ids = c.ids ?? [];
+    for (let i = 1; i < ids.length; i += 1) union(ids[i - 1], ids[i]);
   }
-  for (const x of crossReferences) union(x.from, x.to);
+
+  // Co-citation edges are size-gated, because they are unbounded evidence: one
+  // finding's prose naming another's file says far less than two reporters
+  // landing on the same lines, and transitivity is greedy. The cap used to be
+  // applied only AFTER the closure had run, so a chain of weak edges still
+  // swallowed the review and `oversized` merely labelled the result — 34
+  // findings collapsed into one 29-member "root cause" spanning 10 files and
+  // all four lanes. Bounding the closure itself is what keeps a group small
+  // enough to be a root cause at all.
+  //
+  // Strongest first, so the edges that survive the bound are the best evidence
+  // available rather than whichever happened to be enumerated first. A refused
+  // edge is not lost: it is still reported in `crossReferences` for the
+  // operator to read, it simply does not collapse two findings into one
+  // disposition.
+  const byStrength = [...crossReferences]
+    .sort((x, y) => (y.lineEchoed ? 1 : 0) - (x.lineEchoed ? 1 : 0));
+  for (const x of byStrength) union(x.from, x.to, MAX_CONFIRMABLE_MEMBERS);
+
 
   const components = new Map();
   for (const f of findings) {
