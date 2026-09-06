@@ -16,7 +16,10 @@ import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSy
 import os from 'node:os';
 import path from 'node:path';
 
-import { checkKind, clusterFindings, crossReferenceFindings, makeClaimChecker } from '../src/triage.mjs';
+import {
+  MAX_CONFIRMABLE_MEMBERS, checkKind, clusterFindings, crossReferenceFindings, groupFindings,
+  makeClaimChecker,
+} from '../src/triage.mjs';
 
 // --- checkKind ---------------------------------------------------------------
 
@@ -130,6 +133,115 @@ test('crossReferenceFindings: a reviewer citing its own file is not a cross-refe
     f({ id: 'F2', reporter: 'auditor', file: 'app.py', detail: 'see app.py' }),
   ];
   assert.equal(crossReferenceFindings(findings).length, 0);
+});
+
+// --- groupFindings ------------------------------------------------------------
+
+const ADVISORY = new Set(['design']);
+
+// Two clusters sharing a finding, plus a co-citation reaching a third file:
+// the transitive shape that left three findings to remediate separately.
+const chained = () => {
+  const findings = [
+    f({ id: 'F1', reporter: 'auditor', file: 'a.py', line: 10, severity: 'warning', kind: 'defect',
+        title: 'guard is unreachable' }),
+    f({ id: 'F2', reporter: 'adversary', file: 'a.py', line: 14, severity: 'critical', kind: 'defect',
+        title: 'the unreachable guard is an auth bypass' }),
+    f({ id: 'F3', reporter: 'steward', file: 'docs/a.md', line: 3, severity: 'info', kind: 'contract',
+        title: 'docs still promise the guard', detail: 'a.py line 10 no longer does this' }),
+  ];
+  return {
+    findings,
+    clusters: clusterFindings(findings),
+    crossReferences: crossReferenceFindings(findings),
+  };
+};
+
+test('groupFindings: a cluster and a co-citation chain into one root cause', () => {
+  const { findings, clusters, crossReferences } = chained();
+  const groups = groupFindings(findings, { clusters, crossReferences, advisoryKinds: ADVISORY });
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0].members, ['F1', 'F2', 'F3']);
+  assert.deepEqual(groups[0].via, ['cluster', 'co-citation']);
+});
+
+test('groupFindings: the canonical statement is the worst-severity member', () => {
+  const { findings, clusters, crossReferences } = chained();
+  const [g] = groupFindings(findings, { clusters, crossReferences, advisoryKinds: ADVISORY });
+  assert.equal(g.title, 'the unreachable guard is an auth bypass');
+  assert.equal(g.severity, 'critical');
+});
+
+test('groupFindings: an advisory member never becomes the canonical statement', () => {
+  const findings = [
+    f({ id: 'F1', reporter: 'pragmatist', line: 10, severity: 'warning', kind: 'design', title: 'this module is doing too much' }),
+    f({ id: 'F2', reporter: 'auditor', line: 12, severity: 'warning', kind: 'defect', title: 'off-by-one in the bounds check' }),
+  ];
+  const [g] = groupFindings(findings, { clusters: clusterFindings(findings), advisoryKinds: ADVISORY });
+  assert.equal(g.title, 'off-by-one in the bounds check');
+});
+
+test('groupFindings: every member rides along as a citation with its own anchor', () => {
+  const { findings, clusters, crossReferences } = chained();
+  const [g] = groupFindings(findings, { clusters, crossReferences, advisoryKinds: ADVISORY });
+  assert.deepEqual(g.citations.map((c) => [c.id, c.reporter, c.kind, c.severity, c.file, c.line]), [
+    ['F1', 'auditor', 'defect', 'warning', 'a.py', 10],
+    ['F2', 'adversary', 'defect', 'critical', 'a.py', 14],
+    ['F3', 'steward', 'contract', 'info', 'docs/a.md', 3],
+  ]);
+  assert.deepEqual(g.files, ['a.py', 'docs/a.md']);
+  assert.deepEqual(g.kinds, ['defect', 'contract']);
+});
+
+test('groupFindings: reporters are distinct personas, so one lane cannot sound like three', () => {
+  // Three findings, two reporters: the auditor reported the same region twice.
+  const findings = [
+    f({ id: 'F1', reporter: 'auditor', line: 10 }),
+    f({ id: 'F2', reporter: 'auditor', line: 12 }),
+    f({ id: 'F3', reporter: 'steward', line: 14 }),
+  ];
+  const [g] = groupFindings(findings, { clusters: clusterFindings(findings) });
+  assert.equal(g.members.length, 3);
+  assert.deepEqual(g.reporters, ['auditor', 'steward']);
+});
+
+test('groupFindings: a lone finding is not a group', () => {
+  const findings = [f({ id: 'F1', reporter: 'auditor', line: 10 })];
+  assert.deepEqual(groupFindings(findings, { clusters: [], crossReferences: [] }), []);
+});
+
+test('groupFindings: no edges means no groups, however many findings', () => {
+  const findings = [
+    f({ id: 'F1', reporter: 'auditor', file: 'a.py', line: 10 }),
+    f({ id: 'F2', reporter: 'steward', file: 'b.py', line: 900 }),
+  ];
+  assert.deepEqual(groupFindings(findings, { clusters: [], crossReferences: [] }), []);
+});
+
+test('groupFindings: an edge naming an unknown id is ignored, not crashed on', () => {
+  const findings = [f({ id: 'F1', reporter: 'auditor' }), f({ id: 'F2', reporter: 'steward' })];
+  const groups = groupFindings(findings, { crossReferences: [{ from: 'F9', to: 'F1' }] });
+  assert.deepEqual(groups, []);
+});
+
+test('groupFindings: a component past MAX_CONFIRMABLE_MEMBERS is reported but marked oversized', () => {
+  // A chain of co-citations, alternating reporters, one longer than the cap.
+  const n = MAX_CONFIRMABLE_MEMBERS + 1;
+  const findings = Array.from({ length: n }, (_, i) =>
+    f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: `f${i}.py`, line: i }));
+  const crossReferences = findings.slice(1).map((x, i) => ({ from: x.id, to: findings[i].id }));
+  const [g] = groupFindings(findings, { crossReferences });
+  assert.equal(g.members.length, n);
+  assert.equal(g.oversized, true);
+});
+
+test('groupFindings: a component at the cap is not oversized', () => {
+  const n = MAX_CONFIRMABLE_MEMBERS;
+  const findings = Array.from({ length: n }, (_, i) =>
+    f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: `f${i}.py`, line: i }));
+  const crossReferences = findings.slice(1).map((x, i) => ({ from: x.id, to: findings[i].id }));
+  const [g] = groupFindings(findings, { crossReferences });
+  assert.equal(g.oversized, false);
 });
 
 // --- makeClaimChecker ---------------------------------------------------------

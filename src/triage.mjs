@@ -115,6 +115,129 @@ export function crossReferenceFindings(findings) {
   return crossReferences;
 }
 
+// How many citations a proposed root cause may carry and still be a candidate
+// for round 2 to confirm as ONE thing.
+//
+// Grouping is a transitive closure, and transitivity is greedy: 41 co-citation
+// edges over 34 findings (the run that opened kfox/adverse#16) can chain into
+// a single component that is not one root cause but the whole review. A group
+// that large is still reported — the edges are real and seeing them is the
+// point — but it is marked `oversized` and cannot be confirmed, so one
+// reviewer answering "one" cannot collapse most of a review into a single
+// disposition. Oversized fails toward MORE decisions, which is the direction
+// this tool always fails in.
+export const MAX_CONFIRMABLE_MEMBERS = 8;
+
+const SEVERITY_ORDER = ['critical', 'warning', 'info'];
+
+function severityIndex(severity) {
+  const at = SEVERITY_ORDER.indexOf(severity);
+  return at === -1 ? SEVERITY_ORDER.length : at;
+}
+
+// Which member's words become the group's canonical statement: worst severity
+// first, then a blocking kind over an advisory one, then the order triage
+// assigned. Deterministic on purpose — a canonical title that moved between
+// runs would break the title join every downstream edge rides on.
+function anchorMember(members, { advisoryKinds }) {
+  const advisory = (f) => (advisoryKinds?.has(f.kind) ? 1 : 0);
+  return [...members]
+    .map((f, i) => ({ f, i }))
+    .sort((a, b) => severityIndex(a.f.severity) - severityIndex(b.f.severity)
+      || advisory(a.f) - advisory(b.f)
+      || a.i - b.i)[0].f;
+}
+
+// Promote the cluster and co-citation edges into candidate ROOT-CAUSE groups.
+//
+// Both edge kinds already answer "these two reporters may be describing one
+// thing" — clusters by position, co-citations by one finding's prose naming
+// another's file. What neither does is close the relation: A~B and B~C left
+// three separate findings to remediate, decide, and ledger, and the fixer
+// re-derived the shared cause by hand every time. Connected components close
+// it, and the citation fanout keeps every member's own reporter, kind,
+// severity and anchor so nothing is lost to the merge.
+//
+// This side only PROPOSES. Whether a group is one defect or several is a
+// judgment about the code, and the deterministic layer has no business making
+// it — round 2 rules, and until it does the members stay individually
+// reported and individually decidable. Confidence is likewise untouched:
+// every group here spans at least two reporters (a cluster needs two, a
+// co-citation is cross-reporter by construction), but `reporters` counts
+// DISTINCT personas so a lane that reported one thing three times still
+// speaks with one voice.
+export function groupFindings(findings, { clusters = [], crossReferences = [], advisoryKinds } = {}) {
+  const parent = new Map(findings.map((f) => [f.id, f.id]));
+
+  const find = (x) => {
+    let root = x;
+    while (parent.get(root) !== root) root = parent.get(root);
+    while (parent.get(x) !== root) { const next = parent.get(x); parent.set(x, root); x = next; }
+    return root;
+  };
+  const union = (a, b) => {
+    if (!parent.has(a) || !parent.has(b)) return;
+    const [ra, rb] = [find(a), find(b)];
+    if (ra !== rb) parent.set(rb, ra);
+  };
+
+  for (const c of clusters) {
+    for (const id of (c.ids ?? []).slice(1)) union(c.ids[0], id);
+  }
+  for (const x of crossReferences) union(x.from, x.to);
+
+  const components = new Map();
+  for (const f of findings) {
+    const root = find(f.id);
+    if (!components.has(root)) components.set(root, []);
+    components.get(root).push(f);
+  }
+
+  // Which edge kinds built this component, read back once the forest has
+  // settled. Asking mid-merge attributes an edge to a root that a later union
+  // replaces, and the answer is what tells a reviewer whether the machine saw
+  // two findings in one place or two files naming each other.
+  const edgeKinds = (ids) => {
+    const has = (id) => ids.has(id);
+    const kinds = [];
+    if (clusters.some((c) => (c.ids ?? []).some(has))) kinds.push('cluster');
+    if (crossReferences.some((x) => has(x.from) && has(x.to))) kinds.push('co-citation');
+    return kinds;
+  };
+
+  const groups = [];
+  for (const members of components.values()) {
+    if (members.length < 2) continue;
+    const anchor = anchorMember(members, { advisoryKinds });
+    const distinct = (xs) => [...new Set(xs.filter((x) => x !== null && x !== undefined))];
+    groups.push({
+      id: `G${groups.length + 1}`,
+      title: anchor.title,
+      severity: SEVERITY_ORDER.find((s) => members.some((f) => f.severity === s))
+        ?? anchor.severity ?? null,
+      kinds: distinct(members.map((f) => f.kind)),
+      files: distinct(members.map((f) => f.file)),
+      reporters: distinct(members.map((f) => f.reporter)),
+      members: members.map((f) => f.id),
+      via: edgeKinds(new Set(members.map((f) => f.id))),
+      // The fanout. Every member keeps its own reporter, kind, severity and
+      // anchor: a group is a way to read and decide N findings at once, never
+      // a replacement for them.
+      citations: members.map((f) => ({
+        id: f.id,
+        reporter: f.reporter,
+        kind: f.kind ?? null,
+        severity: f.severity ?? null,
+        file: f.file ?? null,
+        line: f.line ?? null,
+        title: f.title,
+      })),
+      oversized: members.length > MAX_CONFIRMABLE_MEMBERS,
+    });
+  }
+  return groups;
+}
+
 // Claim-checking needs the repo root and the diff base, so it is built by a
 // factory rather than taking them as parameters on every call — the same
 // shape trace.mjs's `makeAnchorTracer` uses for the same reason.
