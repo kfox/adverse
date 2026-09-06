@@ -417,6 +417,46 @@ test('--plan is accepted for --round2, and still enforces the roster there', () 
   }
 });
 
+test('the round-2 roster gate actually refuses an unplanned lane', () => {
+  // The test above passes with or without the gate — its plan has no split
+  // lane, so the pre-fix "--plan is refused for --round2" branch never fired
+  // either. This is the one that fails without the round-2 roster check.
+  const dir = freshTmp();
+  try {
+    const a = review(dir, 'auditor');
+    const s = review(dir, 'steward');
+    const plan = writePlan(dir, [
+      { persona: 'auditor', run: true, agents: 1, reason: 'runs' },
+      { persona: 'steward', run: false, agents: 0, reason: 'not run' },
+    ]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round2', a, s, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 1, 'a round-2 payload from a lane the plan did not run must be refused');
+    assert.match(r.stderr, /recorded 'steward' as not run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the Pragmatist missing from a round-2 combine is not warned about', () => {
+  // It never cross-reviews by design, so warning every single run is how a
+  // real warning gets skimmed past.
+  const dir = freshTmp();
+  try {
+    const a = review(dir, 'auditor');
+    const plan = writePlan(dir, [
+      { persona: 'auditor', run: true, agents: 1, reason: 'runs' },
+      { persona: 'pragmatist', run: true, agents: 1, reason: 'runs in round 1' },
+    ]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round2', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /pragmatist/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('--merge-personas is still refused for --round2 even alongside --plan', () => {
   const dir = freshTmp();
   try {

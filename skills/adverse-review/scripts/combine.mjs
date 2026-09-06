@@ -111,7 +111,10 @@ for (const path of inputs) {
   }
   if (notRun?.has(payload.persona)) {
     process.stderr.write(`combine: ${path}: the plan recorded '${payload.persona}' as not run,`
-      + ' so a payload from it is a stale file or a spoof, not a reviewer\n');
+      + ' so a payload from it is a stale file or a spoof, not a reviewer.\n'
+      + '  If you deliberately ran this lane anyway (SKILL.md Phase 1 allows overriding the'
+      + ' plan for a thorough pass), the plan is the thing that is out of date: regenerate'
+      + ' plan.json, or drop --plan and pass --merge-personas for any split lane.\n');
     process.exit(1);
   }
 
@@ -156,8 +159,14 @@ for (const p of mergePersonas) {
 // rather than refused: the Pragmatist legitimately runs in round 1 and not in
 // round 2, so silence is not always a failure — but it is never something the
 // run should discover by noticing a missing row.
+// Round 2 spawns one agent per persona EXCEPT the Pragmatist, whose findings
+// are advisory and which never cross-reviews — so its absence from a round-2
+// combine is the design working, not a lane that failed. Warning about it on
+// every single run is how a real warning gets skimmed past.
+const CROSS_REVIEWS = (p) => !(hasRound2 && p === 'pragmatist');
+
 if (ranPersonas) {
-  const silent = ranPersonas.filter((p) => !(p in combined));
+  const silent = ranPersonas.filter((p) => CROSS_REVIEWS(p) && !(p in combined));
 
   if (silent.length) {
     process.stderr.write(`combine: the plan ran ${silent.join(', ')} but no payload arrived.`

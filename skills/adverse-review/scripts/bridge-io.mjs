@@ -74,6 +74,15 @@ export function readPlanLanes(file, prefix) {
     process.stderr.write(`${prefix}: ${file}: not a plan.json (missing \`lanes\`)\n`);
     process.exit(2);
   }
+  // A lane that is not an object would throw on property access, and this
+  // bridge's contract is that exit 2 means "could not read an input" and never
+  // a stack trace. Same reason validate.mjs's phase map is null-prototype.
+  for (const l of plan.lanes) {
+    if (!l || typeof l !== 'object' || Array.isArray(l) || typeof l.persona !== 'string') {
+      process.stderr.write(`${prefix}: ${file}: a lane is not an object with a \`persona\` string\n`);
+      process.exit(2);
+    }
+  }
   return plan.lanes.map((l) => ({ persona: l.persona, agents: l.agents, run: l.run === true }));
 }
 
