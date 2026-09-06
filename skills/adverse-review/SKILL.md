@@ -369,13 +369,15 @@ node ${SKILL_DIR}/scripts/triage.mjs \
     --round1 "$ADVERSE_RUN"/round1-*.json \
     --repo . --base "$BASE" --gate "$GATE" \
     ${LEDGER:+--ledger "$LEDGER"} \
+    --plan "$ADVERSE_RUN/plan.json" \
     --out "$ADVERSE_RUN"/briefing.json
-    # one --merge-personas <persona> per lane the plan split in Phase 2 —
-    # same flag, same meaning, as the combine.mjs invocation in Phase 5.
-    # Without it, a second payload under a persona that was NOT split is
-    # refused rather than silently merged: that silent merge is what let a
-    # stale run's leftover files pass as extra reviewers before this guard
-    # existed.
+    # --plan reads which lanes Phase 1 split (agents > 1) straight out of
+    # plan.json, so the split roster is never retyped by hand — same flag,
+    # same meaning, as the combine.mjs invocation in Phase 5. Without it (or
+    # an explicit --merge-personas <persona>), a second payload under a
+    # persona that was NOT split is refused rather than silently merged: that
+    # silent merge is what let a stale run's leftover files pass as extra
+    # reviewers before this guard existed.
 ```
 
 What it gives you:
@@ -490,12 +492,13 @@ Then combine both rounds:
 
 ```bash
 node ${SKILL_DIR}/scripts/combine.mjs --round1 "$ADVERSE_RUN"/round1-*.json \
+    --plan "$ADVERSE_RUN/plan.json" \
     --out "$ADVERSE_RUN"/round1.json
-    # one --merge-personas <persona> per lane the plan split in Phase 2. The
-    # flag names the lane so the duplicate guard stays live everywhere else,
-    # and it requires BOTH halves: a missing half reviewed nothing, so combine
-    # refuses — re-run that half, or declare the lane --degraded. Without the
-    # flag a duplicate persona is an error (a file passed twice).
+    # --plan reads the split roster from plan.json, same as Phase 3's triage
+    # invocation. It requires BOTH halves of a named lane: a missing half
+    # reviewed nothing, so combine refuses — re-run that half, or declare the
+    # lane --degraded. Without --plan (or an explicit --merge-personas), a
+    # duplicate persona is an error (a file passed twice).
 node ${SKILL_DIR}/scripts/combine.mjs --round2 "$ADVERSE_RUN"/round2-*.repaired.json \
     --out "$ADVERSE_RUN"/round2.json
 ```
