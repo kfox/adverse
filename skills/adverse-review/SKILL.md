@@ -110,10 +110,14 @@ State the scope you picked in one sentence so the user can redirect.
 **Pick a run directory.** Use the session scratchpad when the harness provides
 one; otherwise `mktemp -d`. Everything below writes there. Never hardcode
 `/tmp/adverse-*` — parallel runs collide and the files outlive the session.
+Never reuse a fixed name inside the scratchpad either, for the same reason: a
+second invocation in the same session would glob the first run's leftover
+`round1-*.json` straight into its own briefing, with no error and no
+indication that had happened. `mktemp -d` on a template makes every run its
+own directory, whichever branch supplies the parent:
 
 ```bash
-ADVERSE_RUN="${SCRATCHPAD:-$(mktemp -d)}/adverse-run"
-mkdir -p "$ADVERSE_RUN"
+ADVERSE_RUN=$(mktemp -d "${SCRATCHPAD:-${TMPDIR:-/tmp}}/adverse-run.XXXXXX")
 ```
 
 **Run the repo's own gate first, and abort if it is red.** Whatever this repo
@@ -341,6 +345,12 @@ node ${SKILL_DIR}/scripts/triage.mjs \
     --repo . --base "$BASE" --gate "$GATE" \
     ${LEDGER:+--ledger "$LEDGER"} \
     --out "$ADVERSE_RUN"/briefing.json
+    # one --merge-personas <persona> per lane the plan split in Phase 2 —
+    # same flag, same meaning, as the combine.mjs invocation in Phase 5.
+    # Without it, a second payload under a persona that was NOT split is
+    # refused rather than silently merged: that silent merge is what let a
+    # stale run's leftover files pass as extra reviewers before this guard
+    # existed.
 ```
 
 What it gives you:

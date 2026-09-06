@@ -63,6 +63,7 @@ const { values, positionals } = parseArgs({
     gate:   { type: 'string' },
     ledger: { type: 'string' },
     out:    { type: 'string' },
+    'merge-personas': { type: 'string', multiple: true },
   },
   strict: true,
   allowPositionals: true,
@@ -70,7 +71,7 @@ const { values, positionals } = parseArgs({
 
 values.round1 = [...(values.round1 ?? []), ...positionals];
 if (!values.round1.length || !values.repo || !values.out) {
-  usage('Usage: triage.mjs --round1 a.json [--round1 b.json …] --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>');
+  usage('Usage: triage.mjs --round1 a.json [--round1 b.json …] [--merge-personas <persona>]… --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>');
 }
 
 const repo = path.resolve(values.repo);
@@ -95,6 +96,39 @@ for (const r of reviews) {
   if (!KNOWN_PERSONAS.has(r?.persona)) {
     process.stderr.write(`triage: unknown persona ${JSON.stringify(r?.persona)}`
       + ` (expected one of ${DEFAULT_PERSONAS.join(', ')})\n`);
+    process.exit(1);
+  }
+}
+
+// Same guard combine.mjs has always had, missing here until now: without it,
+// ANY duplicate persona — a genuinely split lane, a re-run whose old files
+// were never cleaned, a stale run's payload swept in by a wide glob — merges
+// silently via mergeSplitReviews below. That silent merge is exactly how a
+// contaminated briefing (8 reviewers instead of the planned 4) went undetected
+// in the run that motivated this check. `--merge-personas <persona>` names
+// the lane the plan actually split, so an undeclared duplicate is an error
+// instead of a phantom extra reviewer.
+const mergePersonas = new Set(values['merge-personas'] ?? []);
+for (const p of mergePersonas) {
+  if (!KNOWN_PERSONAS.has(p)) {
+    process.stderr.write(`triage: --merge-personas ${p}: not a persona (${DEFAULT_PERSONAS.join(', ')})\n`);
+    process.exit(2);
+  }
+}
+const countByPersona = new Map();
+for (const r of reviews) countByPersona.set(r.persona, (countByPersona.get(r.persona) ?? 0) + 1);
+for (const [persona, count] of countByPersona) {
+  if (mergePersonas.has(persona)) {
+    if (count !== 2) {
+      process.stderr.write(`triage: --merge-personas ${persona}: expected exactly 2 payloads for the split lane, got ${count}.`
+        + (count < 2
+          ? ' What is missing reviewed nothing — re-run it, or pass --degraded to synthesize.\n'
+          : ' Extra payloads mean a stale file or a double glob — clean the run directory.\n'));
+      process.exit(1);
+    }
+  } else if (count > 1) {
+    process.stderr.write(`triage: duplicate persona '${persona}' across inputs`
+      + ' (a deliberately split lane needs --merge-personas <persona>)\n');
     process.exit(1);
   }
 }

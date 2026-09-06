@@ -52,7 +52,7 @@ function makeRepo() {
   return dir;
 }
 
-function runTriage(dir, reviews) {
+function runTriage(dir, reviews, mergePersonas = []) {
   const files = reviews.map((r, i) => {
     const p = path.join(dir, `round1-${i}.json`);
     writeFileSync(p, JSON.stringify(r), 'utf-8');
@@ -62,6 +62,7 @@ function runTriage(dir, reviews) {
   const args = [TRIAGE];
   for (const f of files) args.push('--round1', f);
   args.push('--repo', dir, '--base', 'base', '--out', out);
+  for (const p of mergePersonas) args.push('--merge-personas', p);
   const stdout = execFileSync(process.execPath, args, { encoding: 'utf-8' });
   return { briefing: JSON.parse(readFileSync(out, 'utf-8')), stdout };
 }
@@ -407,7 +408,7 @@ test('a split lane\'s two payloads merge in briefing.verdicts — worse verdict,
   const { briefing } = runTriage(repo, [
     { persona: 'auditor', verdict: 'approve', summary: 'half A', findings: [] },
     { persona: 'auditor', verdict: 'reject', summary: 'half B', findings: [] },
-  ]);
+  ], ['auditor']);
   assert.equal(briefing.verdicts.auditor.verdict, 'reject');
   assert.match(briefing.verdicts.auditor.summary, /half A/);
   assert.match(briefing.verdicts.auditor.summary, /half B/);
@@ -417,8 +418,66 @@ test('the merged verdict does not depend on which half the shell globbed first',
   const { briefing } = runTriage(repo, [
     { persona: 'auditor', verdict: 'reject', summary: 'half B', findings: [] },
     { persona: 'auditor', verdict: 'approve', summary: 'half A', findings: [] },
-  ]);
+  ], ['auditor']);
   assert.equal(briefing.verdicts.auditor.verdict, 'reject');
+});
+
+test('an undeclared duplicate persona is refused, not silently merged', () => {
+  const dir = repo;
+  const files = [
+    { persona: 'auditor', verdict: 'approve', summary: 'half A', findings: [] },
+    { persona: 'auditor', verdict: 'reject', summary: 'half B', findings: [] },
+  ].map((r, i) => {
+    const p = path.join(dir, `round1-dup-${i}.json`);
+    writeFileSync(p, JSON.stringify(r));
+    return p;
+  });
+  const out = path.join(dir, 'briefing-dup.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', files[0], '--round1', files[1], '--repo', dir, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /duplicate persona 'auditor'/);
+  assert.match(r.stderr, /--merge-personas/);
+});
+
+test('a declared split lane missing its other half is refused, not treated as a solo review', () => {
+  const p = path.join(repo, 'round1-solo.json');
+  writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));
+  const out = path.join(repo, 'briefing-solo.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--merge-personas', 'auditor', '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /expected exactly 2 payloads/);
+  assert.match(r.stderr, /re-run it/);
+});
+
+test('a declared split lane with a stray third payload is refused, not merged three ways', () => {
+  const files = ['half A', 'half B', 'stray'].map((s, i) => {
+    const p = path.join(repo, `round1-triple-${i}.json`);
+    writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: s, findings: [] }));
+    return p;
+  });
+  const out = path.join(repo, 'briefing-triple.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, ...files.flatMap((f) => ['--round1', f]),
+      '--merge-personas', 'auditor', '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /expected exactly 2 payloads.*got 3/);
+  assert.match(r.stderr, /stale file or a double glob/);
+});
+
+test('--merge-personas naming a non-persona is a usage error, exit 2', () => {
+  const p = path.join(repo, 'round1-ok2.json');
+  writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));
+  const out = path.join(repo, 'briefing-ok2.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--merge-personas', 'referee', '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /not a persona/);
 });
 
 test('an unsplit lane\'s off-contract verdict is normalized in the briefing too', () => {
