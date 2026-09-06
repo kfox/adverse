@@ -391,6 +391,14 @@ What it gives you:
 - **Clusters** (same file, within 15 lines, different reporters) and
   **cross-file co-citations** (one finding's prose names another's file). These
   are candidate *one defect seen twice* — exactly the pairs a title join drops.
+- **Candidate root causes** (`groups`), the transitive closure of those two
+  edge sets. If A clusters with B and B's prose cites C, all three arrive as
+  one candidate — `G1`, `G2`, … — with a canonical statement and every member
+  attached as a citation that keeps its own reporter, kind, severity and
+  anchor. This is a *proposal*: round 2 rules on it (Phase 4), and until it
+  does, the members are reported and decided one at a time exactly as before.
+  A group marked `oversized` carries too many citations for one disposition to
+  be honest and will never collapse, however round 2 rules it.
 - **In-diff classification.** `inDiff: "outside"` is **annotated, never
   rejected**: a latent bug the change newly makes reachable lives in unchanged
   lines by definition, and in the run that motivated this flow the only
@@ -453,6 +461,13 @@ every cross-reference. That ruling is the point: when two personas found one
 root cause under two titles, the validate edge is what turns two lone opinions
 into consensus.
 
+It must also **rule on every candidate root cause** in `groups`, as
+`{id, ruling: "one" | "split", reason}`. Only a group every ruling calls `one`
+becomes a single fix with a single disposition; a group that is unruled,
+contested, or oversized stays a candidate and its citations are decided one at
+a time. So a missing ruling costs the remediation speedup, never a finding —
+which is why the key is optional and why leaving it off is still a waste.
+
 Each reviewer writes its own file at the path it was given, same as round 1 —
 the orchestrator does not retype it. Validate before repair:
 
@@ -505,6 +520,7 @@ Phase 5 exists.
 node ${SKILL_DIR}/scripts/synthesize.mjs \
     --round1 "$ADVERSE_RUN"/round1.json \
     --round2 "$ADVERSE_RUN"/round2.json \
+    --briefing "$ADVERSE_RUN"/briefing.json \
     --out "$ADVERSE_RUN"/report.md \
     --json-out "$ADVERSE_RUN"/report.json \
     --html-out "$ADVERSE_RUN"/report.html
@@ -515,6 +531,10 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     #   --round2-skipped "$R2_REASON"
 ```
 
+`--briefing` is what carries the candidate root causes and round 2's rulings
+into the report. Omit it and the report is exactly what it was before grouping
+existed — one section per finding, the same aggregation done by hand.
+
 Never LLM-render the findings yourself; the synthesizer's groupings
 (cross-validated / consensus / disputed / solo, plus the advisory section)
 carry the signal.
@@ -523,9 +543,13 @@ Present a **summary**, not the full report:
 
 1. The verdict line and the **open blocking** count.
 2. Counts by severity, kind, and confidence.
-3. The top 3 blocking findings with one-line previews.
-4. Advisory findings as a separate, clearly non-blocking list.
-5. A pointer to the report and the HTML dashboard.
+3. Any **confirmed root causes**, each as one item with its citation count —
+   "one unreachable guard, cited by 3 reviewers as a defect, an attack, and a
+   contract violation" is the honest shape of that news, and three separate
+   bullets is not.
+4. The top 3 blocking findings not already covered by a root cause above.
+5. Advisory findings as a separate, clearly non-blocking list.
+6. A pointer to the report and the HTML dashboard.
 
 ## Phase 7 — decide, and act
 
@@ -566,6 +590,25 @@ file, line, citedLine, disposition, reason}]}` where `disposition` is `fixed`,
 `declined`, or `deferred`. **Every decision needs a reason** — the script
 refuses one without it, because an unexplained decision cannot be reviewed later
 and is indistinguishable from an oversight.
+
+**Work the confirmed root causes first, one decision each.** A group the report
+calls `confirmed` is one fix and one disposition covering N citations. Write it
+as one entry per citation, every entry carrying the same `disposition`,
+`reason`, and the same `group` block:
+
+```json
+{"id": "F2", "title": "…", "disposition": "fixed", "reason": "restored the guard",
+ "group": {"id": "G1", "title": "the unreachable guard",
+           "citations": [{"id": "F1", "title": "…"}, {"id": "F2", "title": "…"}]}}
+```
+
+One decision made, N entries recorded. The expansion is not busywork: identity
+across iterations is still per-finding, so each citation needs its own entry to
+be matched by later — and the shared `group` is what lets the next pass say
+"the root-cause fix did not close every symptom" instead of the much weaker
+"a fix did not take". A group the report calls `proposed`, `contested`,
+`oversized`, or `split` gets ordinary per-finding decisions with no `group`
+block; the panel did not confirm it is one thing, so do not record it as one.
 
 Carry `confidence` through from the report for the same reason you carry the
 reason. Without it the ledger cannot tell a later reader whether a `declined`
@@ -678,7 +721,13 @@ yours to make). Its exit codes follow the same contract as every other bridge:
 
 Findings the ledger records as settled will not be re-litigated; anything
 recorded `fixed` that comes back is flagged `REGRESSED` and is the loudest
-thing in the run.
+thing in the run — and one carrying `adjudicated.group` is louder still: it
+says a root-cause fix left a symptom live, and names the sibling citations
+that fix was supposed to cover.
+
+Finding and group IDs are **per-run**, re-derived by each triage pass. The
+ledger does not depend on them: a recorded group carries its own title and
+citation titles, which is what the next iteration matches and renders.
 
 ## Phase 10 — hand over
 
@@ -769,7 +818,8 @@ Everywhere else, disk already holds what the loop needs next.
 | ≥2 reviewers fail | Abort. The model is misbehaving; suggest re-running or a single round. |
 | `triage.mjs` reports many `DISPROVED` | Surface it. A reviewer inventing line numbers is worth the user knowing. |
 | `triage.mjs` reports `REGRESSED` | Lead with it. A fix that did not take is more important than any new finding. |
-| `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge and continue. |
+| `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge or ruling and continue. |
+| `triage.mjs` reports an `OVERSIZED` candidate root cause | The edges chained further than one root cause plausibly reaches. It will not collapse whatever round 2 says; tell round 2 to name the smaller root causes inside it. |
 | Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
 | `converge.mjs` exits 3 | The cap, not success. Say plainly what is still open. |
 | Ledger version mismatch | Do not delete it. Tell the user which version it is; the schema changed under them. |
