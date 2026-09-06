@@ -597,12 +597,26 @@ export function makeClaimChecker({ repo, base }) {
     return { path: real };
   }
 
+  // Keyed by the path, because the answer depends on nothing else: `repo` and
+  // `base` are fixed for the life of the checker, and triage is one
+  // synchronous pass over findings that have already been collected — the diff
+  // cannot change underneath it. Without this, `checkClaim` spawned one `git
+  // diff` per FINDING rather than per file: 400 findings all citing the same
+  // file spawned 400 subprocesses, measured at ~12.6ms each and rising
+  // linearly, and a panel is free to return as many findings as it likes.
+  // `null` (the git failure) is cached too — a path git refuses once it
+  // refuses every time, and re-asking 400 times is the same waste.
+  const rangesByFile = new Map();
+
   function changedRanges(file) {
+    if (rangesByFile.has(file)) return rangesByFile.get(file);
+
     let out;
     try {
       out = execFileSync('git', ['diff', '-U0', `${base}...HEAD`, '--', file],
                          { cwd: repo, encoding: 'utf-8' });
     } catch {
+      rangesByFile.set(file, null);
       return null;
     }
     const ranges = [];
@@ -610,6 +624,7 @@ export function makeClaimChecker({ repo, base }) {
       if (h.newCount === 0) continue;
       ranges.push([h.newStart, h.newStart + h.newCount - 1]);
     }
+    rangesByFile.set(file, ranges);
     return ranges;
   }
 
