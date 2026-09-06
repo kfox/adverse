@@ -233,3 +233,81 @@ test('two verify payloads for one persona refuse to collide', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- a verification may not inherit an anchor it did not earn -----------------
+
+function briefingWith(dir, entry) {
+  const p = path.join(dir, 'briefing.json');
+  writeFileSync(p, JSON.stringify({ findings: [entry] }));
+  return p;
+}
+
+test('a verification naming another finding\'s id does not inherit its severity', () => {
+  // `v.id` is reviewer-supplied and validateVerify leaves it unbound, so
+  // saying "the critical fix is STILL OPEN" while naming an info/design id
+  // produced a non-blocking finding and the loop reported done.
+  const dir = freshTmp();
+  try {
+    const briefing = briefingWith(dir, {
+      id: 'F2', severity: 'info', kind: 'design', file: 'src/x.mjs', line: 1,
+      counterpart: null, title: 'a cosmetic nit', fix: null,
+    });
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F2', title: 'Auth bypass in token check', status: 'open', reason: 'still bypassable' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+    assert.equal(r.status, 1, 'a mismatched binding is reported, not silent');
+    assert.match(r.stderr, /is "a cosmetic nit" in the briefing/);
+
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
+    assert.notEqual(f.severity, 'info', 'must not inherit the unrelated severity');
+    assert.notEqual(f.kind, 'design', 'must not inherit the unrelated kind');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a verification naming an id that is not in the briefing is reported', () => {
+  const dir = freshTmp();
+  try {
+    const briefing = briefingWith(dir, {
+      id: 'F1', severity: 'critical', kind: 'defect', file: 'a.mjs', line: 1,
+      counterpart: null, title: 'real one', fix: null,
+    });
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F99', title: 'invented', status: 'open', reason: 'r' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /unresolvable id "F99"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a still-open verification with an empty title still reaches findings', () => {
+  // A title is the join key every downstream edge rides on, and buildFinding
+  // drops a finding without one — which converges the loop on a failed fix.
+  const dir = freshTmp();
+  try {
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F1', title: '   ', status: 'open', reason: 'still broken' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
+    assert.ok(f.title.trim().length > 0, 'a usable title is synthesized');
+    assert.match(f.title, /F1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

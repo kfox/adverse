@@ -53,6 +53,7 @@ import { importFromSrc } from './package-root.mjs';
 
 const { validateVerify } = await importFromSrc('prompts.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
+const { KINDS, SEVERITIES } = await importFromSrc('taxonomy.mjs');
 
 // Positionals are verify payloads, so `--verify run/verify-*.json` works —
 // same reason as triage.mjs and repair.mjs: strict parsing without this throws
@@ -95,23 +96,72 @@ if (values.briefing) {
   }
 }
 
+const normalizeTitle = (s) => (typeof s === 'string' ? s.trim().toLowerCase().replace(/\s+/g, ' ') : '');
+
+// The briefing entry a verification is actually ABOUT, or null.
+//
+// `v.id` is reviewer-supplied and `validateVerify` leaves it untyped and
+// unbound, so looking it up and copying severity off whatever it landed on
+// let a payload say "the critical fix is STILL OPEN" while naming the id of
+// any `info`/`design` finding: the reopened finding came back non-blocking,
+// `isBlocking` dropped it, and the loop reported done. That is verbatim the
+// erasure this bridge exists to prevent, reintroduced through the flag
+// SKILL.md tells the operator to always pass.
+//
+// So the id has to agree with the title before anything is inherited from it.
+// A mismatch is not fatal — the verification is still real and still reopens
+// the finding — but it falls back to the blocking default and says so, and an
+// id that resolves to nothing is reported the way repair.mjs reports one.
+function bindToBriefing(v, src) {
+  if (!briefed.size) return null;
+  const entry = briefed.get(v.id);
+  if (!entry) {
+    process.stderr.write(`  ! verify: ${src}: unresolvable id ${JSON.stringify(v.id)}`
+      + ` (title: ${JSON.stringify(v.title)}) — anchor not inherited\n`);
+    process.exitCode = 1;
+    return null;
+  }
+  if (normalizeTitle(entry.title) !== normalizeTitle(v.title)) {
+    process.stderr.write(`  ! verify: ${src}: id ${JSON.stringify(v.id)} is`
+      + ` ${JSON.stringify(entry.title)} in the briefing, but this verification calls it`
+      + ` ${JSON.stringify(v.title)} — anchor not inherited\n`);
+    process.exitCode = 1;
+    return null;
+  }
+  return entry;
+}
+
 // A verification still `open` is the reviewer saying the fix did not work.
 // Re-emitted as a finding so the arithmetic that stops the loop can see it;
 // the original anchor is preserved so the ledger can still recognize it, and
 // `reason` is carried into `detail` because that is the reviewer's evidence.
-function reopenedFinding(v) {
-  const original = briefed.get(v.id) ?? {};
+function reopenedFinding(v, src) {
+  const original = bindToBriefing(v, src) ?? {};
   const reason = typeof v.reason === 'string' ? v.reason : '';
+
+  // Only an in-enum value may be inherited. An out-of-enum severity would be
+  // rejected downstream by `buildFinding`, which drops the finding entirely —
+  // erasing the verification instead of merely mis-ranking it.
+  const severity = SEVERITIES.includes(original.severity)
+    ? original.severity : REOPENED_FALLBACK.severity;
+  const kind = KINDS.includes(original.kind) ? original.kind : REOPENED_FALLBACK.kind;
+
+  // A title is the join key every downstream edge rides on, so an empty one
+  // is not a cosmetic problem: the finding cannot be matched, and
+  // `buildFinding` drops it, which converges the loop on a failed fix.
+  const title = normalizeTitle(v.title) ? v.title
+    : `still-open verification ${typeof v.id === 'string' && v.id ? v.id : '(unidentified)'}`;
+
   return {
     // The severity it was first reported at, not a promoted one. An `info`
     // finding never blocked, and re-emitting it as a blocker would mean the
     // loop could never converge while any advisory remark stayed open.
-    severity: original.severity ?? REOPENED_FALLBACK.severity,
-    kind: original.kind ?? REOPENED_FALLBACK.kind,
+    severity,
+    kind,
     file: original.file ?? null,
     line: original.line ?? null,
     counterpart: original.counterpart ?? null,
-    title: typeof v.title === 'string' ? v.title : String(v.id),
+    title,
     detail: `Verification: STILL OPEN after the recorded fix. ${reason}`.trim(),
     fix: original.fix ?? null,
   };
@@ -152,7 +202,7 @@ for (const src of values.verify) {
 
   const reopened = payload.verified
     .filter((v) => v.status === 'open')
-    .map(reopenedFinding);
+    .map((v) => reopenedFinding(v, src));
 
   const out = {
     persona: payload.persona,
