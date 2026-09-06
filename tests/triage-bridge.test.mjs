@@ -1,12 +1,31 @@
 // Tests for skills/adverse-review/scripts/triage.mjs — the Skill's round-1
 // triage bridge.
 //
-// The claim-checking, kind-anchoring, and clustering logic itself is unit-
-// tested directly against src/triage.mjs in tests/triage.test.mjs. This file
-// is the bridge's own contract: argument parsing, persona validation, ledger
-// wiring, the output file and summary line — run as a subprocess against a
-// real throwaway git repo, since the bridge's job is gluing those pieces to a
-// real checkout.
+// Two layers below this one are tested directly, and this file deliberately
+// does not repeat them: the claim/kind/cluster predicates against
+// src/triage.mjs in tests/triage.test.mjs, and the briefing they are assembled
+// into against src/briefing.mjs in tests/briefing.test.mjs, in-process and
+// without a git fixture.
+//
+// What is left is the part that only exists at the process boundary, and it is
+// worth naming because "run it as a subprocess too" is how this file grew to
+// 615 lines of things already proven elsewhere:
+//
+//   - argv: parsing, positionals, the --base option guard, exit codes
+//   - the roster: which payloads are allowed to be reviewers
+//   - the summary line printed to stdout
+//   - a real checkout: that a path escaping it, or an in-tree symlink pointing
+//     out of it, is disproved AND that its content never reaches briefing.json
+//   - the ledger FILE: that --ledger is read, bound to this repository, and
+//     that a foreign or future-version one exits rather than being ignored
+//
+// NOT covered here, and not covered anywhere: replacing the anchor tracer with
+// the identity function breaks no test. Re-projecting a ledger entry's
+// position to HEAD before matching it is what stops a fix that shifted a file
+// from making every past decision look like a different finding, and nothing
+// currently drives a case where the projection changes the answer. The gap
+// predates this file's reorganization — it survives the same mutation on the
+// commit before it — and is written down rather than left to look covered.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -77,49 +96,64 @@ let repo;
 test.before(() => { repo = makeRepo(); });
 test.after(() => rmSync(repo, { recursive: true, force: true }));
 
-test('a line inside the diff is marked inside, and its text is captured', () => {
+test('--gate and --base are carried from argv into the briefing verbatim', () => {
+  // What buildBriefing does with these is tested in-process; this is the wire
+  // between argv and that call, which is its own claim. Both fields are read
+  // by a round-2 reviewer: `gate` tells them which findings the repo's own
+  // tools already rule out, and `base` is the ref every anchor is relative to.
+  const p = path.join(repo, 'round1-wire.json');
+  writeFileSync(p, JSON.stringify(review('auditor', [finding()])));
+  const out = path.join(repo, 'briefing-wire.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--repo', repo, '--base', 'base',
+      '--gate', 'lint green · 1,412 tests pass', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 0, r.stderr);
+  const briefing = JSON.parse(readFileSync(out, 'utf-8'));
+  assert.equal(briefing.gate, 'lint green · 1,412 tests pass');
+  assert.equal(briefing.base, 'base');
+});
+
+test('an omitted --gate is recorded as null, not left out of the briefing', () => {
   const { briefing } = runTriage(repo, [review('auditor', [finding()])]);
-  const f = briefing.findings[0];
-  assert.equal(f.claimCheck.status, 'ok');
-  assert.equal(f.claimCheck.inDiff, 'inside');
-  assert.equal(f.claimCheck.citedLine, 'line 20 CHANGED');
+  assert.equal(briefing.gate, null);
+  assert.ok('gate' in briefing);
 });
 
-test('a line outside the diff is annotated, never disproved', () => {
-  const { briefing } = runTriage(repo, [review('auditor', [finding({ line: 3 })])]);
-  const f = briefing.findings[0];
-  assert.equal(f.claimCheck.status, 'ok');
-  assert.equal(f.claimCheck.inDiff, 'outside');
-  assert.match(f.claimCheck.note, /legitimate/);
-});
+test('the summary line reports every tally, and reports the run the file describes', () => {
+  // One assertion site for the whole summary block. Each of these counts used
+  // to ride along on whichever behavioural test happened to produce it, so the
+  // advisory line in particular was asserted in exactly one place and by
+  // accident.
+  const { briefing, stdout } = runTriage(repo, [
+    review('auditor', [
+      finding({ line: 20 }),
+      finding({ line: 1, file: 'docs/app.md', kind: 'contract', counterpart: 'nope.md' }),
+      finding({ line: 9999 }),
+    ]),
+    review('adversary', [
+      finding({ line: 21, detail: 'the same thing docs/app.md line 1 is about' }),
+      finding({ kind: 'design', file: null, line: null }),
+      finding({ line: 'twenty' }),
+      finding({ kind: 'defect', line: null }),
+    ]),
+  ]);
 
-test('a missing file and a line past EOF are both disproved', () => {
-  const { briefing } = runTriage(repo, [review('auditor', [
-    finding({ file: 'nope.py' }),
-    finding({ line: 9999 }),
-  ])]);
-  assert.equal(briefing.findings[0].claimCheck.status, 'DISPROVED');
-  assert.equal(briefing.findings[1].claimCheck.status, 'DISPROVED');
-});
+  assert.match(stdout, /^triaged 7 findings from 2 reviewers/);
+  assert.match(stdout, /clusters \(same file, <=\d+ lines apart, 2\+ reporters\): 1\b/);
+  assert.match(stdout, /claim-check disproved: 2 \(F2, F3\)/);
+  assert.match(stdout, /malformed anchors coerced away \(field kept null\): 1 \(F6\.line\)/);
+  assert.match(stdout, /co-citations \(.*max \d+\/finding\): 1 \(F4->F2\)/);
+  assert.match(stdout, /candidate root causes \(proposed, for round 2 to confirm or split\): 1 \(G1=/);
+  assert.match(stdout, /under-anchored for their kind \(annotated, not rejected\): 2 \(F6, F7\)/);
+  assert.match(stdout, /advisory \(design — cannot block\): 1 \(F5\)/);
+  assert.match(stdout, /already settled in an earlier iteration: 0\n/);
+  assert.match(stdout, /REGRESSED \(recorded fixed, reported again\): 0\n/);
 
-test('kindCheck: a defect with no line is under-anchored', () => {
-  const { briefing } = runTriage(repo, [review('auditor', [finding({ line: null })])]);
-  const kc = briefing.findings[0].kindCheck;
-  assert.equal(kc.status, 'UNDER-ANCHORED');
-  assert.deepEqual(kc.missing, ['line']);
-});
-
-test('kindCheck: a contract finding with no counterpart is under-anchored', () => {
-  const { briefing } = runTriage(repo, [review('auditor', [finding({ kind: 'contract' })])]);
-  assert.deepEqual(briefing.findings[0].kindCheck.missing, ['counterpart']);
-});
-
-test('kindCheck: a contract finding naming both paths passes', () => {
-  const { briefing } = runTriage(repo, [review('auditor', [
-    finding({ kind: 'contract', counterpart: 'docs/app.md' }),
-  ])]);
-  assert.equal(briefing.findings[0].kindCheck.status, 'ok');
-  assert.equal(briefing.findings[0].counterpartCheck.status, 'ok');
+  // The counts describe the file, not a parallel calculation of their own.
+  assert.equal(briefing.findings.length, 7);
+  assert.equal(briefing.clusters.length, 1);
+  assert.equal(briefing.groups.length, 1);
 });
 
 test('a counterpart that does not exist disproves the contradiction', () => {
@@ -128,87 +162,6 @@ test('a counterpart that does not exist disproves the contradiction', () => {
   ])]);
   assert.equal(briefing.findings[0].counterpartCheck.status, 'DISPROVED');
   assert.match(stdout, /claim-check disproved: 1/);
-});
-
-test('kindCheck: design needs no anchor and is flagged advisory', () => {
-  const { briefing, stdout } = runTriage(repo, [review('pragmatist', [
-    finding({ kind: 'design', file: null, line: null }),
-  ])]);
-  assert.equal(briefing.findings[0].kindCheck.status, 'ok');
-  assert.equal(briefing.findings[0].kindCheck.advisory, true);
-  assert.match(stdout, /advisory \(design — cannot block\): 1/);
-});
-
-test('kindCheck: a missing kind is reported, not silently accepted', () => {
-  const f = finding();
-  delete f.kind;
-  const { briefing } = runTriage(repo, [review('auditor', [f])]);
-  assert.equal(briefing.findings[0].kindCheck.status, 'MISSING');
-});
-
-test('kindCheck: an unrecognized kind is reported as unknown', () => {
-  const { briefing } = runTriage(repo, [review('auditor', [finding({ kind: 'vibes' })])]);
-  assert.equal(briefing.findings[0].kindCheck.status, 'UNKNOWN');
-});
-
-test('ids are assigned across reviewers in order', () => {
-  const { briefing } = runTriage(repo, [
-    review('auditor', [finding({ title: 'a' })]),
-    review('adversary', [finding({ title: 'b' })]),
-  ]);
-  assert.deepEqual(briefing.findings.map((f) => f.id), ['F1', 'F2']);
-});
-
-test('two reporters near the same line cluster; one reporter does not', () => {
-  const two = runTriage(repo, [
-    review('auditor', [finding({ title: 'a', line: 20 })]),
-    review('adversary', [finding({ title: 'b', line: 25 })]),
-  ]).briefing;
-  assert.equal(two.clusters.length, 1);
-  assert.deepEqual(two.clusters[0].ids, ['F1', 'F2']);
-
-  const one = runTriage(repo, [
-    review('auditor', [finding({ title: 'a', line: 20 }), finding({ title: 'b', line: 25 })]),
-  ]).briefing;
-  assert.equal(one.clusters.length, 0, 'one reporter twice is not consensus');
-});
-
-test('findings far apart in the same file do not cluster', () => {
-  const { briefing } = runTriage(repo, [
-    review('auditor', [finding({ title: 'a', line: 2 })]),
-    review('adversary', [finding({ title: 'b', line: 38 })]),
-  ]);
-  assert.equal(briefing.clusters.length, 0);
-});
-
-test('one finding citing another reporter\'s file is a cross-reference', () => {
-  const { briefing } = runTriage(repo, [
-    review('auditor', [finding({ title: 'a', file: 'app.py', line: 20 })]),
-    review('steward', [finding({ title: 'b', file: 'docs/app.md', line: 1,
-      detail: 'app.py line 20 disagrees with this' })]),
-  ]);
-  const xref = briefing.crossReferences.find((x) => x.from === 'F2' && x.to === 'F1');
-  assert.ok(xref, 'expected F2 -> F1 co-citation');
-  assert.equal(xref.lineEchoed, true);
-});
-
-test('a reviewer citing its own file is not a cross-reference', () => {
-  const { briefing } = runTriage(repo, [
-    review('auditor', [
-      finding({ title: 'a', file: 'app.py' }),
-      finding({ title: 'b', file: 'app.py', detail: 'see app.py' }),
-    ]),
-  ]);
-  assert.equal(briefing.crossReferences.length, 0);
-});
-
-test('the gate summary is carried into the briefing verbatim', () => {
-  const p = path.join(repo, 'r.json');
-  writeFileSync(p, JSON.stringify(review('auditor', [])), 'utf-8');
-  const out = path.join(repo, 'b.json');
-  execFileSync(process.execPath, [TRIAGE, '--round1', p, '--repo', repo,
-    '--base', 'base', '--gate', 'make test: green', '--out', out], { encoding: 'utf-8' });
-  assert.equal(JSON.parse(readFileSync(out, 'utf-8')).gate, 'make test: green');
 });
 
 // --- the ledger ---------------------------------------------------------------
@@ -247,55 +200,12 @@ test('a settled finding is marked in the briefing and counted as settled', () =>
   assert.match(stdout, /already settled in an earlier iteration: 1/);
 });
 
-test('a finding recorded fixed that comes back is flagged regressed, not settled', () => {
-  const { briefing, stdout } = runTriageWithLedger(repo, [review('auditor', [finding()])], {
-    version: 1, base: null, iterations: [{ n: 1 }], entries: [ledgerEntry({ disposition: 'fixed' })],
-  });
-  assert.equal(briefing.findings[0].adjudicated.settled, false);
-  assert.deepEqual(briefing.regressed, ['F1']);
-  assert.deepEqual(briefing.settled, []);
-  assert.match(stdout, /REGRESSED \(recorded fixed, reported again\): 1/);
-});
-
-test('with no ledger, nothing is adjudicated', () => {
-  const { briefing } = runTriage(repo, [review('auditor', [finding()])]);
-  assert.equal(briefing.findings[0].adjudicated, undefined);
-  assert.deepEqual(briefing.settled, []);
-});
-
 test('a ledger from a future version fails the run rather than being ignored', () => {
   assert.throws(() => runTriageWithLedger(repo, [review('auditor', [finding()])],
     { version: 99, entries: [] }), /status 1|Command failed/);
 });
 
 // --- candidate root causes ---------------------------------------------------
-
-test('the briefing carries the root-cause groups the edges imply, with their fanout', () => {
-  const { briefing, stdout } = runTriage(repo, [
-    review('auditor', [finding({ title: 'guard is unreachable', line: 20 })]),
-    review('adversary', [finding({ title: 'the unreachable guard is a bypass', line: 24, severity: 'critical' })]),
-    review('steward', [finding({
-      title: 'docs still promise the guard', kind: 'contract', file: 'docs/app.md', line: 1,
-      counterpart: 'app.py', detail: 'app.py line 20 no longer does this',
-    })]),
-  ]);
-  assert.equal(briefing.groups.length, 1);
-  const [g] = briefing.groups;
-  assert.deepEqual(g.members, ['F1', 'F2', 'F3']);
-  assert.deepEqual(g.reporters, ['auditor', 'adversary', 'steward']);
-  assert.equal(g.title, 'the unreachable guard is a bypass', 'the worst-severity member states it');
-  assert.equal(g.citations.length, 3, 'every member survives as a citation');
-  assert.match(stdout, /candidate root causes \(proposed, for round 2 to confirm or split\): 1/);
-});
-
-test('unrelated findings produce no groups, and the briefing says so', () => {
-  const { briefing, stdout } = runTriage(repo, [
-    review('auditor', [finding({ title: 'a', line: 2 })]),
-    review('steward', [finding({ title: 'b', file: 'docs/app.md', line: 1, kind: 'contract', counterpart: 'app.py' })]),
-  ]);
-  assert.deepEqual(briefing.groups, []);
-  assert.match(stdout, /candidate root causes \(proposed, for round 2 to confirm or split\): 0/);
-});
 
 // --- the invocation the documentation actually tells you to type -------------
 // F12 happened because SKILL.md documented `--round1 run/round1-*.json` while
