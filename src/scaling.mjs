@@ -218,7 +218,7 @@ export function planReview({ files = [], diff = '', numstat = null, numstatMatch
         run,
         agents: agentsFor(persona, run, size.bucket, size.fileCount),
         reason: run
-          ? 'one agent — structure findings are cross-file, so partitioning harms them'
+          ? `one agent — ${PERSONAS[persona].soloReason}`
           : 'small diff; every kind this lane reports is advisory, so the skip costs a backlog item '
             + 'and a potential second reporter, never a finding that could block on its own',
       };

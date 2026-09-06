@@ -150,11 +150,11 @@ Code 1 is what you wire into a CI gate.
 
 ### `synthesize` subcommand
 
-Standalone: turn round-1/round-2 JSON from any source into a report. The
-Claude Code Skill reaches this same logic through its own thin bridge script
-(`skills/adverse-review/scripts/synthesize.mjs`), which also supports
-`--skipped`, `--degraded`, and `--round2-skipped` for declaring lanes the
-Skill's plan chose not to run.
+Standalone: turn round-1/round-2 JSON from any source into a report.
+`--skipped`, `--degraded`, and `--round2-skipped` — for declaring lanes that
+did not run, and why — are flags on `adverse synthesize` itself. The Claude
+Code Skill reaches the same logic, and the same flags, through a bridge script
+(`skills/adverse-review/scripts/synthesize.mjs`) that is a pass-through.
 
 ```bash
 adverse synthesize \
@@ -244,7 +244,9 @@ Three things it deliberately refuses to do, because aggregation is exactly where
 
 - **It does not vote.** Confidence is still counted over distinct personas per finding. A group is a way to fix and decide several citations at once, never an extra voice — and two independent-looking reports of one issue is precisely what synthesis reads as cross-validated consensus, the signal the whole design trusts most and the easiest to counterfeit.
 - **It does not decide.** The deterministic side proposes; only a reviewer that read the code can say whether two findings are one. An unruled or contested group stays a candidate and its citations are decided one at a time, which is the behaviour that predates grouping — so a missing ruling costs the speedup and never a finding.
-- **It does not collapse without limit.** Transitivity is greedy, and 41 edges over 34 findings can chain into a component that is not one root cause but the whole review. Past a cap a group is reported, marked `oversized`, and refused as a decision unit however round 2 rules it.
+- **It does not collapse without limit.** Transitivity is greedy, and this is where the first version of the feature failed outright: on the 34-finding run it was built for, an unbounded edge predicate produced 95 edges whose closure was a single 29-member "root cause" spanning 10 files and all four lanes — not a root cause, the review. So the closure itself is bounded, not just its result. Co-citation edges are cross-file (or same-file with the other finding's line echoed), match whole path tokens, are capped per finding, and are applied strongest-first; a merge that would push a component past the confirmable cap is refused rather than made and then labelled. A refused edge is still reported — it just does not collapse two findings into one disposition. Where a group is legitimately large anyway, it is marked `oversized` and refused as a decision unit however round 2 rules it.
+
+Grouping helps most where a handful of findings are tightly co-cited across two or three files. A dense, self-referential review — reviewers whose prose names half the tree — produces few groups and falls back to per-finding decisions, which is the pre-grouping behaviour and costs nothing but the speedup.
 
 ### The Skill can run as a convergence loop
 
@@ -296,6 +298,7 @@ src/                          # Shared core, used by both CLI and Skill
   scaling.mjs                 # How much review does this change deserve?
   html.mjs                    # Self-contained HTML dashboard renderer
   cli.mjs                     # Argv parsing + command dispatch
+  fsSafe.mjs                  # Open-and-check without a TOCTOU gap
 
 bin/
   adverse.mjs                 # CLI entrypoint (#!/usr/bin/env node)
@@ -303,6 +306,7 @@ bin/
 skills/adverse-review/
   SKILL.md                    # Claude Code playbook (the "code" of the Skill)
   scripts/
+    bridge-io.mjs             # Shared bridge helpers: readJson, usage, persona guards
     collect.mjs               # Skill bridge: source collection
     combine.mjs               # Skill bridge: combine per-persona JSON
     triage.mjs                # Skill bridge: claim/kind checks, grouping, briefing

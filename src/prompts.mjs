@@ -51,9 +51,15 @@ lens uniquely catches and trust the others to cover their own ground.
 
 ## Output schema
 
-Respond with **a single JSON object and nothing else**. No markdown fences, no
-prose before or after. Your entire response must be parseable by JSON.parse.
-Any extra text outside the JSON causes you to be dropped from the consensus.
+Your review is **a single JSON object and nothing else** — no markdown fences,
+no prose before or after, parseable by JSON.parse. Anything outside the JSON
+causes you to be dropped from the consensus.
+
+If the caller gave you a path to write it to, write the object there verbatim
+with the Write tool and reply with nothing but that path. Otherwise reply with
+the object itself. Never do both by retyping it: a payload copied by hand is a
+payload that can be truncated or misremembered, which is the failure this
+instruction exists to avoid.
 
 \`\`\`
 {
@@ -262,8 +268,13 @@ Then optionally add findings you only saw once you had the other lanes in view.
 
 ## Output schema
 
-Respond with **a single JSON object and nothing else** — parseable by
+Your answer is **a single JSON object and nothing else** — parseable by
 JSON.parse, no fences, no prose outside it.
+
+If the caller gave you a path to write it to, write the object there verbatim
+with the Write tool and reply with nothing but that path. Otherwise reply with
+the object itself. Never do both by retyping it: a payload copied by hand is a
+payload that can be truncated or misremembered.
 
 \`\`\`
 {
@@ -382,8 +393,13 @@ contract and had to be rewritten rather than satisfied.
 
 ## Output schema
 
-Respond with **a single JSON object and nothing else** — parseable by
+Your answer is **a single JSON object and nothing else** — parseable by
 JSON.parse, no fences, no prose outside it.
+
+If the caller gave you a path to write it to, write the object there verbatim
+with the Write tool and reply with nothing but that path. Otherwise reply with
+the object itself. Never do both by retyping it: a payload copied by hand is a
+payload that can be truncated or misremembered.
 
 \`\`\`
 {

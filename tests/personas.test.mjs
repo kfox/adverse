@@ -116,3 +116,14 @@ test('persona titles are distinct — the fake agent and the prompts key on them
   const titles = all.map((p) => p.title);
   assert.equal(new Set(titles).size, titles.length);
 });
+
+test('every lane that always runs solo explains itself from the registry', () => {
+  // scaling.mjs reads `soloReason` when it says why a lane runs as one agent.
+  // The registry was introduced to stop that rationale living at the call site,
+  // and shipped with one entry and one exception — so the Pragmatist's reason
+  // was still hard-coded in scaling.mjs, which is the drift it was preventing.
+  for (const p of [PERSONAS.steward, PERSONAS.pragmatist]) {
+    assert.equal(typeof p.soloReason, 'string', `${p.name} needs a soloReason`);
+    assert.ok(p.soloReason.length > 10);
+  }
+});

@@ -607,10 +607,19 @@ as one entry per citation, every entry carrying the same `disposition`,
 `reason`, and the same `group` block:
 
 ```json
-{"id": "F2", "title": "…", "disposition": "fixed", "reason": "restored the guard",
+{"id": "F2", "title": "…", "kind": "defect", "severity": "critical",
+ "confidence": "consensus", "file": "src/auth.py", "line": 88, "counterpart": null,
+ "disposition": "fixed", "reason": "restored the guard",
  "group": {"id": "G1", "title": "the unreachable guard",
            "citations": [{"id": "F1", "title": "…"}, {"id": "F2", "title": "…"}]}}
 ```
+
+Every identity field is there on purpose. `kind`, `severity`, `file`, `line`
+and `counterpart` are exactly what `scoreMatch` matches on next iteration — an
+entry written from a shorter example matches nothing, and the finding you just
+decided is re-raised on the next pass. `report.json`'s
+`root_causes[].citations[]` already carry all of them, so copy from there
+rather than retyping.
 
 One decision made, N entries recorded. The expansion is not busywork: identity
 across iterations is still per-finding, so each citation needs its own entry to
