@@ -175,6 +175,21 @@ test('recordDecisions appends and stamps the iteration and commit', () => {
   assert.deepEqual(l.iterations, [{ n: 1, atCommit: 'sha1', reportDigest: null, decided: 1 }]);
 });
 
+test('recordDecisions derives the iteration number itself when none is given', () => {
+  // converge.mjs used to compute (ledger.iterations ?? []).length + 1 itself
+  // and pass it in — the same computation convergenceStatus makes, and the
+  // two copies had already drifted once. recordDecisions now defaults it.
+  const once = recordDecisions(emptyLedger(), [
+    { title: 'a', disposition: 'fixed', reason: 'guard added' },
+  ], { atCommit: 'sha1' });
+  assert.equal(once.entries[0].iteration, 1);
+
+  const twice = recordDecisions(once, [
+    { title: 'b', disposition: 'declined', reason: 'by design' },
+  ], { atCommit: 'sha2' });
+  assert.equal(twice.entries[1].iteration, 2);
+});
+
 test('a finding recorded fixed against THIS report is unverified, not regressed', () => {
   // The convergence check runs against the report that was current when the
   // fixes were decided, so every `fixed` finding trivially "comes back".

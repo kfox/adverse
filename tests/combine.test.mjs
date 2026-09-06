@@ -147,7 +147,7 @@ test('combine fails on malformed JSON', () => {
     writeFileSync(bad, '{ not valid json');
     const out = path.join(dir, 'combined.json');
     const r = runCombine(['--round1', bad, '--out', out]);
-    assert.equal(r.status, 1);
+    assert.equal(r.status, 2, 'unreadable JSON is exit 2 — the run could not read an input, not a claim about a review');
     assert.match(r.stderr, /combine:.*bad\.json/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

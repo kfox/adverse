@@ -6,8 +6,9 @@
 // inputs.
 
 import { parseArgs } from 'node:util';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 
+import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { synthesize, renderMarkdown, toJsonReport } = await importFromSrc('synthesis.mjs');
@@ -28,18 +29,11 @@ const { values } = parseArgs({
 });
 
 if (!values.round1) {
-  process.stderr.write('Usage: synthesize.mjs --round1 <combined.json> [--round2 <combined.json>] [--out report.md] [--json-out report.json] [--html-out report.html] [--skipped persona=reason] [--degraded persona] [--round2-skipped reason]\n');
-  process.exit(2);
+  usage('Usage: synthesize.mjs --round1 <combined.json> [--round2 <combined.json>] [--out report.md] [--json-out report.json] [--html-out report.html] [--skipped persona=reason] [--degraded persona] [--round2-skipped reason]');
 }
 
-let round1, round2 = {};
-try {
-  round1 = JSON.parse(readFileSync(values.round1, 'utf-8'));
-  if (values.round2) round2 = JSON.parse(readFileSync(values.round2, 'utf-8'));
-} catch (e) {
-  process.stderr.write(`synthesize: ${e.message}\n`);
-  process.exit(1);
-}
+const round1 = readJson(values.round1, 'synthesize');
+const round2 = values.round2 ? readJson(values.round2, 'synthesize') : {};
 
 // --skipped auditor="reason" records a lane that was deliberately not run, so
 // the report cannot present its silence as a clean bill of health.

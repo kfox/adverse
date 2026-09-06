@@ -35,10 +35,11 @@
 // reviewer ("does the finding say why this diff puts it in play?"), not a
 // verdict.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 
+import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
@@ -69,8 +70,7 @@ const { values, positionals } = parseArgs({
 
 values.round1 = [...(values.round1 ?? []), ...positionals];
 if (!values.round1.length || !values.repo || !values.out) {
-  process.stderr.write('Usage: triage.mjs --round1 a.json [--round1 b.json …] --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>\n');
-  process.exit(2);
+  usage('Usage: triage.mjs --round1 a.json [--round1 b.json …] --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>');
 }
 
 const repo = path.resolve(values.repo);
@@ -82,18 +82,9 @@ if (base.startsWith('-')) {
   process.exit(2);
 }
 
-function readJson(file) {
-  try {
-    return JSON.parse(readFileSync(file, 'utf-8'));
-  } catch (e) {
-    process.stderr.write(`triage: ${file}: ${e.message}\n`);
-    process.exit(1);
-  }
-}
-
 const { checkClaim, checkCounterpart } = makeClaimChecker({ repo, base });
 
-const reviews = values.round1.map(readJson);
+const reviews = values.round1.map((f) => readJson(f, 'triage'));
 // The persona string is model-written and keys the briefing's verdicts,
 // clusters (reporters.size >= 2), and cross-references (a.reporter !==
 // b.reporter) — a re-cased name would mint a phantom reviewer whose agreement

@@ -20,8 +20,9 @@
 // agreement with its own other half read as cross-lane consensus.
 
 import { parseArgs } from 'node:util';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 
+import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
@@ -39,8 +40,7 @@ const { values, positionals } = parseArgs({
 });
 
 if (!values.out) {
-  process.stderr.write('Usage: combine.mjs (--round1 a.json b.json … [--merge-personas <persona>]…) | (--round2 a.json b.json …) --out <combined.json>\n');
-  process.exit(2);
+  usage('Usage: combine.mjs (--round1 a.json b.json … [--merge-personas <persona>]…) | (--round2 a.json b.json …) --out <combined.json>');
 }
 
 const hasRound1 = values.round1 !== undefined;
@@ -73,13 +73,7 @@ const inputs = [...(values.round1 ?? values.round2), ...positionals];
 const combined = Object.create(null);
 const payloadCount = Object.create(null);
 for (const path of inputs) {
-  let payload;
-  try {
-    payload = JSON.parse(readFileSync(path, 'utf-8'));
-  } catch (e) {
-    process.stderr.write(`combine: ${path}: ${e.message}\n`);
-    process.exit(1);
-  }
+  const payload = readJson(path, 'combine');
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || typeof payload.persona !== 'string') {
     process.stderr.write(`combine: ${path}: missing or invalid \`persona\` field\n`);
     process.exit(1);

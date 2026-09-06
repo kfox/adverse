@@ -683,6 +683,7 @@ re-learning the same lesson and re-reporting the same class of finding.
 | `triage.mjs` reports many `DISPROVED` | Surface it. A reviewer inventing line numbers is worth the user knowing. |
 | `triage.mjs` reports `REGRESSED` | Lead with it. A fix that did not take is more important than any new finding. |
 | `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge and continue. |
+| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
 | `converge.mjs` exits 3 | The cap, not success. Say plainly what is still open. |
 | Ledger version mismatch | Do not delete it. Tell the user which version it is; the schema changed under them. |
 | `node` not on PATH | Tell the user to install Node 22+. Do not improvise a fallback. |
