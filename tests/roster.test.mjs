@@ -63,6 +63,32 @@ test('a split lane missing its other half is refused — half the files got no r
   assert.match(messages(r), /re-run it/);
 });
 
+test('a split lane that sent NOTHING is refused — the most complete version of the failure', () => {
+  // Counting only the personas that produced payloads skips a lane that
+  // produced none, so the check meant to catch "half the diff got no reviewer"
+  // stopped firing when NEITHER half did. The declared roster is the thing
+  // being checked against, not the observed one.
+  const r = checkRoster([payload('steward')], { explicitMerges: ['auditor'] });
+  assert.equal(r.problems.length, 1);
+  assert.equal(r.problems[0].exit, REFUSED);
+  assert.match(r.problems[0].message, /expected exactly 2 payloads for the split lane, got 0/);
+});
+
+test('a split lane the PLAN declared that sent nothing is refused the same way', () => {
+  const lanes = lanesOf(
+    { persona: 'auditor', run: true, agents: 2 },
+    { persona: 'steward', run: true, agents: 1 });
+  const r = checkRoster([payload('steward')], { lanes });
+  assert.match(messages(r), /expected exactly 2 payloads for the split lane, got 0/);
+});
+
+test('every declared split lane is checked, not just the first one missing', () => {
+  const r = checkRoster([], { explicitMerges: ['auditor', 'adversary'] });
+  assert.equal(r.problems.length, 2);
+  assert.match(messages(r), /--merge-personas auditor: expected exactly 2/);
+  assert.match(messages(r), /--merge-personas adversary: expected exactly 2/);
+});
+
 test('a split lane with a stray third payload is refused, not merged three ways', () => {
   const three = ['a', 'b', 'c'].map((f) => payload('auditor', `${f}.json`));
   const r = checkRoster(three, { explicitMerges: ['auditor'] });
@@ -99,7 +125,11 @@ test('the refusal names the override, so the remedy is not guesswork', () => {
 });
 
 test('a plan need not be exhaustive — a persona it does not mention is not ruled out', () => {
-  const lanes = lanesOf({ persona: 'auditor', run: true, agents: 2 });
+  // The lane the plan DOES name is deliberately unsplit here. A split lane
+  // that sent nothing is refused on its own account (below), which would
+  // otherwise mask the thing this test is about: steward, unmentioned, is
+  // still a legitimate reviewer.
+  const lanes = lanesOf({ persona: 'auditor', run: true, agents: 1 });
   assert.deepEqual(checkRoster([payload('steward')], { lanes }).problems, []);
 });
 

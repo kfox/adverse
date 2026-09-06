@@ -106,14 +106,19 @@ reportRoster(checkRoster(
 
 // Identity is settled above; this is the other half of a usable payload. A
 // non-array `findings` reached a `for…of` and threw a TypeError with a stack
-// trace, against a contract that says a bridge which could not read its input
-// exits 2 and never crashes.
+// trace, which is not an exit code at all.
+//
+// Exit 1, not 2. SKILL.md draws that line for exactly this case — "2 means it
+// never read a payload, 1 means it read one that failed the schema" — and this
+// payload parsed fine and then failed the schema, which is what validate.mjs
+// reports the same way. bridge-io's exit 2 belongs to the read that never
+// happened, not to what the bytes turned out to say.
 for (let i = 0; i < reviews.length; i += 1) {
   const supplied = reviews[i].findings;
   if (supplied !== undefined && !Array.isArray(supplied)) {
     process.stderr.write(`triage: ${sources[i]}: \`findings\` is not an array`
       + ` (got ${JSON.stringify(supplied)})\n`);
-    process.exit(2);
+    process.exit(1);
   }
 }
 

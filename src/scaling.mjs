@@ -73,6 +73,10 @@ export const LARGE_MIN_CHANGED_LINES = 600;
 export const DELETED_LINES_ADVERSARY_FLOOR = 80;
 
 export const SPLIT_AGENTS = 2;
+
+// The a-z suffix in `agentNames` is the real ceiling on how many ways a lane
+// can split, so it is named rather than left implicit in a charCode sum.
+export const MAX_SPLIT_AGENTS = 26;
 // The default must match convergenceStatus's own default in ledger.mjs, or the
 // plan would claim a cap the loop does not enforce.
 export const DEFAULT_MAX_ITERATIONS = 3;
@@ -280,13 +284,31 @@ function parseLane(lane, personas) {
     throw new Error(`lane persona ${JSON.stringify(lane.persona)} is not a persona`
       + ` (expected one of ${personas.join(', ')})`);
   }
-  const run = lane.run === true;
+  // A boolean, and required. plan.mjs's `--agents` projection used to filter
+  // on a TRUTHY `run` while bridge-io tested `=== true`, so a lane recorded
+  // `run: 1` got a worktree from one reader and was refused as "not run" by
+  // the next. Unifying on `=== true` alone would have made that lane silently
+  // vanish from the agent list — a lane nobody notices is missing is the
+  // failure this whole module is written against, so it is an error instead.
+  if (typeof lane.run !== 'boolean') {
+    throw new Error(`lane '${lane.persona}' must say whether it ran`
+      + ` (\`run\` is ${JSON.stringify(lane.run)}, expected true or false)`);
+  }
+  const run = lane.run;
   // `=== undefined`, not `??`: a key absent from the JSON parses as undefined
   // and is the legitimate hand-written case, while an explicit `null` is a
   // count someone wrote down wrong. `??` collapses the two and defaults the
   // malformed one to a working value.
   const agents = lane.agents === undefined ? (run ? 1 : 0) : lane.agents;
   const floor = run ? 1 : 0;
+  // `agentNames` suffixes agents a, b, c … off `String.fromCharCode(97 + i)`,
+  // which runs past 'z' into '{' and '|'. SKILL.md Phase 1 word-splits that
+  // list into `git worktree add "$WORKTREES/$agent"`, so the ceiling is where
+  // the naming scheme stops being one, not where it stops being tidy.
+  if (Number.isInteger(agents) && agents > MAX_SPLIT_AGENTS) {
+    throw new Error(`lane '${lane.persona}' asks for ${agents} agents;`
+      + ` the a-z suffix scheme tops out at ${MAX_SPLIT_AGENTS}`);
+  }
   if (!Number.isInteger(agents) || agents < floor) {
     throw new Error(`lane '${lane.persona}' has an invalid \`agents\` count`
       + ` (${JSON.stringify(lane.agents)})`);
@@ -315,8 +337,10 @@ export const skippedLanes = (lanes) => lanes.filter((l) => !l.run);
 
 // One name per running lane, or one per agent (`persona-a`, `persona-b`, …)
 // for a lane split across more than one — read from that lane's own `agents`
-// count, never a repeated literal 2, so a future SPLIT_AGENTS change still
-// gets the right worktrees.
+// count, never a repeated literal 2, so raising SPLIT_AGENTS still gets the
+// right worktrees. Up to MAX_SPLIT_AGENTS of them: past 'z' the suffix walks
+// into '{' and '|', so parseLane refuses that count rather than letting this
+// function invent a name for it.
 export function agentNames(lanes) {
   return runLanes(lanes).flatMap((l) => (l.agents === 1
     ? [l.persona]

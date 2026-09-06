@@ -16,7 +16,7 @@ import { DEFAULT_PERSONAS } from '../src/personas.mjs';
 import {
   DEFAULT_MAX_ITERATIONS, DELETED_LINES_ADVERSARY_FLOOR, ESCALATED_MAX_ITERATIONS,
   LARGE_MIN_CHANGED_LINES, LARGE_MIN_FILES, SMALL_MAX_CHANGED_LINES, SMALL_MAX_FILES,
-  SPLIT_AGENTS, agentNames, diffSize, escalate, parseNumstat, parsePlan, planReview,
+  MAX_SPLIT_AGENTS, SPLIT_AGENTS, agentNames, diffSize, escalate, parseNumstat, parsePlan, planReview,
   runLanes, skippedLanes, splitLanes,
 } from '../src/scaling.mjs';
 
@@ -397,9 +397,21 @@ test('parsePlan: every lane persona is checked against the registry, split or no
   }
 });
 
-test('parsePlan: `run` is a strict boolean — a truthy string does not run a lane', () => {
-  const [lane] = lanesOf({ persona: 'auditor', run: 'yes', agents: 1 });
-  assert.equal(lane.run, false);
+test('parsePlan: a lane must SAY whether it ran, rather than be read as truthy', () => {
+  // `--agents` filtered on a truthy `run` and bridge-io tested `=== true`, so
+  // `run: 1` got a worktree from one reader and was refused by the next.
+  // Reading it as false would have silently dropped the lane's agents instead.
+  for (const run of ['yes', 1, undefined, null, 0]) {
+    assert.throws(() => lanesOf({ persona: 'auditor', run, agents: 1 }),
+      /must say whether it ran/, `run: ${JSON.stringify(run)}`);
+  }
+});
+
+test('parsePlan: a lane cannot split further than the a-z suffix scheme reaches', () => {
+  assert.throws(() => lanesOf({ persona: 'auditor', run: true, agents: 27 }),
+    /suffix scheme tops out at 26/);
+  assert.equal(agentNames(lanesOf({ persona: 'auditor', run: true, agents: 26 })).at(-1),
+    'auditor-z');
 });
 
 test('parsePlan: a lane that is not an object is refused, not read through', () => {

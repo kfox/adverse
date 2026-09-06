@@ -118,8 +118,16 @@ export function checkRoster(payloads, {
     else counts.set(payload.persona, (counts.get(payload.persona) ?? 0) + 1);
   }
 
-  for (const [persona, count] of counts) {
-    const bad = checkCount(persona, count, merged);
+  // Every DECLARED split lane, not only the personas that sent something. A
+  // lane that sent nothing never appears in `counts`, so iterating the
+  // observed payloads alone let a split lane with ZERO halves through: the
+  // most complete version of the failure this check exists to catch, and the
+  // one it stopped catching. Union, so an undeclared duplicate is still seen.
+  for (const persona of new Set([...merged, ...counts.keys()])) {
+    // A name that is not a persona already has its complaint; telling its
+    // author it also owes two payloads is noise on top of the real answer.
+    if (!personas.includes(persona)) continue;
+    const bad = checkCount(persona, counts.get(persona) ?? 0, merged);
     if (bad) problems.push(bad);
   }
 

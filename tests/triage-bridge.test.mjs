@@ -504,13 +504,15 @@ test('the not-run refusal names the override and the payload, as combine\'s alwa
 });
 
 test('a non-array `findings` is refused with a sentence, not a TypeError stack', () => {
+  // Exit 1, not 2: SKILL.md's line is "2 means it never read a payload, 1
+  // means it read one that failed the schema", and this one parsed fine.
   const p = path.join(repo, 'round1-notarray.json');
   writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: 7 }));
   const out = path.join(repo, 'briefing-notarray.json');
   const r = spawnSync(process.execPath,
     [TRIAGE, '--round1', p, '--repo', repo, '--base', 'base', '--out', out],
     { encoding: 'utf-8', timeout: 30_000 });
-  assert.equal(r.status, 2);
+  assert.equal(r.status, 1);
   assert.match(r.stderr, /`findings` is not an array/);
   assert.doesNotMatch(r.stderr, /TypeError|at file:/);
 });
