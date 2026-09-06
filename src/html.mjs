@@ -2,7 +2,7 @@
 // works as an email/chat attachment, in CI artifacts, or pasted into a wiki.
 // Vanilla HTML + scoped CSS + a few lines of JS — no framework, no build step.
 
-import { ADVISORY_KINDS } from './taxonomy.mjs';
+import { ADVISORY_KINDS, assertCoversStatuses } from './taxonomy.mjs';
 
 const SEVERITY_BADGE = {
   critical: { label: 'CRITICAL', color: '#b91c1c', bg: '#fee2e2' },
@@ -24,15 +24,15 @@ const VERDICT_BADGE = {
   unknown:     { label: '—',           color: '#374151', bg: '#f3f4f6' },
 };
 
-// Keyed off taxonomy's ROOT_CAUSE_STATUSES so a status added there without a
-// label here is a loud failure rather than a silent fallback to the raw name.
-const ROOT_CAUSE_STATUS = {
+// Keyed off taxonomy's ROOT_CAUSE_STATUSES — checked at module load, not
+// merely asserted in a comment.
+const ROOT_CAUSE_STATUS = assertCoversStatuses({
   confirmed: 'Confirmed by round 2 — one fix, one disposition',
   contested: 'Contested — reviewers disagree; decide each citation',
   oversized: 'Too many citations to collapse; decide each citation',
   proposed: 'Candidate — round 2 did not rule; decide each citation',
   split: 'Dissolved by round 2 — separate problems',
-};
+}, 'src/html.mjs');
 
 function esc(s) {
   return String(s ?? '')

@@ -54,7 +54,7 @@ your edge.
 ## Two joins the machinery cannot make for you
 
 - `clusters` — findings in the same file within a few lines, from different
-  reporters.
+  reporters. A cluster never spans more lines than that window.
 - `crossReferences` — one finding's prose cites another finding's file (and
   sometimes its line), which usually means both describe **one root cause**
   spanning more than one file.

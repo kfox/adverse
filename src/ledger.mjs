@@ -360,7 +360,10 @@ function recordedGroup(group) {
   if (!group || typeof group !== 'object' || Array.isArray(group)) return null;
   const citations = Array.isArray(group.citations) ? group.citations : [];
   return {
-    id: GROUP_ID.test(group.id ?? '') ? group.id : null,
+    // `RegExp.test` coerces, so a NUMBER id passed the shape check and was
+    // then stored raw — the value that reaches the note is not the value that
+    // was validated. Check the type first, store the checked string.
+    id: typeof group.id === 'string' && GROUP_ID.test(group.id) ? group.id : null,
 
     title: clipReason(group.title ?? '') || null,
     citations: citations.slice(0, MAX_RECORDED_CITATIONS).map((c) => ({

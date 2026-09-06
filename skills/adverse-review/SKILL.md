@@ -389,7 +389,9 @@ What it gives you:
   something real and merely labeled it carelessly, and only a reviewer can tell
   those apart.
 - **Clusters** (same file, within 15 lines, different reporters) and
-  **cross-file co-citations** (one finding's prose names another's file). These
+  **co-citations** (one finding's prose names another's file as a whole path
+  token — cross-file, or same-file when the other finding's line is cited too,
+  and only ever targeting a file the claim check actually opened). These
   are candidate *one defect seen twice* — exactly the pairs a title join drops.
 - **Candidate root causes** (`groups`), the transitive closure of those two
   edge sets. If A clusters with B and B's prose cites C, all three arrive as
@@ -398,7 +400,9 @@ What it gives you:
   anchor. This is a *proposal*: round 2 rules on it (Phase 4), and until it
   does, the members are reported and decided one at a time exactly as before.
   A group marked `oversized` carries too many citations for one disposition to
-  be honest and will never collapse, however round 2 rules it.
+  be honest and will never collapse, however round 2 rules it — and that cap is
+  relative as well as absolute, so a group that is most of a small review is
+  oversized even when it is well under the fixed limit.
 - **In-diff classification.** `inDiff: "outside"` is **annotated, never
   rejected**: a latent bug the change newly makes reachable lives in unchanged
   lines by definition, and in the run that motivated this flow the only
@@ -462,11 +466,20 @@ root cause under two titles, the validate edge is what turns two lone opinions
 into consensus.
 
 It must also **rule on every candidate root cause** in `groups`, as
-`{id, ruling: "one" | "split", reason}`. Only a group every ruling calls `one`
-becomes a single fix with a single disposition; a group that is unruled,
-contested, or oversized stays a candidate and its citations are decided one at
-a time. So a missing ruling costs the remediation speedup, never a finding —
-which is why the key is optional and why leaving it off is still a waste.
+`{id, ruling: "one" | "split", reason}`. A group becomes a single fix with a
+single disposition only when **two independent personas** both call it `one` —
+the same cross-validation the report's confidence labels require, for the same
+reason: a confirmed group is one decision covering N findings, and one
+unopposed voice deciding that is exactly the consensus-of-one this design
+refuses everywhere else. A ruling from the persona that is the sole reporter of
+every citation is not a voice.
+
+Everything short of that stays a candidate and its citations are decided one at
+a time: unruled, contested, oversized, or agreed by only one lane. `split`
+needs no quorum — it dissolves the group, which is the direction this tool
+always fails in. So a missing ruling costs the remediation speedup, never a
+finding — which is why the key is optional and why leaving it off is still a
+waste, and why the report tells you when a group fell short and by how much.
 
 Each reviewer writes its own file at the path it was given, same as round 1 —
 the orchestrator does not retype it. Validate before repair:

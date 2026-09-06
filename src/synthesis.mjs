@@ -33,7 +33,8 @@
 // are both credible enough (cross-validated or consensus) and consequential
 // enough (not advisory, not `info`) to hold a change open.
 
-import { ADVISORY_KINDS, GROUP_RULINGS, ROOT_CAUSE_STATUSES, SEVERITY_RANK } from './taxonomy.mjs';
+import { ADVISORY_KINDS, GROUP_RULINGS, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
+         assertCoversStatuses } from './taxonomy.mjs';
 
 // Verdict → score mapping. The natural symmetric choice: approve and reject
 // cancel each other out, conditional carries half-weight on the approve side.
@@ -463,15 +464,16 @@ const ADVISORY_PREAMBLE =
   + 'structure, so a loop that waits for them to run out never ends. Take them '
   + 'or file them; do not let them gate the merge._';
 
-// Keyed off taxonomy's ROOT_CAUSE_STATUSES so a status added there without a
-// label here is a loud failure rather than a silent fallback to the raw name.
-const ROOT_CAUSE_STATUS = {
+// Keyed off taxonomy's ROOT_CAUSE_STATUSES — checked, not merely asserted in a
+// comment. A status added there without a label here throws at module load
+// rather than falling back to the raw status name.
+const ROOT_CAUSE_STATUS = assertCoversStatuses({
   confirmed: 'confirmed by round 2 — one fix, one disposition',
   contested: 'CONTESTED — reviewers disagree on whether this is one thing; decide each citation',
   oversized: 'too many citations to collapse into one disposition; decide each citation',
   proposed: 'candidate — round 2 did not rule; decide each citation',
   split: 'dissolved by round 2 — these are separate problems',
-};
+}, 'src/synthesis.mjs');
 
 // One block per root cause: the canonical statement, the fix once, and the
 // citation fanout. `split` groups are still listed, because a proposal the
@@ -491,6 +493,20 @@ function renderRootCauses(rootCauses) {
     lines.push(`_${ROOT_CAUSE_STATUS[rc.status] ?? rc.status} · ${rc.citations.length} citations `
       + `from ${rc.reporters.length} reviewer${rc.reporters.length === 1 ? '' : 's'} `
       + `(${rc.reporters.join(', ')}) · ${rc.blocking ? 'blocking' : 'advisory only'}_`);
+    // Why a group that every ruling called `one` is still only `proposed`.
+    // Without this the label reads as "round 2 did not rule" directly above a
+    // ruling that plainly did, and the quorum looks like a bug.
+    const c = rc.confirmation;
+    if (c && rc.status === 'proposed' && rc.rulings.length) {
+      const short = c.voices < c.required
+        ? `${c.voices} independent voice${c.voices === 1 ? '' : 's'} of ${c.required} needed`
+        : 'not confirmed';
+      lines.push('');
+      lines.push(`> ⚖️ **Not confirmed:** ${short}.`
+        + (c.selfRuled.length
+          ? ` ${c.selfRuled.join(', ')} ruled on a group it is the only reporter of, which is not a voice.`
+          : ''));
+    }
     lines.push('');
     for (const c of rc.citations) {
       const loc = c.file ? ` — \`${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}\`` : '';
@@ -531,11 +547,25 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
     `**Findings:** ${crit} critical · ${warn} warning · ${info} info ` +
       `(${syn.findings.length} total across ${Object.keys(syn.verdicts).length} reviewers)  `,
   );
+  // `disputed` is reported beside this number, not folded into it. A finding
+  // one persona challenged is labelled `disputed` the moment the FIRST
+  // challenger appears, before reporters are counted, so `isOpenBlocking`
+  // excludes a critical three lanes reported and one disagreed with — and the
+  // headline read zero while the stop condition still held the loop open on
+  // it. The two disagreeing silently is worse than either number alone.
+  const disputedBlocking = syn.findings.filter((f) => isBlocking(f) && f.confidence === 'disputed');
   lines.push(
     `**Open blocking:** ${open.length} `
       + `(cross-validated or consensus, not advisory, not info)`
       + (open.length ? ` — ${open.map((f) => f.title).join('; ')}` : ''),
   );
+  if (disputedBlocking.length) {
+    lines.push(
+      `**Disputed and still blocking:** ${disputedBlocking.length} `
+        + `(reported and challenged; the stop condition holds the loop open on these) — `
+        + disputedBlocking.map((f) => f.title).join('; ') + '  ',
+    );
+  }
   const rootCauses = syn.rootCauses ?? [];
   if (rootCauses.length) {
     // A `split` group is one round 2 explicitly said is SEVERAL problems, and
