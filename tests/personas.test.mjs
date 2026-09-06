@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { DEFAULT_PERSONAS, PERSONAS } from '../src/personas.mjs';
-import { ADVISORY_KINDS, KINDS } from '../src/prompts.mjs';
+import { ADVISORY_KINDS, KINDS } from '../src/taxonomy.mjs';
 
 const all = Object.values(PERSONAS);
 

@@ -29,7 +29,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
-import { ADVISORY_KINDS } from './prompts.mjs';
+import { ADVISORY_KINDS } from './taxonomy.mjs';
 import { isBlocking, isOpenBlocking } from './synthesis.mjs';
 
 export const LEDGER_VERSION = 1;

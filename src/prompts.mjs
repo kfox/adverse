@@ -8,19 +8,7 @@
 // briefing and makes reviewers read the repo themselves. See
 // PHASE2_BRIEFING_INSTRUCTIONS.
 
-// Finding kinds. The axis is orthogonal to severity and answers a different
-// question: not "how bad is this" but "what evidence would settle it". That is
-// what makes it mechanically useful — it selects how a finding is verified,
-// whether it can be traced across commits, and whether it can hold a
-// convergence loop open.
-//
-// `design` is ADVISORY by construction. Design opinions do not converge: a
-// reviewer can always want different structure, so counting them in a
-// stop condition means the loop never stops. They are recorded and ranked,
-// never blocking. Every other kind blocks — including an unrecognized one, so
-// that a finding cannot escape the gate by being mislabeled.
-export const KINDS = Object.freeze(['defect', 'behavioral', 'contract', 'design']);
-export const ADVISORY_KINDS = Object.freeze(new Set(['design']));
+import { KINDS, SEVERITIES } from './taxonomy.mjs';
 
 export const KIND_RUBRIC = `\`kind\` — what kind of claim this is. This selects how the finding gets
 verified and whether it can block the change, so choose it honestly rather
@@ -408,7 +396,7 @@ export function knownTitles(round1Reviews) {
 }
 
 const VERDICTS = new Set(['approve', 'conditional', 'reject']);
-const SEVERITIES = new Set(['critical', 'warning', 'info']);
+const SEVERITY_SET = new Set(SEVERITIES);
 const KIND_SET = new Set(KINDS);
 
 // Structural validation only. Whether a finding's ANCHORING matches its kind —
@@ -423,7 +411,7 @@ function validateFinding(f, label) {
   for (const k of ['severity', 'title', 'detail']) {
     if (!(k in f)) return `${label} missing key ${JSON.stringify(k)}.`;
   }
-  if (!SEVERITIES.has(f.severity)) {
+  if (!SEVERITY_SET.has(f.severity)) {
     return `${label}.severity must be critical|warning|info, got ${JSON.stringify(f.severity)}.`;
   }
   if (!('kind' in f)) return `${label} missing key "kind".`;

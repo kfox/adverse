@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 
 import { AUDITOR, PERSONAS } from '../src/personas.mjs';
 import {
-  KINDS,
   PHASE1_INSTRUCTIONS,
   validateVerify,
   buildPhase1Prompt,
@@ -17,6 +16,7 @@ import {
   validatePhase1,
   validatePhase2,
 } from '../src/prompts.mjs';
+import { KINDS } from '../src/taxonomy.mjs';
 
 import * as PROMPTS from '../src/prompts.mjs';
 

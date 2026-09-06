@@ -25,7 +25,7 @@
 // challenges) — we mark it `disputed` because the dispute is the more
 // interesting signal to a human reader.
 //
-// Orthogonal to both severity and confidence is `kind` (see src/prompts.mjs),
+// Orthogonal to both severity and confidence is `kind` (see src/taxonomy.mjs),
 // which answers "what evidence would settle this". It is what makes an
 // automated stop condition possible: `design` findings are advisory, because a
 // reviewer can always want different structure and so a loop that counts them
@@ -33,9 +33,8 @@
 // are both credible enough (cross-validated or consensus) and consequential
 // enough (not advisory, not `info`) to hold a change open.
 
-import { ADVISORY_KINDS } from './prompts.mjs';
+import { ADVISORY_KINDS, SEVERITY_RANK } from './taxonomy.mjs';
 
-const SEVERITY_ORDER = { critical: 0, warning: 1, info: 2 };
 // Verdict → score mapping. The natural symmetric choice: approve and reject
 // cancel each other out, conditional carries half-weight on the approve side.
 // The mean across reviewers gives the final score in [-1, 1].
@@ -85,7 +84,7 @@ export function mergeSplitReviews(a, b) {
 const CONFIDENCE_RANK = { disputed: 0, 'cross-validated': 1, consensus: 2, solo: 3 };
 
 function severityRank(s) {
-  return SEVERITY_ORDER[s] ?? 99;
+  return SEVERITY_RANK[s] ?? 99;
 }
 
 function normTitle(t) {
@@ -133,7 +132,7 @@ export function isOpenBlocking(finding) {
 function buildFinding(persona, raw) {
   const title = coerceStr(raw?.title);
   const severity = raw?.severity;
-  if (!title || !(severity in SEVERITY_ORDER)) return null;
+  if (!title || !(severity in SEVERITY_RANK)) return null;
   return {
     severity,
     kind: coerceKind(raw?.kind),

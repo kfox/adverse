@@ -2,7 +2,7 @@
 // works as an email/chat attachment, in CI artifacts, or pasted into a wiki.
 // Vanilla HTML + scoped CSS + a few lines of JS — no framework, no build step.
 
-import { ADVISORY_KINDS } from './prompts.mjs';
+import { ADVISORY_KINDS } from './taxonomy.mjs';
 
 const SEVERITY_BADGE = {
   critical: { label: 'CRITICAL', color: '#b91c1c', bg: '#fee2e2' },

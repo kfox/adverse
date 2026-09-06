@@ -44,7 +44,7 @@ import { importFromSrc } from './package-root.mjs';
 
 const { annotate, checkBinding, isRegressionCandidate, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
-const { ADVISORY_KINDS } = await importFromSrc('prompts.mjs');
+const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
 const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 const { CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings, makeClaimChecker } =
