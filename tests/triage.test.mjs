@@ -280,14 +280,34 @@ test('groupFindings: an unknown first cluster id no longer discards the whole cl
 });
 
 
-test('groupFindings: a component at the cap is not oversized', () => {
+test('groupFindings: a component at the cap is not oversized in a big enough review', () => {
   const n = MAX_CONFIRMABLE_MEMBERS;
   const findings = Array.from({ length: n }, (_, i) =>
     f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: `f${i}.py`, line: i }));
+  // Enough unrelated findings that a group of `n` is not most of the review.
+  const filler = Array.from({ length: n }, (_, i) =>
+    f({ id: `X${i + 1}`, reporter: 'pragmatist', file: `x${i}.py`, line: i }));
   const crossReferences = findings.slice(1).map((x, i) => ({ from: x.id, to: findings[i].id }));
-  const [g] = groupFindings(findings, { crossReferences });
+  const [g] = groupFindings([...findings, ...filler], { crossReferences });
+  assert.equal(g.members.length, n);
   assert.equal(g.oversized, false);
 });
+
+test('groupFindings: the cap is relative too — most of a small review cannot collapse', () => {
+  // MAX_CONFIRMABLE_MEMBERS is absolute, and the invariant it is written for is
+  // not: 8 of 34 findings honours "one ruling must not collapse most of a
+  // review", and 7 of 10 does not — that is 70% under a single disposition.
+  const findings = Array.from({ length: 10 }, (_, i) =>
+    f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: `f${i}.py`, line: i }));
+  const seven = findings.slice(0, 7);
+  const clusters = [{ file: 'f0.py', ids: seven.map((x) => x.id) }];
+  const [g] = groupFindings(findings, { clusters });
+
+  assert.equal(g.members.length, 7, 'still reported in full');
+  assert.equal(g.oversized, true, 'but not confirmable as one disposition');
+  assert.ok(7 <= MAX_CONFIRMABLE_MEMBERS, 'and the absolute cap alone would have allowed it');
+});
+
 
 // --- makeClaimChecker ---------------------------------------------------------
 // Needs a real repo: changedRanges shells out to `git diff`.

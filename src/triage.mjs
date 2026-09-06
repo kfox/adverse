@@ -255,6 +255,20 @@ export function crossReferenceFindings(findings) {
 // this tool always fails in.
 export const MAX_CONFIRMABLE_MEMBERS = 8;
 
+// The cap above is absolute, and the invariant it is written for is not: "one
+// reviewer answering `one` must not collapse most of a review into a single
+// disposition" holds at 8 members out of 34 and fails at 7 out of 10, which is
+// 70% of the review under one decision. So the effective bound is whichever of
+// the two is tighter.
+//
+// The floor of 2 keeps the smallest meaningful group legal at any review size;
+// below that there is nothing to group and the relative bound would forbid
+// grouping entirely.
+export function confirmableLimit(findingCount) {
+  return Math.min(MAX_CONFIRMABLE_MEMBERS, Math.max(2, Math.floor(findingCount / 2)));
+}
+
+
 const SEVERITY_ORDER = ['critical', 'warning', 'info'];
 
 function severityIndex(severity) {
@@ -344,9 +358,15 @@ export function groupFindings(findings, { clusters = [], crossReferences = [], a
   // edge is not lost: it is still reported in `crossReferences` for the
   // operator to read, it simply does not collapse two findings into one
   // disposition.
+  // The CLOSURE bound is the absolute one. It exists to stop runaway
+  // transitivity, which is about the chain, not about the review's size — and
+  // the relative bound below would refuse the three-finding A~B~C chain this
+  // feature was built for.
   const byStrength = [...crossReferences]
     .sort((x, y) => (y.lineEchoed ? 1 : 0) - (x.lineEchoed ? 1 : 0));
   for (const x of byStrength) union(x.from, x.to, MAX_CONFIRMABLE_MEMBERS);
+
+
 
 
   const components = new Map();
@@ -408,7 +428,14 @@ export function groupFindings(findings, { clusters = [], crossReferences = [], a
         counterpart: f.counterpart ?? null,
         title: f.title,
       })),
-      oversized: members.length > MAX_CONFIRMABLE_MEMBERS,
+      // CONFIRMABILITY gets the relative bound. A group may legitimately be
+      // most of a tiny review; what must not happen is one ruling turning most
+      // of a review into one disposition. Oversized fails toward MORE
+      // decisions, so a group that trips this is still reported in full and
+      // still individually decidable — it just cannot collapse.
+      oversized: members.length > confirmableLimit(findings.length),
+
+
     });
   }
   return groups;

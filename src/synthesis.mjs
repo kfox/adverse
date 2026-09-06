@@ -179,7 +179,17 @@ function buildFinding(persona, raw) {
 // Every state but `confirmed` leaves the members exactly as they were, so a
 // missing, contested, or oversized ruling costs the speedup and never a
 // finding.
+// How many independent personas must rule `one` before a candidate root cause
+// becomes a confirmed one. Two, for the same reason the report's own
+// confidence labels need two: a confirmed group is one fix and one disposition
+// covering N findings, and a single unopposed voice — potentially the sole
+// reporter of every member — deciding that inverts the design's own rule that
+// cross-validation is what makes agreement trustworthy. Falling short is
+// `proposed`, which costs only the remediation shortcut and never a finding.
+const MIN_CONFIRMING_VOICES = 2;
+
 function buildRootCauses(groups, round2, findByTitle) {
+
   const rulingsById = new Map();
   for (const [persona, cross] of Object.entries(round2)) {
     for (const r of cross?.groups ?? []) {
@@ -192,10 +202,7 @@ function buildRootCauses(groups, round2, findByTitle) {
   return groups.map((g) => {
     const rulings = rulingsById.get(g.id) ?? [];
     const verdicts = new Set(rulings.map((r) => r.ruling));
-    const status = rulings.length === 0 ? 'proposed'
-      : verdicts.size > 1 ? 'contested'
-        : verdicts.has('split') ? 'split'
-          : g.oversized ? 'oversized' : 'confirmed';
+
 
     // A citation naming a title synthesis never built is reported unresolved
     // rather than dropped: the finding may have been rejected upstream for a
@@ -229,15 +236,44 @@ function buildRootCauses(groups, round2, findByTitle) {
     // but it should not silently vouch for one either.
     const reporters = [...new Set(citations.flatMap((c) => c.reporters ?? [c.reporter]))];
 
+    // A ruling from a persona that is the only reporter of every citation is a
+    // persona confirming that its own findings are one thing. `validate` and
+    // `challenge` already skip a persona's edge on a finding it reported
+    // itself; a group ruling had no such guard.
+    const selfRuled = rulings
+      .filter((r) => citations.every((c) => {
+        const rs = c.reporters ?? [c.reporter];
+        return rs.length === 1 && rs[0] === r.persona;
+      }))
+      .map((r) => r.persona);
+    const voices = new Set(
+      rulings.filter((r) => !selfRuled.includes(r.persona)).map((r) => r.persona));
+
+    // A confirmed group is ONE fix and ONE disposition covering N citations,
+    // so confirming it is the consequential direction and needs the same
+    // cross-validation the rest of the design treats as the trustworthy
+    // signal. `split` and `contested` need no quorum: both dissolve the group
+    // and leave every citation individually decidable, which is where this
+    // tool always fails toward.
+    const status = rulings.length === 0 ? 'proposed'
+      : verdicts.size > 1 ? 'contested'
+        : verdicts.has('split') ? 'split'
+          : g.oversized ? 'oversized'
+            : voices.size >= MIN_CONFIRMING_VOICES ? 'confirmed' : 'proposed';
+
     return {
       ...g,
       status,
       rulings,
       citations,
       reporters,
+      // Why a unanimous `one` did not confirm, when it did not — otherwise the
+      // operator sees `proposed` next to an agreeing ruling and no reason.
+      confirmation: { voices: voices.size, required: MIN_CONFIRMING_VOICES, selfRuled },
       blocking: citations.some((c) => c.blocking === true),
       fix: ranked.find((c) => c.fix)?.fix ?? null,
     };
+
 
   });
 }
