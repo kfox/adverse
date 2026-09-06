@@ -148,6 +148,7 @@ const chained = () => {
     f({ id: 'F2', reporter: 'adversary', file: 'a.py', line: 14, severity: 'critical', kind: 'defect',
         title: 'the unreachable guard is an auth bypass' }),
     f({ id: 'F3', reporter: 'steward', file: 'docs/a.md', line: 3, severity: 'info', kind: 'contract',
+        counterpart: 'a.py',
         title: 'docs still promise the guard', detail: 'a.py line 10 no longer does this' }),
   ];
   return {
@@ -189,6 +190,9 @@ test('groupFindings: every member rides along as a citation with its own anchor'
     ['F2', 'adversary', 'defect', 'critical', 'a.py', 14],
     ['F3', 'steward', 'contract', 'info', 'docs/a.md', 3],
   ]);
+  // A `contract` citation without its counterpart is a decision that can never
+  // match again — half the finding's identity, dropped on the way to the ledger.
+  assert.equal(g.citations[2].counterpart, 'a.py');
   assert.deepEqual(g.files, ['a.py', 'docs/a.md']);
   assert.deepEqual(g.kinds, ['defect', 'contract']);
 });

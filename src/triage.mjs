@@ -230,6 +230,13 @@ export function groupFindings(findings, { clusters = [], crossReferences = [], a
         severity: f.severity ?? null,
         file: f.file ?? null,
         line: f.line ?? null,
+        // `counterpart` is here because a group decision is built by copying
+        // these fields into decisions.json, and a `contract` entry that omits
+        // it can never match anything again (src/ledger.mjs, scoreMatch: the
+        // claim is "X contradicts Y", so Y is half the identity). The ledger
+        // would then re-raise that citation every iteration — the circling it
+        // exists to stop.
+        counterpart: f.counterpart ?? null,
         title: f.title,
       })),
       oversized: members.length > MAX_CONFIRMABLE_MEMBERS,

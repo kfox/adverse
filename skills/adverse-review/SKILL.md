@@ -586,8 +586,11 @@ that makes it fire falsely after every fix batch destroys the one signal the
 loop trusts most.
 
 `decisions.json` is `{"decisions": [{id, title, kind, severity, confidence,
-file, line, citedLine, disposition, reason}]}` where `disposition` is `fixed`,
-`declined`, or `deferred`. **Every decision needs a reason** — the script
+file, line, counterpart, citedLine, disposition, reason}]}` where `disposition`
+is `fixed`, `declined`, or `deferred`. **Carry `counterpart` on every
+`contract` decision.** That kind's claim is "X contradicts Y", so Y is half its
+identity: an entry without one matches nothing ever again, and the next pass
+re-raises the finding you just decided. **Every decision needs a reason** — the script
 refuses one without it, because an unexplained decision cannot be reviewed later
 and is indistinguishable from an oversight.
 
