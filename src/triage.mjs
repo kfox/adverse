@@ -561,8 +561,48 @@ export function makeClaimChecker({ repo, base }) {
   // as the literal one, because a symlink committed in the tree can point at
   // `.git` while the string stays clean — the same bypass `realpathSync` is
   // already here to close.
+  // Case-INSENSITIVELY, and that is the whole point. The first version of this
+  // compared segments with `includes(GIT_DIR)`, which is exact — and APFS and
+  // NTFS are not. On macOS `.GIT/config` opens the same file, and
+  // `realpathSync` returns the caller's casing rather than the on-disk casing,
+  // so neither the literal nor the resolved check saw it. One character
+  // defeated the refusal and put the token back in the round-2 prompt.
+  //
+  // Trailing dots and spaces go too: Windows strips them when resolving, so
+  // `.git.` and `.git ` name the same directory there.
   function underGitDir(root, candidate) {
-    return path.relative(root, candidate).split(path.sep).includes(GIT_DIR);
+    return path.relative(root, candidate).split(path.sep)
+      .some((seg) => seg.toLowerCase().replace(/[. ]+$/, '') === GIT_DIR);
+  }
+
+  // Git's own answer, which no amount of path spelling can argue with, and the
+  // backstop for whatever the segment match above still does not anticipate.
+  // Resolved once per checker: it is one subprocess, and the answer cannot
+  // change while triage runs.
+  //
+  // This also covers a git dir that is not called `.git` at all —
+  // `--separate-git-dir`, or a submodule whose `.git` is a file pointing into
+  // the parent's `modules/`. Those usually land outside the checkout, where
+  // the containment check already refuses them, but "usually" is not a
+  // security property.
+  let gitDirReal;
+  function realGitDir() {
+    if (gitDirReal !== undefined) return gitDirReal;
+    try {
+      const out = execFileSync('git', ['rev-parse', '--absolute-git-dir'],
+                               { cwd: repo, encoding: 'utf-8' }).trim();
+      gitDirReal = out ? realpathSync(out) : null;
+    } catch {
+      gitDirReal = null; // not a git repo, or git unavailable; segment match stands
+    }
+    return gitDirReal;
+  }
+
+  function isGitInternal(root, candidate) {
+    if (underGitDir(root, candidate)) return true;
+    const gitDir = realGitDir();
+    if (!gitDir) return false;
+    return candidate === gitDir || candidate.startsWith(gitDir + path.sep);
   }
 
   // Either the path this checker may read, or the reason it may not. The two
@@ -582,7 +622,7 @@ export function makeClaimChecker({ repo, base }) {
     if (abs !== repo && !abs.startsWith(repo + path.sep)) {
       return { why: 'escapes the checkout' };
     }
-    if (underGitDir(repo, abs)) return { why: GIT_DIR_REFUSAL };
+    if (isGitInternal(repo, abs)) return { why: GIT_DIR_REFUSAL };
 
     let real;
     try {
@@ -593,7 +633,7 @@ export function makeClaimChecker({ repo, base }) {
     if (real !== repoReal && !real.startsWith(repoReal + path.sep)) {
       return { why: 'escapes the checkout' };
     }
-    if (underGitDir(repoReal, real)) return { why: GIT_DIR_REFUSAL };
+    if (isGitInternal(repoReal, real)) return { why: GIT_DIR_REFUSAL };
     return { path: real };
   }
 
@@ -682,7 +722,13 @@ export function makeClaimChecker({ repo, base }) {
                why: `cited line ${line} is past end of file (${total} lines)` };
     }
 
-    const ranges = changedRanges(file);
+    // The RESOLVED path, not the cited string. Keyed on `file`, the memo below
+    // was one entry per SPELLING: a payload citing `a.js`, `./a.js`,
+    // `././a.js`, … restored the original unbounded fan-out at full cost, and
+    // every one of those spellings claim-checks `ok`, so nothing else rejects
+    // them. A model also trips this by accident when two lanes spell one path
+    // differently.
+    const ranges = changedRanges(path.relative(repoReal, abs));
     if (ranges === null) {
       out.inDiff = 'unknown';
     } else if (ranges.some(([s, e]) => line >= s && line <= e)) {

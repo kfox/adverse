@@ -6,7 +6,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { collectDirectory, collectDiff } from './collect.mjs';
-import { PERSONAS, DEFAULT_PERSONAS } from './personas.mjs';
+import { PERSONAS, DEFAULT_PERSONAS, crossReviews } from './personas.mjs';
 import {
   buildPhase1Prompt,
   buildPhase2Prompt,
@@ -194,7 +194,13 @@ async function cmdReview(rest) {
   const round2 = {};
   if (!values['single-round'] && Object.keys(round1).length >= 2) {
     logProgress(`⏳ round 2: ${Object.keys(round1).length} reviewers cross-examining...`);
-    const phase2Jobs = Object.keys(round1).map((name) => ({
+    // A lane whose every kind is advisory has no blocking claim to validate or
+    // challenge, so spawning it in round 2 buys nothing and its `challenge`
+    // entries are applied by synthesis like anyone else's — one challenger
+    // relabels a finding `disputed` however many personas reported it. The
+    // Skill bridge refuses such a payload; this path was producing one itself
+    // on every run.
+    const phase2Jobs = Object.keys(round1).filter((name) => crossReviews(name, 2)).map((name) => ({
       persona: name,
       phase: 'round2',
       prompt: buildPhase2Prompt(PERSONAS[name], block, round1),
@@ -274,6 +280,18 @@ async function cmdSynthesize(rest) {
   if (!values.round1) die('synthesize: --round1 is required');
   const round1 = readJsonArg(values.round1);
   const round2 = values.round2 ? readJsonArg(values.round2) : {};
+
+  // The same rule src/roster.mjs applies in the Skill bridge. It lived only
+  // there, so the shipped binary still accepted a round-2 payload from a lane
+  // that never cross-reviews — and a single such `challenge` moves a critical
+  // reported by two lanes out of `Open blocking`. Two paths, one rule.
+  for (const persona of Object.keys(round2)) {
+    if (!crossReviews(persona, 2)) {
+      die(`synthesize: ${values.round2}: '${persona}' does not cross-review: every kind it`
+        + ` owns is advisory, so it has no blocking claim to validate or challenge.`
+        + ` A round-2 payload under its name is a stale round-1 file or a spoof.`);
+    }
+  }
 
   // The candidate root causes triage proposed. Optional: without it the report
   // is exactly what it was before grouping existed, one section per finding —

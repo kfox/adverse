@@ -4,11 +4,14 @@
 
 import { ADVISORY_KINDS, assertCoversStatuses } from './taxonomy.mjs';
 
-const SEVERITY_BADGE = {
+// Null prototype: same reasoning as SEVERITY_MARKER in src/synthesis.mjs. A
+// group severity of "constructor" defeated the `?? SEVERITY_BADGE.info`
+// fallback and rendered `style="color:undefined;background:undefined"`.
+const SEVERITY_BADGE = Object.assign(Object.create(null), {
   critical: { label: 'CRITICAL', color: '#b91c1c', bg: '#fee2e2' },
   warning:  { label: 'WARNING',  color: '#92400e', bg: '#fef3c7' },
   info:     { label: 'INFO',     color: '#1e40af', bg: '#dbeafe' },
-};
+});
 
 const CONFIDENCE_LABEL = {
   'cross-validated': 'Cross-validated · multiple reviewers, independently',

@@ -117,14 +117,20 @@ export function checkRoster(payloads, {
   const counts = new Map();
   for (const payload of payloads) {
     const bad = checkIdentity(payload, { personas, ruledOut, round });
-    // A refused payload is not a lane that was heard from. No refusal reason
-    // can currently apply to a persona that is also in `runLanes` — the three
-    // are "not a string", "not in the registry" and "the plan ruled it out",
-    // and a running lane is none of those — so this `else` is unreachable
-    // today and no test discriminates it. It is kept because it fails in the
-    // safe direction: if a future refusal reason does apply to a running lane,
-    // counting it would SUPPRESS that lane's silence warning, and a lane that
-    // said nothing would read as a lane that reviewed and found nothing.
+    // A refused payload is not a lane that was heard from. There are four
+    // refusal reasons — "not a string", "not in the registry", "the plan ruled
+    // it out", and "this lane does not cross-review" — and the fourth DOES
+    // apply to a persona that is also in `runLanes`: a plan that runs the
+    // Pragmatist plus a round-2 payload under its name is exactly that. So
+    // this branch is reachable, and reached, which is why the comment that
+    // called it unreachable no longer stands.
+    //
+    // The outcome is still right, and for the same reason it always was: not
+    // counting a refused payload fails in the safe direction. `silentLanes`
+    // filters on the same `crossReviews` predicate, so the lane is excluded
+    // from the silence check too and no bogus warning appears. Counting it
+    // would SUPPRESS a real lane's silence warning, and a lane that said
+    // nothing would read as a lane that reviewed and found nothing.
     if (bad) problems.push(bad);
     else counts.set(payload.persona, (counts.get(payload.persona) ?? 0) + 1);
   }

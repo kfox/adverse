@@ -53,8 +53,20 @@ test('lanes that do cross-review are still accepted in round 2', () => {
 });
 
 test('crossReviews is derived from advisory kinds, not from a hard-coded name', () => {
-  // If a second advisory-only lane is ever added, it must be covered without
-  // anyone remembering to edit roster.mjs.
+  // Over the real registry this assertion cannot fail an implementation that
+  // simply names the Pragmatist, because it is the only advisory-only lane.
+  // The synthetic registry is what makes the claim in this test's name real:
+  // `scribe` is advisory-only and is not called 'pragmatist', so a name check
+  // returns the wrong answer for it, and `hybrid` owns one blocking kind
+  // alongside an advisory one and must still cross-review.
+  const personas = {
+    scribe: { name: 'scribe', kinds: ['design'] },
+    hybrid: { name: 'hybrid', kinds: ['design', 'defect'] },
+  };
+  assert.equal(crossReviews('scribe', 2, { personas }), false);
+  assert.equal(crossReviews('hybrid', 2, { personas }), true);
+  assert.equal(crossReviews('scribe', 1, { personas }), true, 'round 1 is never filtered');
+
   for (const name of DEFAULT_PERSONAS) {
     const advisoryOnly = PERSONAS[name].kinds.every((k) => ADVISORY_KINDS.has(k));
     assert.equal(crossReviews(name, 2), !advisoryOnly, name);

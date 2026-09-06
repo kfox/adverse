@@ -79,6 +79,36 @@ for (const form of ACCEPTED_FORMS) {
   });
 }
 
+// Removing the round-2 refusal from src/roster.mjs reddened only its own unit
+// test — the composition of `combine --round2` with that rule had no
+// end-to-end case. This is that case, and it puts the Pragmatist back on the
+// `--round2` argv path in its now-correct role: refused, exit 1.
+test('combine --round2 refuses a lane that does not cross-review', () => {
+  const dir = freshTmp();
+  try {
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round2', review(dir, 'auditor'), review(dir, 'pragmatist'),
+      '--out', out]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /does not cross-review/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('combine --round1 still accepts that same lane', () => {
+  const dir = freshTmp();
+  try {
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', review(dir, 'auditor'), review(dir, 'pragmatist'),
+      '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(personasIn(out), ['auditor', 'pragmatist']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('combine accepts a single input file', () => {
   const dir = freshTmp();
   try {

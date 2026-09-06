@@ -474,6 +474,28 @@ test('checkClaim: .git is refused through a symlink and through traversal, not j
   }
 });
 
+// The refusal compared segments to the literal '.git', and APFS and NTFS are
+// case-INSENSITIVE while `realpathSync` on darwin returns the caller's casing
+// rather than the on-disk casing. So `.GIT/config` opened the same file and
+// passed both the literal and the resolved check: one character defeated the
+// refusal and put the token back in briefing.json. Skipped where the
+// filesystem really is case-sensitive, since there the variants name nothing.
+test('checkClaim: .git is refused in any casing, on a case-insensitive filesystem', (t) => {
+  git(repo, 'config', 'http.https://github.com/.extraheader', GIT_CONFIG_SENTINEL);
+  let caseInsensitive = false;
+  try {
+    caseInsensitive = readFileSync(path.join(repo, '.GIT', 'config'), 'utf-8').length > 0;
+  } catch { /* case-sensitive filesystem */ }
+  if (!caseInsensitive) return t.skip('case-sensitive filesystem');
+
+  for (const cite of ['.GIT/config', '.Git/config', '.gIt/config', './.GIT/config']) {
+    const c = checker.checkClaim(cite, 1);
+    assert.equal(c.status, 'DISPROVED', cite);
+    assert.equal(c.citedLine, undefined, cite);
+  }
+  assert.equal(checker.checkCounterpart('.GIT/config').status, 'DISPROVED');
+});
+
 test('checkCounterpart: a path under .git/ is refused too, not only the primary anchor', () => {
   const c = checker.checkCounterpart('.git/config');
   assert.equal(c.status, 'DISPROVED');

@@ -106,13 +106,22 @@ test('changedRanges shells out once per cited file, not once per finding', () =>
   const shim = mkdtempSync(path.join(os.tmpdir(), 'adverse-gitshim-'));
   const log = path.join(shim, 'calls.txt');
   const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf-8' }).trim();
+  // Only `git diff` is counted. The checker also asks `git rev-parse` once
+  // for the authoritative git dir, and that is a fixed cost per checker, not
+  // the per-finding fan-out this test is about.
   writeFileSync(path.join(shim, 'git'),
-    `#!/bin/sh\necho call >> ${log}\nexec ${real} "$@"\n`, { mode: 0o755 });
+    `#!/bin/sh\nfor a in "$@"; do [ "$a" = diff ] && echo call >> ${log} && break; done\nexec ${real} "$@"\n`,
+    { mode: 0o755 });
 
+  // Half of each file's citations use an ALIASED spelling. Keyed on the cited
+  // string rather than the resolved path, the memo was one entry per spelling
+  // — so `a.py`, `./a.py`, `././a.py` … restored the full fan-out while every
+  // one of them still claim-checked `ok`. Two files must still be two calls.
   const findings = [];
   for (const file of ['app.py', 'docs/app.md']) {
     for (let i = 0; i < 25; i += 1) {
-      findings.push(finding({ file, line: 1, title: `${file} ${i}` }));
+      const cited = i % 2 ? `${'./'.repeat(i)}${file}` : file;
+      findings.push(finding({ file: cited, line: 1, title: `${file} ${i}` }));
     }
   }
   const round1 = path.join(repo, 'round1-fanout.json');

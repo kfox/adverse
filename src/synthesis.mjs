@@ -455,7 +455,14 @@ function consensusLabel(score, verdicts) {
 
 // ---------- Markdown renderer -----------------------------------------------
 
-const SEVERITY_MARKER = { critical: '🔴', warning: '🟡', info: '🔵' };
+// Null prototype, like every other lookup keyed by something a payload can
+// name. A root-cause group carries a reviewer-supplied `severity` through
+// briefing.json, so `SEVERITY_MARKER[g.severity]` with `g.severity` of
+// "constructor" answered with a function and printed it into the report — and
+// the `?? SEVERITY_MARKER.info` fallback cannot fire, because the inherited
+// value is truthy.
+const SEVERITY_MARKER = Object.assign(Object.create(null),
+  { critical: '🔴', warning: '🟡', info: '🔵' });
 
 const SECTION_TITLES = {
   'cross-validated': '## Cross-validated findings (multiple reviewers reported independently)',
