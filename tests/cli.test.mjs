@@ -218,6 +218,59 @@ test('synthesize subcommand records --skipped, --degraded, and --round2-skipped'
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
+test('synthesize --briefing carries the root causes into every output', () => {
+  const out = freshTmp();
+  try {
+    const finding = (title, severity, file, line) =>
+      ({ severity, kind: 'defect', file, line, counterpart: null, title, detail: 'd', fix: null });
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+      auditor: { persona: 'auditor', verdict: 'conditional', summary: '', findings: [finding('guard is unreachable', 'warning', 'a.py', 10)] },
+      adversary: { persona: 'adversary', verdict: 'reject', summary: '', findings: [finding('the guard is a bypass', 'critical', 'a.py', 14)] },
+    }));
+    writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
+      steward: { persona: 'steward', validate: [], challenge: [], added: [],
+                 groups: [{ id: 'G1', ruling: 'one', reason: 'one unreachable guard' }] },
+    }));
+    writeFileSync(path.join(out, 'briefing.json'), JSON.stringify({
+      findings: [], groups: [{
+        id: 'G1', title: 'the guard is a bypass', severity: 'critical', kinds: ['defect'],
+        files: ['a.py'], reporters: ['auditor', 'adversary'], members: ['F1', 'F2'],
+        via: ['cluster'], oversized: false,
+        citations: [
+          { id: 'F1', reporter: 'auditor', kind: 'defect', severity: 'warning', file: 'a.py', line: 10, title: 'guard is unreachable' },
+          { id: 'F2', reporter: 'adversary', kind: 'defect', severity: 'critical', file: 'a.py', line: 14, title: 'the guard is a bypass' },
+        ],
+      }],
+    }));
+    const r = runCli([
+      'synthesize',
+      '--round1', path.join(out, 'r1.json'),
+      '--round2', path.join(out, 'r2.json'),
+      '--briefing', path.join(out, 'briefing.json'),
+      '--out', path.join(out, 'report.md'),
+      '--json-out', path.join(out, 'report.json'),
+      '--html-out', path.join(out, 'report.html'),
+    ]);
+    assert.ok(r.status === 0 || r.status === 1, r.stderr);
+    assert.match(readFileSync(path.join(out, 'report.md'), 'utf-8'), /\*\*\[G1\]\*\* the guard is a bypass/);
+    assert.match(readFileSync(path.join(out, 'report.html'), 'utf-8'), /Root causes — 1 confirmed of 1 proposed/);
+    const json = JSON.parse(readFileSync(path.join(out, 'report.json'), 'utf-8'));
+    assert.equal(json.root_causes[0].status, 'confirmed');
+    assert.deepEqual(json.findings.map((f) => f.group), ['G1', 'G1']);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+test('synthesize --briefing pointed at something that is not a briefing is a usage error', () => {
+  const out = freshTmp();
+  try {
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify({ auditor: { persona: 'auditor', verdict: 'approve', summary: '', findings: [] } }));
+    writeFileSync(path.join(out, 'nope.json'), JSON.stringify({ findings: [] }));
+    const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json'), '--briefing', path.join(out, 'nope.json')]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a briefing\.json/);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
 test('synthesize subcommand rejects an empty --round2-skipped reason', () => {
   const out = freshTmp();
   try {

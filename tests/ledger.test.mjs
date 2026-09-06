@@ -861,3 +861,87 @@ test('exit 3 on a degraded run says the lanes never reviewed', () => {
   assert.equal(s.done, false);
   assert.match(s.reason, /lane\(s\) that never reviewed/);
 });
+
+// --- root-cause decisions ----------------------------------------------------
+// The group rides on an entry as CONTEXT. It never widens matching — "was in
+// the same group" would let one decision settle every citation of that group,
+// which is precisely the silent settle the scoring scale refuses.
+
+const group = (over = {}) => ({
+  id: 'G1',
+  title: 'the unreachable guard',
+  citations: [{ id: 'F1', title: 'Off-by-one in the loop bound' }, { id: 'F2', title: 'the guard is a bypass' }],
+  ...over,
+});
+
+test('recordDecisions keeps the root cause a decision was taken on', () => {
+  const l = recordDecisions(emptyLedger(), [
+    { title: 'a', disposition: 'fixed', reason: 'guard restored', group: group() },
+  ], { atCommit: 'sha1' });
+  assert.equal(l.entries[0].group.id, 'G1');
+  assert.equal(l.entries[0].group.citations.length, 2);
+});
+
+test('a decision taken on no group records null, not a half-shaped one', () => {
+  const l = recordDecisions(emptyLedger(), [{ title: 'a', disposition: 'fixed', reason: 'r' }], { atCommit: 's' });
+  assert.equal(l.entries[0].group, null);
+});
+
+test('a returning finding says the ROOT-CAUSE fix missed a symptom, not that a fix missed', () => {
+  const [a] = annotate([finding()], ledgerWith(entry({ disposition: 'fixed', group: group() })));
+  assert.equal(a.adjudicated.group.id, 'G1');
+  assert.equal(a.adjudicated.group.citationCount, 2);
+  assert.match(a.adjudicated.note, /ROOT-CAUSE fix did not close every symptom/);
+  assert.match(a.adjudicated.note, /which citation is still live/);
+});
+
+test('a settled group decision says it was not taken on this finding alone', () => {
+  const [a] = annotate([finding()], ledgerWith(entry({ disposition: 'declined', group: group() })));
+  assert.match(a.adjudicated.note, /not on this finding alone/);
+  assert.match(a.adjudicated.note, /root cause G1/);
+});
+
+test('a decision with no group leaves the note exactly as it was', () => {
+  const [a] = annotate([finding()], ledgerWith(entry({ disposition: 'fixed' })));
+  assert.equal(a.adjudicated.group, null);
+  assert.doesNotMatch(a.adjudicated.note, /root cause/i);
+});
+
+test('a group never widens matching — a sibling citation is not settled by proximity', () => {
+  // F2 is a citation of the same recorded group, in another file entirely.
+  // Only its own identity may settle it, exactly as before groups existed.
+  const sibling = finding({ title: 'the guard is a bypass', file: 'other.py', line: 300 });
+  const [a] = annotate([sibling], ledgerWith(entry({ disposition: 'declined', group: group() })));
+  assert.equal(a.adjudicated, undefined, 'group membership must not match a finding kind/file/title cannot');
+});
+
+test('a recorded group is sanitized like every other string that reaches a briefing', () => {
+  // `clipReason`'s contract, applied here for the same reason it is applied to
+  // `matchedId` and `disposition`: every field of an entry is copied out of a
+  // JSON file on disk and rendered into the round-2 prompt.
+  const nasty = {
+    id: 'G1\u001b[2J',
+    title: 'x'.repeat(4000),
+    citations: [{ id: 'F1\u0007', title: 'y'.repeat(4000) }],
+  };
+  const [a] = annotate([finding()], ledgerWith(entry({ disposition: 'fixed', group: nasty })));
+  assert.equal(a.adjudicated.group.id, 'G1 [2J', 'a control byte becomes a space');
+  assert.equal(a.adjudicated.group.citations[0].id, 'F1 ');
+  for (const s of [a.adjudicated.group.title, a.adjudicated.group.citations[0].title]) {
+    assert.ok(s.length < 600 && s.endsWith('\u2026 [clipped]'), 'a long string is clipped and says so');
+  }
+});
+
+test('an oversized citation list is truncated but its true size is still reported', () => {
+  const citations = Array.from({ length: 50 }, (_, i) => ({ id: `F${i}`, title: `t${i}` }));
+  const [a] = annotate([finding()], ledgerWith(entry({ disposition: 'fixed', group: group({ citations }) })));
+  assert.equal(a.adjudicated.group.citations.length, 20);
+  assert.equal(a.adjudicated.group.citationCount, 50, 'the count is the real one, not the clipped one');
+});
+
+test('a malformed group is dropped rather than half-rendered into the briefing', () => {
+  for (const bad of ['not an object', 42, [], null]) {
+    const [a] = annotate([finding()], ledgerWith(entry({ disposition: 'fixed', group: bad })));
+    assert.equal(a.adjudicated.group, null, `group: ${JSON.stringify(bad)}`);
+  }
+});

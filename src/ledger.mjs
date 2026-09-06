@@ -63,6 +63,12 @@ export const SETTLING_SCORE = 3;
 // the briefing is what tells a reviewer it is data, not instruction.
 const MAX_REASON_CHARS = 500;
 
+// How many of a recorded root cause's citations ride into a briefing. The
+// group comes off the same JSON file on disk as everything else here, so its
+// member list is as attacker-chosen as its `reason` is; a decision covering
+// twenty citations has already said what it needs to.
+const MAX_RECORDED_CITATIONS = 20;
+
 export function clipReason(text) {
   const flat = String(text ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ');
   return flat.length > MAX_REASON_CHARS ? `${flat.slice(0, MAX_REASON_CHARS)}… [clipped]` : flat;
@@ -332,6 +338,41 @@ export function isRegressionCandidate(finding) {
     && !finding.adjudicated.settled;
 }
 
+// The root cause a decision was taken on, sanitized for the briefing.
+//
+// Recorded as CONTEXT and never as a match key. Identity across iterations is
+// still per-finding — kind, file, anchor, title — because widening it to "was
+// in the same group" would let one decision settle every citation of a group,
+// which is the silent-settle failure the whole scoring scale above exists to
+// refuse. What the group buys is the sentence in `note`: a finding that comes
+// back after a root-cause fix is a different kind of news from one that comes
+// back after a symptom-level fix, and until now the ledger could not tell them
+// apart.
+function recordedGroup(group) {
+  if (!group || typeof group !== 'object' || Array.isArray(group)) return null;
+  const citations = Array.isArray(group.citations) ? group.citations : [];
+  return {
+    id: clipReason(group.id ?? '') || null,
+    title: clipReason(group.title ?? '') || null,
+    citations: citations.slice(0, MAX_RECORDED_CITATIONS).map((c) => ({
+      id: clipReason(c?.id ?? '') || null,
+      title: clipReason(c?.title ?? '') || null,
+    })),
+    citationCount: citations.length,
+  };
+}
+
+function groupNote(group, disposition) {
+  if (!group) return '';
+  const where = `root cause ${group.id ?? '(unnamed)'} (${JSON.stringify(group.title ?? '')}), `
+    + `covering ${group.citationCount} citation(s)`;
+  return disposition === 'fixed'
+    ? ` The fix was recorded against ${where} — so if this finding is back, the `
+      + 'ROOT-CAUSE fix did not close every symptom. Say which citation is still live; '
+      + 'that is a different failure from a fix that missed its own finding.'
+    : ` That decision was taken on ${where}, not on this finding alone.`;
+}
+
 // Annotate findings with the decision that already covers them.
 //
 // `adjudicated.settled` is the flag that suppresses re-litigation. A finding
@@ -353,9 +394,11 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
     const settled = isSettled(m.entry.disposition) && m.score >= SETTLING_SCORE;
     const tooWeak = isSettled(m.entry.disposition) && m.score < SETTLING_SCORE;
     const sameReport = Boolean(reportDigest) && m.entry.reportDigest === reportDigest;
+    const group = recordedGroup(m.entry.group);
     return {
       ...f,
       adjudicated: {
+        group,
         // EVERY string here is copied out of a file on disk and rendered into
         // briefing.json, which becomes the round-2 prompt. Hardening `reason`
         // alone just moved the channel: a 6,000-character `id` full of newlines
@@ -386,7 +429,10 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
         matchScore: m.score,
         settled,
         sameReport,
-        note: settled
+        // The group sentence is appended, not given a field of its own: this
+        // is the one string a reviewer is told to read, and a second note
+        // beside it is a note that gets skipped.
+        note: (settled
           ? 'Already decided in an earlier iteration. Do not re-open it. Challenge '
             + 'only if that decision rested on something the fix has since changed.'
           : tooWeak
@@ -404,7 +450,8 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
                 + 'Verify it (Phase 9) and re-synthesize before judging.'
               : 'This was recorded FIXED in an earlier iteration. If it is still real, '
                 + 'the fix did not work — say exactly what the fix missed. That is more '
-                + 'important than any new finding on this pass.',
+                + 'important than any new finding on this pass.')
+          + groupNote(group, m.entry.disposition),
       },
     };
   });
@@ -437,6 +484,12 @@ export function recordDecisions(ledger, decisions, {
       reporters: d.reporters ?? [],
       disposition: d.disposition,
       reason: String(d.reason).trim(),
+      // The root cause this decision was taken on, when it was taken on one:
+      // `{id, title, citations: [{id, title}]}`. A group decision writes ONE
+      // entry per citation, all carrying the same block — one decision made, N
+      // entries recorded — so per-finding matching keeps working unchanged and
+      // the group rides along only as context. See `recordedGroup`.
+      group: d.group ?? null,
       iteration,
       atCommit,
       reportDigest,

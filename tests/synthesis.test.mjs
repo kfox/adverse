@@ -437,3 +437,153 @@ test('a merged summary bounds each half at the reviewer contract limit, and the 
   });
   assert.equal(syn.summaries.auditor.length, 403);
 });
+
+// --- Root causes -------------------------------------------------------------
+// The unit of report and decision is the group; the unit of confidence stays
+// the finding. Every test below is really one of those two claims.
+
+const review = (persona, findings) => ({ persona, verdict: 'conditional', summary: '', findings });
+
+// One unreachable guard reported three times — as a defect, as an attack, and
+// as a contract violation — which is the shape kfox/adverse#16 was filed from.
+const oneGuard = () => ({
+  round1: {
+    auditor: review('auditor', [f('guard is unreachable', 'warning', 'a.py', 10)]),
+    adversary: review('adversary', [f('unreachable guard is a bypass', 'critical', 'a.py', 14)]),
+    steward: review('steward', [f('docs still promise the guard', 'info', 'docs/a.md', 3)]),
+  },
+  groups: [{
+    id: 'G1',
+    title: 'unreachable guard is a bypass',
+    severity: 'critical',
+    kinds: ['defect'],
+    files: ['a.py', 'docs/a.md'],
+    reporters: ['auditor', 'adversary', 'steward'],
+    members: ['F1', 'F2', 'F3'],
+    via: ['cluster', 'co-citation'],
+    oversized: false,
+    citations: [
+      { id: 'F1', reporter: 'auditor', kind: 'defect', severity: 'warning', file: 'a.py', line: 10, title: 'guard is unreachable' },
+      { id: 'F2', reporter: 'adversary', kind: 'defect', severity: 'critical', file: 'a.py', line: 14, title: 'unreachable guard is a bypass' },
+      { id: 'F3', reporter: 'steward', kind: 'contract', severity: 'info', file: 'docs/a.md', line: 3, title: 'docs still promise the guard' },
+    ],
+  }],
+});
+
+const ruling = (persona, id, r, reason = 'because') =>
+  ({ persona, validate: [], challenge: [], added: [], groups: [{ id, ruling: r, reason }] });
+
+test('a group every ruling calls `one` is confirmed', () => {
+  const { round1, groups } = oneGuard();
+  const s = synthesize(round1, { auditor: ruling('auditor', 'G1', 'one') }, { groups });
+  assert.equal(s.rootCauses.length, 1);
+  assert.equal(s.rootCauses[0].status, 'confirmed');
+  assert.deepEqual(s.rootCauses[0].rulings.map((r) => [r.persona, r.ruling]), [['auditor', 'one']]);
+});
+
+test('a group nobody ruled on stays a candidate — the pre-grouping default', () => {
+  const { round1, groups } = oneGuard();
+  assert.equal(synthesize(round1, {}, { groups }).rootCauses[0].status, 'proposed');
+});
+
+test('reviewers who disagree leave the group contested, not collapsed', () => {
+  const { round1, groups } = oneGuard();
+  const s = synthesize(round1, {
+    auditor: ruling('auditor', 'G1', 'one'),
+    steward: ruling('steward', 'G1', 'split'),
+  }, { groups });
+  assert.equal(s.rootCauses[0].status, 'contested');
+});
+
+test('a group every ruling calls `split` is dissolved', () => {
+  const { round1, groups } = oneGuard();
+  const s = synthesize(round1, { auditor: ruling('auditor', 'G1', 'split') }, { groups });
+  assert.equal(s.rootCauses[0].status, 'split');
+});
+
+test('an oversized group ruled `one` still refuses to collapse', () => {
+  const { round1, groups } = oneGuard();
+  groups[0].oversized = true;
+  const s = synthesize(round1, { auditor: ruling('auditor', 'G1', 'one') }, { groups });
+  assert.equal(s.rootCauses[0].status, 'oversized');
+});
+
+test('an off-contract ruling is ignored rather than read as a collapse', () => {
+  const { round1, groups } = oneGuard();
+  const s = synthesize(round1, { auditor: ruling('auditor', 'G1', 'merge') }, { groups });
+  assert.equal(s.rootCauses[0].status, 'proposed');
+});
+
+test('citations resolve to the findings they name, carrying confidence and blocking', () => {
+  const { round1, groups } = oneGuard();
+  const [rc] = synthesize(round1, { auditor: ruling('auditor', 'G1', 'one') }, { groups }).rootCauses;
+  assert.deepEqual(rc.citations.map((c) => c.resolved), [true, true, true]);
+  assert.equal(rc.blocking, true, 'two of the three citations are blocking findings');
+});
+
+test('a citation naming a finding synthesis never built is reported unresolved, not dropped', () => {
+  const { round1, groups } = oneGuard();
+  groups[0].citations.push({ id: 'F4', reporter: 'pragmatist', kind: 'design', severity: 'info', file: null, line: null, title: 'a finding nobody reported' });
+  const [rc] = synthesize(round1, {}, { groups }).rootCauses;
+  assert.equal(rc.citations.length, 4);
+  assert.equal(rc.citations.at(-1).resolved, false);
+});
+
+test('grouping does not inflate confidence — a group is not an extra voice', () => {
+  const { round1, groups } = oneGuard();
+  const s = synthesize(round1, { auditor: ruling('auditor', 'G1', 'one') }, { groups });
+  // Three distinct findings, each reported by exactly one persona, so each is
+  // still solo however tightly the group binds them.
+  assert.deepEqual(s.findings.map((x) => x.reporters.length), [1, 1, 1]);
+  assert.deepEqual(s.findings.map((x) => x.confidence), ['solo', 'solo', 'solo']);
+  assert.equal(s.openBlocking.length, 0, 'confidence is counted per finding, not per group');
+});
+
+test('each finding back-references its group, and a dissolved group back-references nothing', () => {
+  const { round1, groups } = oneGuard();
+  const confirmed = synthesize(round1, { auditor: ruling('auditor', 'G1', 'one') }, { groups });
+  assert.deepEqual(confirmed.findings.map((x) => x.group), ['G1', 'G1', 'G1']);
+
+  const dissolved = synthesize(round1, { auditor: ruling('auditor', 'G1', 'split') }, { groups });
+  assert.deepEqual(dissolved.findings.map((x) => x.group), [null, null, null]);
+});
+
+test('a run with no groups reports none and leaves every finding ungrouped', () => {
+  const { round1 } = oneGuard();
+  const s = synthesize(round1, {});
+  assert.deepEqual(s.rootCauses, []);
+  assert.deepEqual(s.findings.map((x) => x.group), [null, null, null]);
+});
+
+test('the markdown leads with the root cause and lists every citation', () => {
+  const { round1, groups } = oneGuard();
+  const md = renderMarkdown(synthesize(round1, { auditor: ruling('auditor', 'G1', 'one', 'one guard') }, { groups }));
+  assert.match(md, /\*\*Root causes:\*\* 1 confirmed of 1 proposed, covering 3 findings/);
+  assert.match(md, /## Root causes/);
+  assert.match(md, /\*\*\[G1\]\*\* unreachable guard is a bypass/);
+  for (const id of ['F1', 'F2', 'F3']) assert.match(md, new RegExp(`\\*\\*${id}\\*\\*`));
+  assert.match(md, /auditor rules `one`:\*\* one guard/);
+  assert.ok(md.indexOf('## Root causes') < md.indexOf('## Cross-validated findings')
+    || !md.includes('## Cross-validated findings'), 'root causes come before the per-finding sections');
+});
+
+test('a dissolved group is still rendered — a rejected proposal is a fact about the run', () => {
+  const { round1, groups } = oneGuard();
+  const md = renderMarkdown(synthesize(round1, { auditor: ruling('auditor', 'G1', 'split', 'unrelated') }, { groups }));
+  assert.match(md, /dissolved by round 2/i);
+});
+
+test('the JSON report carries the groups and each finding\'s back-reference', () => {
+  const { round1, groups } = oneGuard();
+  const json = toJsonReport(synthesize(round1, { auditor: ruling('auditor', 'G1', 'one') }, { groups }));
+  assert.equal(json.root_causes.length, 1);
+  assert.equal(json.root_causes[0].status, 'confirmed');
+  assert.deepEqual(json.root_causes[0].members, ['F1', 'F2', 'F3']);
+  assert.deepEqual(json.findings.map((x) => x.group), ['G1', 'G1', 'G1']);
+});
+
+test('a report from a run that never grouped still has the keys, empty', () => {
+  const json = toJsonReport(synthesize({ auditor: review('auditor', [f('x')]) }, {}));
+  assert.deepEqual(json.root_causes, []);
+  assert.equal(json.findings[0].group, null);
+});

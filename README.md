@@ -160,9 +160,13 @@ Skill's plan chose not to run.
 adverse synthesize \
     --round1 round1-combined.json \
     --round2 round2-combined.json \
+    --briefing briefing.json \
     --out report.md \
     --html-out report.html
 ```
+
+`--briefing` is optional and carries the candidate root causes triage
+proposed. Without it the report is one section per finding.
 
 ## The personas
 
@@ -189,13 +193,15 @@ The **Steward** is this fork's addition, and it exists because code-versus-claim
 ├──────────────────────────────────────────────────────────────────────┤
 │  Triage — Deterministic                                 (no LLM)    │
 │  Stable IDs · claim-check every cited file and line · flag          │
-│  under-anchored findings · cluster likely-duplicate reports         │
+│  under-anchored findings · cluster likely-duplicate reports ·       │
+│  aggregate co-cited findings into candidate root causes             │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Round 2 — Cross-Review                           (parallel calls)  │
 │  Each persona sees every round-1 finding, triaged, and:             │
 │    • validates findings it agrees with                              │
 │    • challenges findings it thinks are wrong / overstated           │
 │    • adds new findings the other angles surfaced                    │
+│    • rules each candidate root cause one thing, or several          │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Synthesis — Deterministic                              (no LLM)    │
 │  Merge findings, score consensus, render report:                    │
@@ -203,6 +209,7 @@ The **Steward** is this fork's addition, and it exists because code-versus-claim
 │    consensus       → reported by 1, validated by another            │
 │    disputed        → reported by 1, challenged by another           │
 │    solo            → reported by 1, no cross-talk                   │
+│  Report leads with the confirmed root causes and their citations    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -226,6 +233,18 @@ Severity says how bad a finding is. It cannot say what would *settle* it, and th
 `design` is advisory by construction. Design opinions do not converge: a reviewer can always want different structure, and such a finding is legitimately a `warning`, so any loop that counts them never terminates. They are reported and ranked under their own heading, and handed over as a backlog rather than a gate.
 
 An unclassified or unrecognized kind **blocks**. Defaulting the other way would let a real finding escape the gate by arriving mislabeled.
+
+### Co-cited findings are aggregated into root causes, with the citations kept
+
+Four lanes looking at one defect report it four times — as a correctness bug, as an attack, as a stale contract, as a design smell. Triage already saw the relationship: in the run that motivated this, it reported **41 cross-file co-citation edges across 34 findings**. It just never closed it. So each finding was remediated, decided, and ledgered on its own, the fixer re-derived the shared cause by hand every time, and the report read as three times the actual defect count.
+
+[`groupFindings`](src/triage.mjs) takes the transitive closure of the cluster and co-citation edges and proposes one **candidate root cause** per connected component: a canonical statement plus every member as a citation that keeps its own reporter, kind, severity and anchor. Round 2 then rules `one` or `split` on each. A confirmed group is one fix and one disposition; the report leads with it, and the ledger records it so a later pass can say "the root-cause fix did not close every symptom" rather than the much weaker "a fix did not take".
+
+Three things it deliberately refuses to do, because aggregation is exactly where a review tool can lie to itself:
+
+- **It does not vote.** Confidence is still counted over distinct personas per finding. A group is a way to fix and decide several citations at once, never an extra voice — and two independent-looking reports of one issue is precisely what synthesis reads as cross-validated consensus, the signal the whole design trusts most and the easiest to counterfeit.
+- **It does not decide.** The deterministic side proposes; only a reviewer that read the code can say whether two findings are one. An unruled or contested group stays a candidate and its citations are decided one at a time, which is the behaviour that predates grouping — so a missing ruling costs the speedup and never a finding.
+- **It does not collapse without limit.** Transitivity is greedy, and 41 edges over 34 findings can chain into a component that is not one root cause but the whole review. Past a cap a group is reported, marked `oversized`, and refused as a decision unit however round 2 rules it.
 
 ### The Skill can run as a convergence loop
 
@@ -271,7 +290,7 @@ src/                          # Shared core, used by both CLI and Skill
   runner.mjs                  # Subprocess agent invocation + parallel orchestration
   synthesis.mjs               # Deterministic merge + markdown rendering
   trace.mjs                   # Re-project a finding's anchor across commits
-  triage.mjs                  # Claim/kind checks, clustering, cross-citation
+  triage.mjs                  # Claim/kind checks, clustering, root-cause grouping
   ledger.mjs                  # Adjudication log + the convergence stop condition
   scope.mjs                   # Does this change have a trust boundary in it?
   scaling.mjs                 # How much review does this change deserve?
@@ -286,7 +305,7 @@ skills/adverse-review/
   scripts/
     collect.mjs               # Skill bridge: source collection
     combine.mjs               # Skill bridge: combine per-persona JSON
-    triage.mjs                # Skill bridge: claim/kind checks, clustering, briefing
+    triage.mjs                # Skill bridge: claim/kind checks, grouping, briefing
     validate.mjs              # Skill bridge: schema-check a reviewer-written round1/round2/verify payload
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis

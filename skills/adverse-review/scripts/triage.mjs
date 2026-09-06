@@ -47,7 +47,7 @@ const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
 const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
-const { CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings, makeClaimChecker } =
+const { CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings, groupFindings, makeClaimChecker } =
   await importFromSrc('triage.mjs');
 
 // `allowPositionals` is not optional here. `--round1 run/round1-*.json` is the
@@ -166,6 +166,12 @@ for (const review of reviews) {
 const clusters = clusterFindings(findings, { windowLines: CLUSTER_WINDOW_LINES });
 const crossReferences = crossReferenceFindings(findings);
 
+// Both edge sets answer "these two reporters may be describing one thing", and
+// neither closes the relation: A~B and B~C left three findings to remediate,
+// decide, and ledger separately. Connected components close it and carry every
+// member along as a citation. Proposed only — round 2 rules on each group.
+const groups = groupFindings(findings, { clusters, crossReferences, advisoryKinds: ADVISORY_KINDS });
+
 // Every finding sharing a file with another reporter's, regardless of line
 // distance — a wider net than `clusters`, which `sameFileDifferentRegion`
 // below reports separately.
@@ -229,6 +235,7 @@ const briefing = {
   findings,
   clusters,
   crossReferences,
+  groups,
   settled: settled.map((f) => f.id),
   regressed: regressed.map((f) => f.id),
   sameFileDifferentRegion: [...byFile]
@@ -252,6 +259,8 @@ process.stdout.write(
   + `  claim-check disproved: ${disproved.length}${ids(disproved)}\n`
   + `  cross-file co-citations (candidate shared root cause): ${crossReferences.length}`
   + `${crossReferences.length ? ` (${crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
+  + `  candidate root causes (proposed, for round 2 to confirm or split): ${groups.length}`
+  + `${groups.length ? ` (${groups.map((g) => `${g.id}=${g.members.join('+')}${g.oversized ? ' OVERSIZED' : ''}`).join(', ')})` : ''}\n`
   + `  cited outside the diff (annotated, not rejected): ${outside.length}${ids(outside)}\n`
   + `  under-anchored for their kind (annotated, not rejected): ${underAnchored.length}${ids(underAnchored)}\n`
   + `  advisory (design — cannot block): ${advisory.length}${ids(advisory)}\n`

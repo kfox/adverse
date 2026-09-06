@@ -109,6 +109,36 @@ test('phase2: rejects added missing severity', () => {
   assert.match(validatePhase2(p, 'auditor'), /severity/);
 });
 
+test('phase2: a root-cause ruling validates', () => {
+  const p = goodPhase2();
+  p.groups = [{ id: 'G1', ruling: 'one', reason: 'both are the same unreachable guard' }];
+  assert.equal(validatePhase2(p, 'auditor'), null);
+});
+
+test('phase2: `groups` is optional — a briefing that proposed none must still validate', () => {
+  const p = goodPhase2();
+  assert.ok(!('groups' in p));
+  assert.equal(validatePhase2(p, 'auditor'), null);
+});
+
+test('phase2: rejects a ruling that is neither one nor split', () => {
+  const p = goodPhase2();
+  p.groups = [{ id: 'G1', ruling: 'maybe', reason: 'unsure' }];
+  assert.match(validatePhase2(p, 'auditor'), /ruling/);
+});
+
+test('phase2: rejects a ruling with no reason — a collapse nobody explained cannot be reviewed', () => {
+  const p = goodPhase2();
+  p.groups = [{ id: 'G1', ruling: 'one' }];
+  assert.match(validatePhase2(p, 'auditor'), /reason/);
+});
+
+test('phase2: rejects a non-array `groups`', () => {
+  const p = goodPhase2();
+  p.groups = { G1: 'one' };
+  assert.match(validatePhase2(p, 'auditor'), /`groups` must be an array/);
+});
+
 test('buildPhase1Prompt contains persona and source', () => {
   const prompt = buildPhase1Prompt(AUDITOR, '=== FILE: foo.py ===\nprint(1)\n');
   assert.ok(prompt.includes('Auditor'));

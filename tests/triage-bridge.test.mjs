@@ -268,6 +268,35 @@ test('a ledger from a future version fails the run rather than being ignored', (
     { version: 99, entries: [] }), /status 1|Command failed/);
 });
 
+// --- candidate root causes ---------------------------------------------------
+
+test('the briefing carries the root-cause groups the edges imply, with their fanout', () => {
+  const { briefing, stdout } = runTriage(repo, [
+    review('auditor', [finding({ title: 'guard is unreachable', line: 20 })]),
+    review('adversary', [finding({ title: 'the unreachable guard is a bypass', line: 24, severity: 'critical' })]),
+    review('steward', [finding({
+      title: 'docs still promise the guard', kind: 'contract', file: 'docs/app.md', line: 1,
+      counterpart: 'app.py', detail: 'app.py line 20 no longer does this',
+    })]),
+  ]);
+  assert.equal(briefing.groups.length, 1);
+  const [g] = briefing.groups;
+  assert.deepEqual(g.members, ['F1', 'F2', 'F3']);
+  assert.deepEqual(g.reporters, ['auditor', 'adversary', 'steward']);
+  assert.equal(g.title, 'the unreachable guard is a bypass', 'the worst-severity member states it');
+  assert.equal(g.citations.length, 3, 'every member survives as a citation');
+  assert.match(stdout, /candidate root causes \(proposed, for round 2 to confirm or split\): 1/);
+});
+
+test('unrelated findings produce no groups, and the briefing says so', () => {
+  const { briefing, stdout } = runTriage(repo, [
+    review('auditor', [finding({ title: 'a', line: 2 })]),
+    review('steward', [finding({ title: 'b', file: 'docs/app.md', line: 1, kind: 'contract', counterpart: 'app.py' })]),
+  ]);
+  assert.deepEqual(briefing.groups, []);
+  assert.match(stdout, /candidate root causes \(proposed, for round 2 to confirm or split\): 0/);
+});
+
 // --- the invocation the documentation actually tells you to type -------------
 // F12 happened because SKILL.md documented `--round1 run/round1-*.json` while
 // every test built args with a repeated `--round1` flag. The documented form

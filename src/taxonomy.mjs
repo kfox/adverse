@@ -20,3 +20,11 @@ export const ADVISORY_KINDS = Object.freeze(new Set(['design']));
 
 export const SEVERITIES = Object.freeze(['critical', 'warning', 'info']);
 export const SEVERITY_RANK = Object.freeze({ critical: 0, warning: 1, info: 2 });
+
+// What round 2 may say about a candidate root cause (src/triage.mjs proposes
+// them; nothing deterministic rules on them). `one` collapses the group into a
+// single fix and a single disposition with its citations attached; `split`
+// dissolves it back into independent findings. Anything else — including
+// silence — leaves the group a candidate, which is the pre-grouping behaviour
+// and therefore the safe default.
+export const GROUP_RULINGS = Object.freeze(new Set(['one', 'split']));

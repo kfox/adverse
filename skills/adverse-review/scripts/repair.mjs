@@ -13,6 +13,10 @@
 // a silent repair is its own hazard: an unresolvable ID means a reviewer
 // invented a finding number, and that edge is about to vanish.
 //
+// Round 2's rulings on candidate root causes (`groups`) get the same ID check
+// and no title repair — a ruling names a group by ID and carries no canonical
+// string to restore.
+//
 // The real fix belongs upstream in src/synthesis.mjs — join on ID, or on
 // file/line proximity — at which point this script becomes dead weight.
 
@@ -42,6 +46,7 @@ if (!values.briefing || !values.round2.length || !values.outdir) {
 const briefing = readJson(values.briefing, 'repair');
 const titleById = new Map(briefing.findings.map((f) => [f.id, f.title]));
 const reporterById = new Map(briefing.findings.map((f) => [f.id, f.reporter]));
+const groupIds = new Set((briefing.groups ?? []).map((g) => g.id));
 
 let repaired = 0, unresolved = 0, checked = 0;
 
@@ -64,6 +69,20 @@ for (const src of values.round2) {
       }
       const reporter = reporterById.get(edge.id);
       if (edge.from !== reporter) edge.from = reporter;
+    }
+  }
+
+  // A group ruling has no title to repair — it names a group by ID and nothing
+  // else — so the only thing to check is that the ID exists. It gets checked
+  // for the same reason an edge's does: a ruling on an invented group is a
+  // ruling on nothing, and dropping it silently means a candidate root cause
+  // that a reviewer DID rule on is reported as unruled.
+  for (const ruling of payload.groups ?? []) {
+    checked += 1;
+    if (!groupIds.has(ruling.id)) {
+      unresolved += 1;
+      process.stderr.write(`  ! ${payload.persona}/groups: unresolvable id ${JSON.stringify(ruling.id)}`
+        + ` (ruling: ${JSON.stringify(ruling.ruling)})\n`);
     }
   }
 
