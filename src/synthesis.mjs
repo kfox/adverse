@@ -33,7 +33,7 @@
 // are both credible enough (cross-validated or consensus) and consequential
 // enough (not advisory, not `info`) to hold a change open.
 
-import { ADVISORY_KINDS, GROUP_RULINGS, SEVERITY_RANK } from './taxonomy.mjs';
+import { ADVISORY_KINDS, GROUP_RULINGS, ROOT_CAUSE_STATUSES, SEVERITY_RANK } from './taxonomy.mjs';
 
 // Verdict → score mapping. The natural symmetric choice: approve and reject
 // cancel each other out, conditional carries half-weight on the approve side.
@@ -260,6 +260,8 @@ function buildRootCauses(groups, round2, findByTitle) {
         : verdicts.has('split') ? 'split'
           : g.oversized ? 'oversized'
             : voices.size >= MIN_CONFIRMING_VOICES ? 'confirmed' : 'proposed';
+    /* c8 ignore next */
+    if (!ROOT_CAUSE_STATUSES.includes(status)) throw new Error(`unknown root-cause status ${status}`);
 
     return {
       ...g,
@@ -279,7 +281,8 @@ function buildRootCauses(groups, round2, findByTitle) {
 }
 
 export function synthesize(round1, round2 = {},
-  { failedPersonas = [], skippedPersonas = [], round2Skipped = null, groups = [] } = {}) {
+  { failedPersonas = [], skippedPersonas = [], round2Skipped = null,
+    rootCauseGroups = [] } = {}) {
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
@@ -387,7 +390,8 @@ export function synthesize(round1, round2 = {},
   const openBlocking = findings.filter(isOpenBlocking);
 
   // 6. Root causes, and the back-reference from each finding to its group.
-  const rootCauses = buildRootCauses(Array.isArray(groups) ? groups : [], round2, findByTitle);
+  const rootCauses = buildRootCauses(
+    Array.isArray(rootCauseGroups) ? rootCauseGroups : [], round2, findByTitle);
   for (const rc of rootCauses) {
     // A dissolved group is not a grouping. Back-referencing it would put
     // "part of G2" on findings a reviewer has just said are unrelated.
@@ -459,6 +463,8 @@ const ADVISORY_PREAMBLE =
   + 'structure, so a loop that waits for them to run out never ends. Take them '
   + 'or file them; do not let them gate the merge._';
 
+// Keyed off taxonomy's ROOT_CAUSE_STATUSES so a status added there without a
+// label here is a loud failure rather than a silent fallback to the raw name.
 const ROOT_CAUSE_STATUS = {
   confirmed: 'confirmed by round 2 — one fix, one disposition',
   contested: 'CONTESTED — reviewers disagree on whether this is one thing; decide each citation',
@@ -590,15 +596,18 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   // that a reader meets the four citations of one defect as one defect.
   if ((syn.rootCauses ?? []).length) lines.push(...renderRootCauses(syn.rootCauses));
 
-  const groups = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
+  // `byConfidence`, not `groups`: this file's `groups` are root-cause groups,
+  // and one word naming two unrelated things in one file is how a reader ends
+  // up debugging the wrong one.
+  const byConfidence = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
   const advisory = [];
   for (const f of syn.findings) {
     if (ADVISORY_KINDS.has(f.kind)) advisory.push(f);
-    else groups[f.confidence].push(f);
+    else byConfidence[f.confidence].push(f);
   }
 
   for (const conf of CONFIDENCE_ORDER) {
-    const items = groups[conf];
+    const items = byConfidence[conf];
     if (!items.length) continue;
     lines.push(SECTION_TITLES[conf]);
     lines.push('');

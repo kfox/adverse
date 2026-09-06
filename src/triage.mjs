@@ -14,6 +14,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 
 import { closeQuietly, openRegularFileSync } from './fsSafe.mjs';
+import { ADVISORY_KINDS, SEVERITIES, SEVERITY_RANK } from './taxonomy.mjs';
 import { parseHunks } from './trace.mjs';
 
 export const CLUSTER_WINDOW_LINES = 15;
@@ -69,7 +70,7 @@ const KIND_REQUIREMENTS = {
   design:     { file: false, line: false, counterpart: false },
 };
 
-export function checkKind(kind, file, line, counterpart, { advisoryKinds } = {}) {
+export function checkKind(kind, file, line, counterpart, { advisoryKinds = ADVISORY_KINDS } = {}) {
   if (kind === undefined || kind === null || kind === '') {
     return { status: 'MISSING', why: 'no `kind` on this finding; it is treated as blocking' };
   }
@@ -269,18 +270,17 @@ export function confirmableLimit(findingCount) {
 }
 
 
-const SEVERITY_ORDER = ['critical', 'warning', 'info'];
-
-function severityIndex(severity) {
-  const at = SEVERITY_ORDER.indexOf(severity);
-  return at === -1 ? SEVERITY_ORDER.length : at;
-}
+// `src/taxonomy.mjs` was created in this same range as the home for shared
+// vocabulary, and this file then wrote a third copy of the severity order
+// outside it. `SEVERITY_RANK[s] ?? SEVERITIES.length` gives the same total
+// order, unknown severities last.
+const severityIndex = (severity) => SEVERITY_RANK[severity] ?? SEVERITIES.length;
 
 // Which member's words become the group's canonical statement: worst severity
 // first, then a blocking kind over an advisory one, then the order triage
 // assigned. Deterministic on purpose — a canonical title that moved between
 // runs would break the title join every downstream edge rides on.
-function anchorMember(members, { advisoryKinds }) {
+function anchorMember(members, { advisoryKinds = ADVISORY_KINDS } = {}) {
   const advisory = (f) => (advisoryKinds?.has(f.kind) ? 1 : 0);
   return [...members]
     .map((f, i) => ({ f, i }))
@@ -307,20 +307,24 @@ function anchorMember(members, { advisoryKinds }) {
 // co-citation is cross-reporter by construction), but `reporters` counts
 // DISTINCT personas so a lane that reported one thing three times still
 // speaks with one voice.
-export function groupFindings(findings, { clusters = [], crossReferences = [], advisoryKinds } = {}) {
-  const parent = new Map(findings.map((f) => [f.id, f.id]));
-  const size = new Map(findings.map((f) => [f.id, 1]));
+// A size-bounded union-find over finding IDs.
+//
+// Separated from `groupFindings` because closing a relation and describing the
+// result are two jobs, and the size bound is the interesting half: `merge`
+// refuses a union that would push a component past `limit` rather than making
+// it and labelling the result afterwards.
+function makeForest(ids) {
+  const parent = new Map(ids.map((id) => [id, id]));
+  const size = new Map(ids.map((id) => [id, 1]));
 
   const find = (x) => {
     let root = x;
-
     while (parent.get(root) !== root) root = parent.get(root);
     while (parent.get(x) !== root) { const next = parent.get(x); parent.set(x, root); x = next; }
     return root;
   };
-  // `limit` refuses a merge that would push the component past a size, instead
-  // of merging and labelling the result. Returns whether it merged.
-  const union = (a, b, limit = Infinity) => {
+
+  const merge = (a, b, limit = Infinity) => {
     if (!parent.has(a) || !parent.has(b)) return false;
     const [ra, rb] = [find(a), find(b)];
     if (ra === rb) return false;
@@ -329,6 +333,15 @@ export function groupFindings(findings, { clusters = [], crossReferences = [], a
     size.set(ra, size.get(ra) + size.get(rb));
     return true;
   };
+
+  return { find, merge };
+}
+
+// The connected components the two edge sets imply, as arrays of findings.
+// Clusters merge unconditionally; co-citations are size-gated. Why each, in
+// the comments below.
+function connectedComponents(findings, { clusters, crossReferences }) {
+  const { find, merge } = makeForest(findings.map((f) => f.id));
 
   // Proximity edges merge unconditionally: a cluster is same-file, within
   // CLUSTER_WINDOW_LINES, and cross-reporter, so it is already bounded
@@ -341,7 +354,7 @@ export function groupFindings(findings, { clusters = [], crossReferences = [], a
   // that cluster, and a dropped cluster looks exactly like one never proposed.
   for (const c of clusters) {
     const ids = c.ids ?? [];
-    for (let i = 1; i < ids.length; i += 1) union(ids[i - 1], ids[i]);
+    for (let i = 1; i < ids.length; i += 1) merge(ids[i - 1], ids[i]);
   }
 
   // Co-citation edges are size-gated, because they are unbounded evidence: one
@@ -364,10 +377,7 @@ export function groupFindings(findings, { clusters = [], crossReferences = [], a
   // feature was built for.
   const byStrength = [...crossReferences]
     .sort((x, y) => (y.lineEchoed ? 1 : 0) - (x.lineEchoed ? 1 : 0));
-  for (const x of byStrength) union(x.from, x.to, MAX_CONFIRMABLE_MEMBERS);
-
-
-
+  for (const x of byStrength) merge(x.from, x.to, MAX_CONFIRMABLE_MEMBERS);
 
   const components = new Map();
   for (const f of findings) {
@@ -375,68 +385,82 @@ export function groupFindings(findings, { clusters = [], crossReferences = [], a
     if (!components.has(root)) components.set(root, []);
     components.get(root).push(f);
   }
+  return [...components.values()];
+}
 
-  // Which edge kinds built this component, read back once the forest has
-  // settled. Asking mid-merge attributes an edge to a root that a later union
-  // replaces, and the answer is what tells a reviewer whether the machine saw
-  // two findings in one place or two files naming each other.
-  const edgeKinds = (ids) => {
-    const has = (id) => ids.has(id);
-    const kinds = [];
-    if (clusters.some((c) => (c.ids ?? []).some(has))) kinds.push('cluster');
-    if (crossReferences.some((x) => has(x.from) && has(x.to))) kinds.push('co-citation');
-    return kinds;
+// Which edge kinds built a component, read back once the forest has settled.
+// Asking mid-merge attributes an edge to a root that a later union replaces,
+// and the answer is what tells a reviewer whether the machine saw two findings
+// in one place or two files naming each other.
+function edgeKindsFor(ids, { clusters, crossReferences }) {
+  const has = (id) => ids.has(id);
+  const kinds = [];
+  if (clusters.some((c) => (c.ids ?? []).some(has))) kinds.push('cluster');
+  if (crossReferences.some((x) => has(x.from) && has(x.to))) kinds.push('co-citation');
+  return kinds;
+}
+
+const distinct = (xs) => [...new Set(xs.filter((x) => x !== null && x !== undefined))];
+
+// One component, described as a candidate root cause.
+function toGroup(members, id, { advisoryKinds, findingCount, via }) {
+  const anchor = anchorMember(members, { advisoryKinds });
+  return {
+    id,
+    title: anchor.title,
+    // Which member's words became the canonical statement. Recorded rather
+    // than re-derived: `title` came from this member and four other places
+    // used to answer "what is this group" by array position instead, so the
+    // group's headline and its fix routinely described different citations.
+    anchor: anchor.id,
+    severity: SEVERITIES.find((s) => members.some((f) => f.severity === s))
+      ?? anchor.severity ?? null,
+    kinds: distinct(members.map((f) => f.kind)),
+    files: distinct(members.map((f) => f.file)),
+    reporters: distinct(members.map((f) => f.reporter)),
+    members: members.map((f) => f.id),
+    via,
+    // The fanout. Every member keeps its own reporter, kind, severity and
+    // anchor: a group is a way to read and decide N findings at once, never
+    // a replacement for them.
+    citations: members.map((f) => ({
+      id: f.id,
+      reporter: f.reporter,
+      kind: f.kind ?? null,
+      severity: f.severity ?? null,
+      file: f.file ?? null,
+      line: f.line ?? null,
+      // `counterpart` is here because a group decision is built by copying
+      // these fields into decisions.json, and a `contract` entry that omits
+      // it can never match anything again (src/ledger.mjs, scoreMatch: the
+      // claim is "X contradicts Y", so Y is half the identity). The ledger
+      // would then re-raise that citation every iteration — the circling it
+      // exists to stop.
+      counterpart: f.counterpart ?? null,
+      title: f.title,
+    })),
+    // CONFIRMABILITY gets the relative bound. A group may legitimately be
+    // most of a tiny review; what must not happen is one ruling turning most
+    // of a review into one disposition. Oversized fails toward MORE
+    // decisions, so a group that trips this is still reported in full and
+    // still individually decidable — it just cannot collapse.
+    oversized: members.length > confirmableLimit(findingCount),
   };
+}
 
+// Gather the edges, close them, describe each component. Those three steps are
+// the three functions above; this is the assembly, and the only place that
+// knows a component of fewer than two findings is not a group.
+export function groupFindings(findings,
+  { clusters = [], crossReferences = [], advisoryKinds = ADVISORY_KINDS } = {}) {
+  const edges = { clusters, crossReferences };
   const groups = [];
-  for (const members of components.values()) {
+  for (const members of connectedComponents(findings, edges)) {
     if (members.length < 2) continue;
-    const anchor = anchorMember(members, { advisoryKinds });
-    const distinct = (xs) => [...new Set(xs.filter((x) => x !== null && x !== undefined))];
-    groups.push({
-      id: `G${groups.length + 1}`,
-      title: anchor.title,
-      // Which member's words became the canonical statement. Recorded rather
-      // than re-derived: `title` came from this member and four other places
-      // used to answer "what is this group" by array position instead, so the
-      // group's headline and its fix routinely described different citations.
-      anchor: anchor.id,
-
-      severity: SEVERITY_ORDER.find((s) => members.some((f) => f.severity === s))
-        ?? anchor.severity ?? null,
-      kinds: distinct(members.map((f) => f.kind)),
-      files: distinct(members.map((f) => f.file)),
-      reporters: distinct(members.map((f) => f.reporter)),
-      members: members.map((f) => f.id),
-      via: edgeKinds(new Set(members.map((f) => f.id))),
-      // The fanout. Every member keeps its own reporter, kind, severity and
-      // anchor: a group is a way to read and decide N findings at once, never
-      // a replacement for them.
-      citations: members.map((f) => ({
-        id: f.id,
-        reporter: f.reporter,
-        kind: f.kind ?? null,
-        severity: f.severity ?? null,
-        file: f.file ?? null,
-        line: f.line ?? null,
-        // `counterpart` is here because a group decision is built by copying
-        // these fields into decisions.json, and a `contract` entry that omits
-        // it can never match anything again (src/ledger.mjs, scoreMatch: the
-        // claim is "X contradicts Y", so Y is half the identity). The ledger
-        // would then re-raise that citation every iteration — the circling it
-        // exists to stop.
-        counterpart: f.counterpart ?? null,
-        title: f.title,
-      })),
-      // CONFIRMABILITY gets the relative bound. A group may legitimately be
-      // most of a tiny review; what must not happen is one ruling turning most
-      // of a review into one disposition. Oversized fails toward MORE
-      // decisions, so a group that trips this is still reported in full and
-      // still individually decidable — it just cannot collapse.
-      oversized: members.length > confirmableLimit(findings.length),
-
-
-    });
+    const via = edgeKindsFor(new Set(members.map((f) => f.id)), edges);
+    groups.push(toGroup(members, `G${groups.length + 1}`, {
+      advisoryKinds, findingCount: findings.length, via,
+    }));
   }
   return groups;
 }

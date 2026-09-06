@@ -24,6 +24,8 @@ const VERDICT_BADGE = {
   unknown:     { label: '—',           color: '#374151', bg: '#f3f4f6' },
 };
 
+// Keyed off taxonomy's ROOT_CAUSE_STATUSES so a status added there without a
+// label here is a loud failure rather than a silent fallback to the raw name.
 const ROOT_CAUSE_STATUS = {
   confirmed: 'Confirmed by round 2 — one fix, one disposition',
   contested: 'Contested — reviewers disagree; decide each citation',
@@ -55,11 +57,13 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     </tr>`;
   }).join('\n');
 
-  const groups = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
+  // `byConfidence`, not `groups`: `groups` in this codebase are root-cause
+  // groups, and these are confidence buckets.
+  const byConfidence = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
   const advisory = [];
   for (const f of syn.findings) {
     if (ADVISORY_KINDS.has(f.kind)) advisory.push(f);
-    else groups[f.confidence].push(f);
+    else byConfidence[f.confidence].push(f);
   }
 
   const rootCauses = syn.rootCauses ?? [];
@@ -73,7 +77,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
       </section>`);
   }
   for (const conf of ['cross-validated', 'consensus', 'disputed', 'solo']) {
-    const items = groups[conf];
+    const items = byConfidence[conf];
     if (!items.length) continue;
     sections.push(`
       <section class="findings-group">

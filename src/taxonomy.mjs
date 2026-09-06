@@ -28,3 +28,12 @@ export const SEVERITY_RANK = Object.freeze({ critical: 0, warning: 1, info: 2 })
 // silence — leaves the group a candidate, which is the pre-grouping behaviour
 // and therefore the safe default.
 export const GROUP_RULINGS = Object.freeze(new Set(['one', 'split']));
+
+// What a candidate root cause can BE, once round 2 has (or has not) ruled. The
+// five names were spelled in three places — synthesis's status ternary and its
+// label map, and html.mjs's — with nothing keeping them in step, so a sixth
+// status added to one would be a silent fallback in the others. Both renderers
+// key their labels off this list, which turns a missing label into a visible
+// gap instead.
+export const ROOT_CAUSE_STATUSES = Object.freeze(
+  ['proposed', 'confirmed', 'contested', 'oversized', 'split']);

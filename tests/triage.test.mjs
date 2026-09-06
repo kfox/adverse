@@ -66,8 +66,15 @@ test('checkKind: advisory is read from the injected set, not hardcoded', () => {
   assert.equal(checkKind('defect', 'a.py', 1, null, { advisoryKinds }).advisory, false);
 });
 
-test('checkKind: with no advisoryKinds injected, advisory is left undefined rather than guessed', () => {
-  assert.equal(checkKind('design', null, null, null).advisory, undefined);
+test('checkKind: advisory defaults to the real registry, and stays a boolean', () => {
+  // This used to be left `undefined` when nothing was injected, so `advisory`
+  // was a boolean or absent depending on the caller — and the one consumer
+  // filters on `=== true`. The option is kept for a caller that genuinely has
+  // a different set; its default is the registry rather than a hole.
+  assert.equal(checkKind('design', null, null, null).advisory, true);
+  assert.equal(checkKind('defect', 'a.py', 1, null).advisory, false);
+  // An explicit set still wins over the default.
+  assert.equal(checkKind('defect', 'a.py', 1, null, { advisoryKinds: new Set(['defect']) }).advisory, true);
 });
 
 // --- clusterFindings ----------------------------------------------------------
