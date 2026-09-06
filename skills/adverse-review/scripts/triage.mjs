@@ -113,11 +113,23 @@ reportRoster(checkRoster(
 // payload parsed fine and then failed the schema, which is what validate.mjs
 // reports the same way. bridge-io's exit 2 belongs to the read that never
 // happened, not to what the bytes turned out to say.
+//
+// The ELEMENTS too, not only the array. Guarding the container and not its
+// contents closed one instance and left the class open: `"findings": [null]`
+// still reached normalizeAnchor and threw at src/triage.mjs:49, which is the
+// same crash under a different input.
 for (let i = 0; i < reviews.length; i += 1) {
   const supplied = reviews[i].findings;
-  if (supplied !== undefined && !Array.isArray(supplied)) {
+  if (supplied === undefined) continue;
+  if (!Array.isArray(supplied)) {
     process.stderr.write(`triage: ${sources[i]}: \`findings\` is not an array`
       + ` (got ${JSON.stringify(supplied)})\n`);
+    process.exit(1);
+  }
+  const bad = supplied.findIndex((f) => !f || typeof f !== 'object' || Array.isArray(f));
+  if (bad !== -1) {
+    process.stderr.write(`triage: ${sources[i]}: findings[${bad}] is not an object`
+      + ` (got ${JSON.stringify(supplied[bad])})\n`);
     process.exit(1);
   }
 }

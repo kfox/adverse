@@ -503,6 +503,23 @@ test('the not-run refusal names the override and the payload, as combine\'s alwa
   assert.match(r.stderr, /round1-notrun\.json/);
 });
 
+test('a findings ELEMENT that is not an object is refused too, not only the array', () => {
+  // Guarding the container and not its contents closed one instance and left
+  // the class open: `[null]` reached normalizeAnchor and threw at
+  // src/triage.mjs:49 — the same crash under a different input.
+  for (const findings of [[null], [7], ['x'], [[]], [{}, null]]) {
+    const f = path.join(repo, 'round1-element.json');
+    writeFileSync(f, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings }));
+    const out = path.join(repo, 'briefing-element.json');
+    const r = spawnSync(process.execPath,
+      [TRIAGE, '--round1', f, '--repo', repo, '--base', 'base', '--out', out],
+      { encoding: 'utf-8', timeout: 30_000 });
+    assert.equal(r.status, 1, `findings ${JSON.stringify(findings)}`);
+    assert.match(r.stderr, /is not an object/);
+    assert.doesNotMatch(r.stderr, /TypeError|at file:/);
+  }
+});
+
 test('a non-array `findings` is refused with a sentence, not a TypeError stack', () => {
   // Exit 1, not 2: SKILL.md's line is "2 means it never read a payload, 1
   // means it read one that failed the schema", and this one parsed fine.
