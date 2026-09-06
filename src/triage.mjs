@@ -519,6 +519,10 @@ export function groupFindings(findings,
 // Claim-checking needs the repo root and the diff base, so it is built by a
 // factory rather than taking them as parameters on every call — the same
 // shape trace.mjs's `makeAnchorTracer` uses for the same reason.
+const GIT_DIR = '.git';
+const GIT_DIR_REFUSAL = 'is repository metadata, not reviewable source'
+  + ' (paths under .git/ are refused: they carry credentials, not code)';
+
 export function makeClaimChecker({ repo, base }) {
   // Resolve a model-supplied path against the repo root, or null if it
   // escapes.
@@ -544,25 +548,53 @@ export function makeClaimChecker({ repo, base }) {
     }
   })();
 
-  function insideRepo(file) {
+  // `.git` lives INSIDE the checkout, so every prefix check below admits it —
+  // and a citation of `.git/config` is a credential read, not a code review.
+  // `actions/checkout` writes the job's token there as an
+  // `http.<host>.extraheader` line, and `checkClaim` copies the cited line
+  // verbatim into `citedLine`, which triage writes into briefing.json, which
+  // IS the round-2 prompt. One citation therefore hands the token to every
+  // later reviewer and to any artifact that keeps the briefing.
+  //
+  // Every segment, not just the first: a submodule keeps its own `.git`, and
+  // a worktree keeps a `.git` file. Checked against the resolved path as well
+  // as the literal one, because a symlink committed in the tree can point at
+  // `.git` while the string stays clean — the same bypass `realpathSync` is
+  // already here to close.
+  function underGitDir(root, candidate) {
+    return path.relative(root, candidate).split(path.sep).includes(GIT_DIR);
+  }
+
+  // Either the path this checker may read, or the reason it may not. The two
+  // refusals stay distinct on purpose: a path that leaves the checkout is a
+  // traversal attempt, while a path into `.git` is a request for repository
+  // metadata — and telling a reviewer that its `.git/config` citation
+  // "escapes the checkout" would simply be false.
+  function resolveCited(file) {
     // `path.resolve` throws ERR_INVALID_ARG_TYPE on a number, boolean, array
     // or object, and `file` reaches here from reviewer JSON. Rejecting a
     // non-string here rather than letting it throw keeps a malformed anchor a
     // DISPROVED finding instead of an uncaught crash that loses the run.
-    if (typeof file !== 'string' || !file) return null;
+    if (typeof file !== 'string' || !file) return { why: 'is not a string' };
 
     const abs = path.resolve(repo, file);
 
-    if (abs !== repo && !abs.startsWith(repo + path.sep)) return null;
+    if (abs !== repo && !abs.startsWith(repo + path.sep)) {
+      return { why: 'escapes the checkout' };
+    }
+    if (underGitDir(repo, abs)) return { why: GIT_DIR_REFUSAL };
 
     let real;
     try {
       real = realpathSync(abs);
     } catch {
-      return abs; // does not exist yet; the caller's open attempt rejects it
+      return { path: abs }; // does not exist yet; the caller's open rejects it
     }
-    if (real !== repoReal && !real.startsWith(repoReal + path.sep)) return null;
-    return real;
+    if (real !== repoReal && !real.startsWith(repoReal + path.sep)) {
+      return { why: 'escapes the checkout' };
+    }
+    if (underGitDir(repoReal, real)) return { why: GIT_DIR_REFUSAL };
+    return { path: real };
   }
 
   function changedRanges(file) {
@@ -584,10 +616,11 @@ export function makeClaimChecker({ repo, base }) {
   function checkClaim(file, line) {
     if (!file) return { status: 'not-file-bound' };
 
-    const abs = insideRepo(file);
-    if (abs === null) {
-      return { status: 'DISPROVED', why: `cited path escapes the checkout: ${file}` };
+    const resolved = resolveCited(file);
+    if (resolved.why) {
+      return { status: 'DISPROVED', why: `cited path ${resolved.why}: ${file}` };
     }
+    const abs = resolved.path;
 
     // Open once and check/read through the same descriptor rather than the
     // path — an exists-then-readFileSync-by-path pair leaves a window where
@@ -654,10 +687,11 @@ export function makeClaimChecker({ repo, base }) {
   // contradiction just as surely as a missing primary file does.
   function checkCounterpart(file) {
     if (!file) return null;
-    const abs = insideRepo(file);
-    if (abs === null) {
-      return { status: 'DISPROVED', why: `cited counterpart escapes the checkout: ${file}` };
+    const resolved = resolveCited(file);
+    if (resolved.why) {
+      return { status: 'DISPROVED', why: `cited counterpart ${resolved.why}: ${file}` };
     }
+    const abs = resolved.path;
     let fd = null;
     try {
       fd = openRegularFileSync(abs);
