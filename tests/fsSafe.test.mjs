@@ -65,6 +65,15 @@ test('a regular file opens, and the caller closes it', () => {
 });
 
 test('a missing file throws where openSync would, with no descriptor to leak', () => {
-  assert.throws(() => openRegularFileSync(path.join(os.tmpdir(), 'adverse-does-not-exist-xyz')),
-    /ENOENT/);
+  // The absent path is inside a private `mkdtempSync` directory, not a fixed
+  // name under the shared temp dir. A predictable name in a world-writable
+  // directory is something any local user can create first, at which point
+  // this test stops asserting what it says it does — and it is the pattern
+  // `js/insecure-temporary-file` exists to catch, which is how it was found.
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-fssafe-'));
+  try {
+    assert.throws(() => openRegularFileSync(path.join(dir, 'not-created')), /ENOENT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
