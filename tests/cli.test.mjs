@@ -188,3 +188,43 @@ test('synthesize subcommand reads disk and emits report', () => {
     assert.ok(existsSync(path.join(out, 'report.json')));
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
+
+test('synthesize subcommand records --skipped, --degraded, and --round2-skipped', () => {
+  const out = freshTmp();
+  try {
+    const round1 = {
+      auditor: { persona: 'auditor', verdict: 'approve', summary: 'ok', findings: [] },
+      steward: { persona: 'steward', verdict: 'approve', summary: 'ok', findings: [] },
+    };
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify(round1));
+    const r = runCli([
+      'synthesize',
+      '--round1', path.join(out, 'r1.json'),
+      '--skipped', 'adversary=no trust boundary in the diff',
+      '--degraded', 'pragmatist',
+      '--round2-skipped', 'no blocking finding in round 1',
+      '--out', path.join(out, 'report.md'),
+      '--json-out', path.join(out, 'report.json'),
+    ]);
+    assert.equal(r.status, 0, r.stderr);
+    const md = readFileSync(path.join(out, 'report.md'), 'utf-8');
+    assert.match(md, /adversary/);
+    assert.match(md, /no trust boundary in the diff/);
+    assert.match(md, /Degraded run/);
+    assert.match(md, /pragmatist/);
+    assert.match(md, /Round 2 skipped:\*\* no blocking finding in round 1/);
+    const json = JSON.parse(readFileSync(path.join(out, 'report.json'), 'utf-8'));
+    assert.equal(json.round2_skipped, 'no blocking finding in round 1');
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+test('synthesize subcommand rejects an empty --round2-skipped reason', () => {
+  const out = freshTmp();
+  try {
+    const round1 = { auditor: { persona: 'auditor', verdict: 'approve', summary: 'ok', findings: [] } };
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify(round1));
+    const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json'), '--round2-skipped', '']);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /non-empty reason/);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});

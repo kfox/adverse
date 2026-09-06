@@ -14,9 +14,14 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(here, '..');
 const SYNTH = path.join(ROOT, 'skills', 'adverse-review', 'scripts', 'synthesize.mjs');
+const BIN = path.join(ROOT, 'bin', 'adverse.mjs');
 
 function runSynth(args, cwd = ROOT) {
   return spawnSync('node', [SYNTH, ...args], { cwd, encoding: 'utf-8', timeout: 30_000 });
+}
+
+function runCli(args) {
+  return spawnSync('node', [BIN, ...args], { cwd: ROOT, encoding: 'utf-8', timeout: 30_000 });
 }
 
 function round1File(dir) {
@@ -64,6 +69,30 @@ test('a declared round-2 skip renders in the markdown and the JSON report', () =
     assert.equal(r.status, 0, r.stderr);
     assert.match(readFileSync(md, "utf-8"), /Round 2 skipped:\*\* no blocking finding in round 1/);
     assert.equal(JSON.parse(readFileSync(json, 'utf-8')).round2_skipped, 'no blocking finding in round 1');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the bridge and `adverse synthesize` produce byte-identical reports — they are one implementation, not two synced copies', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-parity-'));
+  try {
+    const r1 = round1File(dir);
+    const args = ['--round1', r1, '--skipped', 'adversary=no trust boundary in the diff',
+      '--degraded', 'pragmatist', '--round2-skipped', 'no blocking finding in round 1'];
+
+    const viaBridge = runSynth([...args, '--out', path.join(dir, 'bridge.md'), '--json-out', path.join(dir, 'bridge.json')]);
+    const viaCli = runCli(['synthesize', ...args, '--out', path.join(dir, 'cli.md'), '--json-out', path.join(dir, 'cli.json')]);
+
+    assert.equal(viaBridge.status, viaCli.status);
+    assert.equal(
+      readFileSync(path.join(dir, 'bridge.md'), 'utf-8'),
+      readFileSync(path.join(dir, 'cli.md'), 'utf-8'),
+    );
+    assert.equal(
+      readFileSync(path.join(dir, 'bridge.json'), 'utf-8'),
+      readFileSync(path.join(dir, 'cli.json'), 'utf-8'),
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
