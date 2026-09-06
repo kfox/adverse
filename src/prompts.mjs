@@ -449,6 +449,16 @@ function validateFinding(f, label) {
   for (const k of ['severity', 'title', 'detail']) {
     if (!(k in f)) return `${label} missing key ${JSON.stringify(k)}.`;
   }
+  // Presence is not a type. `detail` is scanned for other findings' paths and
+  // rendered into the round-2 prompt, and `title` is the key every cross-review
+  // edge joins on — a non-string in either crashed a consumer that reasonably
+  // assumed the schema meant what it said.
+  for (const k of ['title', 'detail']) {
+    if (typeof f[k] !== 'string') {
+      return `${label}.${k} must be a string, got ${typeName(f[k])}.`;
+    }
+  }
+
   if (!SEVERITY_SET.has(f.severity)) {
     return `${label}.severity must be critical|warning|info, got ${JSON.stringify(f.severity)}.`;
   }

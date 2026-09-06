@@ -18,8 +18,9 @@ import path from 'node:path';
 
 import {
   MAX_CONFIRMABLE_MEMBERS, checkKind, clusterFindings, crossReferenceFindings, groupFindings,
-  makeClaimChecker,
+  makeClaimChecker, normalizeAnchor,
 } from '../src/triage.mjs';
+
 
 // --- checkKind ---------------------------------------------------------------
 
@@ -348,4 +349,79 @@ test('checkCounterpart: a missing file is disproved', () => {
 
 test('checkCounterpart: null is not a claim at all', () => {
   assert.equal(checker.checkCounterpart(null), null);
+});
+
+// --- untrusted anchor types --------------------------------------------------
+//
+// A reviewer payload is LLM output. Every case below is a value a model can
+// produce by accident or on purpose, and each one used to crash the bridge,
+// hang it, or come back `status: 'ok'` — a mechanically-verified anchor minted
+// out of a value nothing checked.
+
+test('normalizeAnchor: a non-integer line is rejected, and says so', () => {
+  for (const line of ['.*', '(20', 0, -5, 4.5, true, null]) {
+    const a = normalizeAnchor({ line, detail: 'd' });
+    assert.equal(a.line, null, `line ${JSON.stringify(line)} must not survive`);
+  }
+  assert.deepEqual(normalizeAnchor({ line: '.*', detail: 'd' }).rejected, ['line']);
+  // A line that was never supplied is not a rejection — the two must stay
+  // distinguishable, which is the entire reason `rejected` exists.
+  assert.deepEqual(normalizeAnchor({ line: null, detail: 'd' }).rejected, []);
+  assert.equal(normalizeAnchor({ line: 12, detail: 'd' }).line, 12);
+});
+
+test('normalizeAnchor: non-string file, counterpart and detail are rejected', () => {
+  const a = normalizeAnchor({ file: 42, counterpart: ['x'], detail: { s: 1 } });
+  assert.equal(a.file, null);
+  assert.equal(a.counterpart, null);
+  assert.equal(a.detail, '');
+  assert.deepEqual(a.rejected.sort(), ['counterpart', 'detail', 'file']);
+});
+
+test('checkKind: line 0 does not satisfy a defect\'s line requirement', () => {
+  // `0` is neither null nor undefined, so the old presence test called this
+  // fully anchored and blocking.
+  const k = checkKind('defect', 'a.py', 0, null, { advisoryKinds: new Set(['design']) });
+  assert.equal(k.status, 'UNDER-ANCHORED');
+  assert.deepEqual(k.missing, ['line']);
+});
+
+test('crossReferenceFindings: a regex-shaped line neither throws nor hangs', () => {
+  // `new RegExp(`\\b${b.line}\\b`)` threw SyntaxError on the first and
+  // backtracked forever on the second, aborting triage before briefing.json.
+  for (const line of ['(20', '([a-z]+)+~']) {
+    const findings = [
+      { id: 'F1', reporter: 'auditor', file: 'a.py', line: 10, detail: 'see b.py line 20' },
+      { id: 'F2', reporter: 'adversary', file: 'b.py', line, detail: 'unrelated' },
+    ];
+    const started = Date.now();
+    const edges = crossReferenceFindings(findings);
+    assert.ok(Date.now() - started < 2000, 'must not backtrack');
+    assert.equal(edges.length, 1);
+    assert.equal(edges[0].lineEchoed, false, 'a malformed line cannot be echoed');
+  }
+});
+
+test('crossReferenceFindings: a non-string detail is skipped, not thrown on', () => {
+  const findings = [
+    { id: 'F1', reporter: 'auditor', file: 'a.py', line: 1, detail: { not: 'a string' } },
+    { id: 'F2', reporter: 'adversary', file: 'b.py', line: 2, detail: 'names a.py' },
+  ];
+  assert.equal(crossReferenceFindings(findings).length, 1);
+});
+
+test('checkClaim: a non-integer line is DISPROVED, never a forged ok', () => {
+  for (const line of ['.*', 0, -5, 4.5]) {
+    const c = checker.checkClaim('a.py', line);
+    assert.equal(c.status, 'DISPROVED', `line ${JSON.stringify(line)} must not pass`);
+  }
+});
+
+test('checkClaim: a non-string file is DISPROVED, not an uncaught TypeError', () => {
+  // `path.resolve(repo, 42)` throws ERR_INVALID_ARG_TYPE; the `if (!file)`
+  // guard only rejected falsy values, so every truthy non-string got through.
+  for (const file of [42, true, ['a.py'], { p: 'a.py' }]) {
+    const c = checker.checkClaim(file, 1);
+    assert.equal(c.status, 'DISPROVED', `file ${JSON.stringify(file)} must not pass`);
+  }
 });

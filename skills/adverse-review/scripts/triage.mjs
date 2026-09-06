@@ -47,8 +47,9 @@ const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
 const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
-const { CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings, groupFindings, makeClaimChecker } =
-  await importFromSrc('triage.mjs');
+const { CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings, groupFindings,
+        makeClaimChecker, normalizeAnchor } = await importFromSrc('triage.mjs');
+
 
 // `allowPositionals` is not optional here. `--round1 run/round1-*.json` is the
 // documented invocation and the natural one to type; the shell expands it, and
@@ -137,28 +138,39 @@ for (const [persona, count] of countByPersona) {
   }
 }
 
+// Anchors are normalized BEFORE anything reads them. `line`, `file`,
+// `counterpart` and `detail` come out of a model, and downstream they reach a
+// bounds test, a path resolver and a prose scan that each assumed a type
+// nothing had established. Rejected values are collected rather than
+// swallowed: a finding whose anchor was thrown away must not read like a
+// finding that never had one.
 const findings = [];
+const rejectedAnchors = [];
 let n = 0;
 for (const review of reviews) {
   for (const f of review.findings ?? []) {
     n += 1;
+    const id = `F${n}`;
+    const { file, line, counterpart, detail, fix, rejected } = normalizeAnchor(f);
+    if (rejected.length) rejectedAnchors.push(`${id}.${rejected.join('+')}`);
     findings.push({
-      id: `F${n}`,
+      id,
       reporter: review.persona,
       severity: f.severity,
       kind: f.kind ?? null,
-      file: f.file ?? null,
-      line: f.line ?? null,
-      counterpart: f.counterpart ?? null,
+      file,
+      line,
+      counterpart,
       title: f.title,
-      detail: f.detail,
-      fix: f.fix ?? null,
-      claimCheck: checkClaim(f.file ?? null, f.line ?? null),
-      counterpartCheck: checkCounterpart(f.counterpart ?? null),
-      kindCheck: checkKind(f.kind, f.file ?? null, f.line ?? null, f.counterpart ?? null, { advisoryKinds: ADVISORY_KINDS }),
+      detail,
+      fix,
+      claimCheck: checkClaim(file, line),
+      counterpartCheck: checkCounterpart(counterpart),
+      kindCheck: checkKind(f.kind, file, line, counterpart, { advisoryKinds: ADVISORY_KINDS }),
     });
   }
 }
+
 
 // Same-file-and-nearby-lines, and cross-file co-citation: the two consensus
 // edges a title-only join cannot see. Pure over `findings`, so both live in
@@ -257,6 +269,9 @@ process.stdout.write(
   `triaged ${findings.length} findings from ${reviews.length} reviewers -> ${values.out}\n`
   + `  clusters (same file, <=${CLUSTER_WINDOW_LINES} lines apart, 2+ reporters): ${clusters.length}\n`
   + `  claim-check disproved: ${disproved.length}${ids(disproved)}\n`
+  + `  malformed anchors coerced away (field kept null): ${rejectedAnchors.length}`
+  + `${rejectedAnchors.length ? ` (${rejectedAnchors.join(', ')})` : ''}\n`
+
   + `  cross-file co-citations (candidate shared root cause): ${crossReferences.length}`
   + `${crossReferences.length ? ` (${crossReferences.map((x) => `${x.from}->${x.to}`).join(', ')})` : ''}\n`
   + `  candidate root causes (proposed, for round 2 to confirm or split): ${groups.length}`

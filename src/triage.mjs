@@ -18,6 +18,46 @@ import { parseHunks } from './trace.mjs';
 
 export const CLUSTER_WINDOW_LINES = 15;
 
+// A reviewer payload is LLM output — this tool's explicitly untrusted input.
+// `validatePhase1` establishes that severity/title/detail/kind are PRESENT and
+// that the two enums are in range; it says nothing about the type of `line`,
+// `file`, `counterpart` or `detail`, and every anchor sink below assumed one
+// anyway. Two of those sinks crashed the bridge on a value a model produces by
+// accident (`"line": "105)"`), and two worse ones returned `status: 'ok'` on a
+// value nobody checked — a mechanically-verified anchor minted out of a
+// string. Normalizing once at ingest is the fix; the fail-closed guards in
+// `checkKind`, `insideRepo` and `checkClaim` are the backstop for a caller
+// that skips it.
+export function isAnchorLine(line) {
+  return Number.isInteger(line) && line > 0;
+}
+
+const ANCHOR_STRINGS = ['file', 'counterpart', 'fix'];
+
+const asString = (v) => (typeof v === 'string' && v ? v : null);
+
+const wasSupplied = (v) => v !== null && v !== undefined;
+
+// The anchor fields coerced to the types every sink assumes, plus `rejected`:
+// the names of the fields whose supplied value was unusable. The caller
+// reports that list rather than swallowing it — an anchor silently coerced to
+// null is indistinguishable from one the reviewer never gave, and those two
+// deserve different reactions from whoever reads the run.
+export function normalizeAnchor(f) {
+  const anchor = {
+    line: isAnchorLine(f.line) ? f.line : null,
+    detail: typeof f.detail === 'string' ? f.detail : '',
+  };
+  for (const k of ANCHOR_STRINGS) anchor[k] = asString(f[k]);
+
+  const rejected = ANCHOR_STRINGS.filter((k) => wasSupplied(f[k]) && anchor[k] === null);
+  if (wasSupplied(f.line) && anchor.line === null) rejected.push('line');
+  if (wasSupplied(f.detail) && typeof f.detail !== 'string') rejected.push('detail');
+
+  return { ...anchor, rejected };
+}
+
+
 // What each kind promises about its own anchoring. Checked, not enforced: a
 // finding that does not keep its kind's promise is ANNOTATED as
 // under-anchored, never dropped — the reporter may have found something real
@@ -39,7 +79,8 @@ export function checkKind(kind, file, line, counterpart, { advisoryKinds } = {})
   }
   const missing = [];
   if (req.file && !file) missing.push('file');
-  if (req.line && (line === null || line === undefined)) missing.push('line');
+  if (req.line && !isAnchorLine(line)) missing.push('line');
+
   if (req.counterpart && !counterpart) missing.push('counterpart');
   if (missing.length) {
     return {
@@ -96,13 +137,30 @@ export function clusterFindings(findings, { windowLines = CLUSTER_WINDOW_LINES }
 // design note in another. If finding A's prose cites finding B's file (and,
 // when both name lines, B's line too), that is a candidate same-root-cause
 // edge that the title join and the line clustering would both drop.
+// Every integer appearing in `text`, as a set. This replaces a
+// `new RegExp(`\\b${b.line}\\b`)` built from reviewer-supplied data: `line`
+// is not type-checked at the source, so `"line": "(20"` threw
+// `SyntaxError: Invalid regular expression` out of the constructor and took
+// the whole triage bridge with it, and `"line": "([a-z]+)+~"` compiled fine
+// and then backtracked forever. A set of numbers can do neither, and scanning
+// each detail once is O(len) instead of one compile-and-test per candidate.
+function numbersIn(text) {
+  return new Set((text.match(/\d+/g) ?? []).map(Number));
+}
+
 export function crossReferenceFindings(findings) {
   const crossReferences = [];
+  const numbersByFinding = new Map(
+    findings.map((f) => [f.id, numbersIn(typeof f.detail === 'string' ? f.detail : '')]),
+  );
+
   for (const a of findings) {
+    if (typeof a.detail !== 'string' || !a.detail) continue;
     for (const b of findings) {
-      if (a.id === b.id || a.reporter === b.reporter || !b.file) continue;
-      if (!a.detail || !a.detail.includes(b.file)) continue;
-      const lineEchoed = b.line !== null && new RegExp(`\\b${b.line}\\b`).test(a.detail);
+      if (a.id === b.id || a.reporter === b.reporter || typeof b.file !== 'string' || !b.file) continue;
+      if (!a.detail.includes(b.file)) continue;
+      const lineEchoed = isAnchorLine(b.line) && numbersByFinding.get(a.id).has(b.line);
+
       crossReferences.push({
         from: a.id,
         to: b.id,
@@ -274,7 +332,14 @@ export function makeClaimChecker({ repo, base }) {
   })();
 
   function insideRepo(file) {
+    // `path.resolve` throws ERR_INVALID_ARG_TYPE on a number, boolean, array
+    // or object, and `file` reaches here from reviewer JSON. Rejecting a
+    // non-string here rather than letting it throw keeps a malformed anchor a
+    // DISPROVED finding instead of an uncaught crash that loses the run.
+    if (typeof file !== 'string' || !file) return null;
+
     const abs = path.resolve(repo, file);
+
     if (abs !== repo && !abs.startsWith(repo + path.sep)) return null;
 
     let real;
@@ -340,8 +405,18 @@ export function makeClaimChecker({ repo, base }) {
       out.note = 'no line cited; file exists';
       return out;
     }
+    // Fail closed on a line that is not a positive integer. `line > total` is
+    // false for `NaN`, so `"line": ".*"` used to fall through this branch and
+    // come back `status: 'ok'` with `citedLine: null` — the tool vouching for
+    // an anchor it never checked. `0`, `-5` and `4.5` passed the same way.
+    if (!isAnchorLine(line)) {
+      return { status: 'DISPROVED', file, fileLines: total, line,
+               why: `cited line is not a positive integer: ${JSON.stringify(line)}` };
+    }
+
     out.line = line;
     if (line > total) {
+
       return { status: 'DISPROVED', file, fileLines: total, line,
                why: `cited line ${line} is past end of file (${total} lines)` };
     }
