@@ -8,6 +8,8 @@ import {
   isBlocking, isOpenBlocking, mergeSplitReviews, normalizeVerdict, renderMarkdown,
   synthesize, toJsonReport, worseVerdict,
 } from '../src/synthesis.mjs';
+import { renderHtml } from '../src/html.mjs';
+
 
 const f = (title, severity = 'warning', file = null, line = null, detail = 'd', fix = null) =>
   ({ severity, file, line, title, detail, fix });
@@ -462,11 +464,15 @@ const oneGuard = () => ({
     members: ['F1', 'F2', 'F3'],
     via: ['cluster', 'co-citation'],
     oversized: false,
+    // The anchor is the worst-severity member, which is where `title` above
+    // came from — F2, not the first citation by ID.
+    anchor: 'F2',
     citations: [
       { id: 'F1', reporter: 'auditor', kind: 'defect', severity: 'warning', file: 'a.py', line: 10, title: 'guard is unreachable' },
       { id: 'F2', reporter: 'adversary', kind: 'defect', severity: 'critical', file: 'a.py', line: 14, title: 'unreachable guard is a bypass' },
-      { id: 'F3', reporter: 'steward', kind: 'contract', severity: 'info', file: 'docs/a.md', line: 3, title: 'docs still promise the guard' },
+      { id: 'F3', reporter: 'steward', kind: 'contract', severity: 'info', file: 'docs/a.md', line: 3, counterpart: 'a.py', title: 'docs still promise the guard' },
     ],
+
   }],
 });
 
@@ -586,4 +592,60 @@ test('a report from a run that never grouped still has the keys, empty', () => {
   const json = toJsonReport(synthesize({ auditor: review('auditor', [f('x')]) }, {}));
   assert.deepEqual(json.root_causes, []);
   assert.equal(json.findings[0].group, null);
+});
+
+// --- a root cause's scalars come from the anchor, not from array position -----
+//
+// `anchorMember` decides what a group IS — worst severity, blocking over
+// advisory, then triage order. Four other places re-derived that answer by
+// walking the citation array in ID order, so a group headed by a critical
+// routinely advertised a low-severity citation's fix.
+
+const withFixes = () => {
+  const g = oneGuard();
+  // F1 (info-ish warning, first by ID) and F2 (the critical anchor) both carry
+  // a fix. Picking by array order picks F1's.
+  g.round1.auditor.findings[0].fix = 'delete the log line';
+  g.round1.adversary.findings[0].fix = 'restore the guard';
+  return g;
+};
+
+test('a group advertises the ANCHOR\'s fix, not the first citation\'s', () => {
+  const { round1, groups } = withFixes();
+  const [rc] = synthesize(round1, {}, { groups }).rootCauses;
+  assert.equal(rc.title, 'unreachable guard is a bypass', 'headline is the anchor\'s');
+  assert.equal(rc.fix, 'restore the guard', 'so the fix must be the anchor\'s too');
+});
+
+test('a group still finds a fix when the anchor has none', () => {
+  const { round1, groups } = withFixes();
+  round1.adversary.findings[0].fix = null; // anchor has no fix
+  const [rc] = synthesize(round1, {}, { groups }).rootCauses;
+  assert.equal(rc.fix, 'delete the log line', 'falls back rather than showing none');
+});
+
+test('a group\'s reporters come from the resolved findings', () => {
+  const { round1, groups } = oneGuard();
+  // The briefing CLAIMS auditor reported F1. Synthesis resolved it to both
+  // auditor and steward, and the group used to report only the claim.
+  groups[0].citations[0].reporter = 'pragmatist';
+  const [rc] = synthesize(round1, {}, { groups }).rootCauses;
+  assert.ok(rc.reporters.includes('auditor'), 'the resolved reporter must win');
+  assert.ok(!rc.reporters.includes('pragmatist'), 'the unverified claim must not');
+});
+
+test('a split group is not counted as covered by the headline', () => {
+  const { round1, groups } = oneGuard();
+  const md = renderMarkdown(
+    synthesize(round1, { auditor: ruling('auditor', 'G1', 'split') }, { groups }));
+  // Round 2 said these are separate problems; the same file already refuses to
+  // back-reference them, and the headline was the one place that forgot.
+  assert.match(md, /covering 0 findings still grouped/);
+});
+
+test('both renderers show a contract citation\'s counterpart', () => {
+  const { round1, groups } = oneGuard();
+  const syn = synthesize(round1, { auditor: ruling('auditor', 'G1', 'one') }, { groups });
+  assert.match(renderMarkdown(syn), /contradicts `a\.py`/);
+  assert.match(renderHtml(syn), /contradicts a\.py/);
 });

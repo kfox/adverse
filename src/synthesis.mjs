@@ -209,18 +209,36 @@ function buildRootCauses(groups, round2, findByTitle) {
         confidence: f?.confidence ?? null,
         blocking: f ? isBlocking(f) : null,
         fix: f?.fix ?? null,
+        // The briefing's `reporter` is what the payload CLAIMED; the finding's
+        // own `reporters` is what synthesis actually resolved. Where they
+        // disagree, the group was reporting the unverified one.
+        reporters: f?.reporters ?? null,
       };
     });
+
+    // Anchor first, then worst severity, then the order triage assigned. Every
+    // scalar below reads this list, so the group's headline and its fix cannot
+    // describe different citations — which they did whenever the first citation
+    // by ID order was not the worst one, i.e. most of the time.
+    const ranked = [...citations].sort((a, b) =>
+      (b.id === g.anchor ? 1 : 0) - (a.id === g.anchor ? 1 : 0)
+      || severityRank(a.severity) - severityRank(b.severity));
+
+    // Resolved reporters where synthesis has them, the citation's claim only
+    // where it does not — an unresolved citation should not erase a reporter,
+    // but it should not silently vouch for one either.
+    const reporters = [...new Set(citations.flatMap((c) => c.reporters ?? [c.reporter]))];
 
     return {
       ...g,
       status,
       rulings,
       citations,
-      reporters: [...new Set(citations.map((c) => c.reporter))],
+      reporters,
       blocking: citations.some((c) => c.blocking === true),
-      fix: citations.find((c) => c.fix)?.fix ?? null,
+      fix: ranked.find((c) => c.fix)?.fix ?? null,
     };
+
   });
 }
 
@@ -434,8 +452,14 @@ function renderRootCauses(rootCauses) {
     lines.push('');
     for (const c of rc.citations) {
       const loc = c.file ? ` — \`${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}\`` : '';
+      // `counterpart` is half a contract citation's identity — the claim is "X
+      // contradicts Y" — and it is carried on the record specifically so a
+      // group decision copied out of here can still match next iteration.
+      // Both renderers dropped it.
+      const against = c.counterpart ? ` — contradicts \`${c.counterpart}\`` : '';
       lines.push(`- **${c.id}** (${c.reporter}, ${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}) `
-        + `${c.title}${loc}`
+        + `${c.title}${loc}${against}`
+
         + (c.resolved ? '' : ' — _not in the report; this citation named a finding synthesis did not build_'));
     }
     if (rc.fix) {
@@ -472,11 +496,19 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   );
   const rootCauses = syn.rootCauses ?? [];
   if (rootCauses.length) {
+    // A `split` group is one round 2 explicitly said is SEVERAL problems, and
+    // `renderRootCauses` already refuses to back-reference it twenty lines
+    // above. Counting its members as "covered" claimed a grouping the same
+    // file had just dissolved — with G1 confirmed (2 members) and G2 split (2),
+    // the header read "4 findings covered by 1 confirmed root cause".
     const confirmed = rootCauses.filter((rc) => rc.status === 'confirmed');
+    const standing = rootCauses.filter((rc) => rc.status !== 'split');
+    const covered = new Set(standing.flatMap((rc) => rc.members ?? [])).size;
     lines.push(
       `**Root causes:** ${confirmed.length} confirmed of ${rootCauses.length} proposed, `
-        + `covering ${new Set(rootCauses.flatMap((rc) => rc.members)).size} findings  `,
+        + `covering ${covered} findings still grouped  `,
     );
+
   }
   lines.push('');
 

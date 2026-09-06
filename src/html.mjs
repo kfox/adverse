@@ -201,9 +201,16 @@ function renderRootCause(rc) {
   const sev = SEVERITY_BADGE[rc.severity] ?? SEVERITY_BADGE.info;
   const citations = rc.citations.map((c) => {
     const loc = c.file ? `${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}` : '';
+    // A contract citation without its counterpart is half a claim: "X
+    // contradicts Y" with Y missing. The field is on the record precisely so a
+    // group decision copied from here can still match next iteration.
+    const against = c.counterpart
+      ? ` <span class="loc">contradicts ${esc(c.counterpart)}</span>` : '';
     return `<li><strong>${esc(c.id)}</strong> <span class="cite-meta">${esc(c.reporter)} · `
       + `${esc(c.severity ?? 'no severity')}·${esc(c.kind ?? 'unclassified')}</span> ${esc(c.title)}`
       + (loc ? ` <span class="loc">${esc(loc)}</span>` : '')
+      + against
+
       + (c.resolved ? '' : ' <em>— not in the report; this citation named a finding synthesis did not build</em>')
       + '</li>';
   }).join('\n');

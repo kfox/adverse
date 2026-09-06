@@ -376,6 +376,12 @@ export function groupFindings(findings, { clusters = [], crossReferences = [], a
     groups.push({
       id: `G${groups.length + 1}`,
       title: anchor.title,
+      // Which member's words became the canonical statement. Recorded rather
+      // than re-derived: `title` came from this member and four other places
+      // used to answer "what is this group" by array position instead, so the
+      // group's headline and its fix routinely described different citations.
+      anchor: anchor.id,
+
       severity: SEVERITY_ORDER.find((s) => members.some((f) => f.severity === s))
         ?? anchor.severity ?? null,
       kinds: distinct(members.map((f) => f.kind)),
