@@ -1,7 +1,7 @@
 // Command-line entry point: `adverse review <target> [options]`.
 
 import { parseArgs } from 'node:util';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -22,7 +22,8 @@ Commands:
   review [target]   Run an adversarial review on a target.
   personas          List available personas and their lenses.
   synthesize        Read round-1/round-2 JSON from disk and emit a report.
-                    (Used by the Claude Code Skill; see skills/adverse-review.)
+                    Standalone use — the Claude Code Skill reaches the same
+                    logic through skills/adverse-review/scripts/synthesize.mjs.
   help              Show this help.
 
 Options for 'review':
@@ -47,6 +48,9 @@ Options for 'synthesize':
   --out <path>             Markdown output path. Default: stdout.
   --json-out <path>        JSON synthesis output path.
   --html-out <path>        HTML dashboard output path.
+  --skipped <persona=reason>  A lane deliberately not run (repeatable).
+  --degraded <persona>     A lane that was tried and failed, not skipped (repeatable).
+  --round2-skipped <reason>   Declare that round 2 did not run, and why.
 
 Exit codes:
   0  approve / conditional / hold
@@ -240,6 +244,14 @@ async function cmdReview(rest) {
   return syn.consensusLabel.startsWith('BLOCK') ? 1 : 0;
 }
 
+function readJsonArg(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf-8'));
+  } catch (e) {
+    die(`synthesize: ${file}: ${e.message}`);
+  }
+}
+
 async function cmdSynthesize(rest) {
   const { values } = parseArgs({
     args: rest,
@@ -249,14 +261,39 @@ async function cmdSynthesize(rest) {
       out:        { type: 'string' },
       'json-out': { type: 'string' },
       'html-out': { type: 'string' },
+      skipped:    { type: 'string', multiple: true },
+      degraded:   { type: 'string', multiple: true },
+      'round2-skipped': { type: 'string' },
     },
     strict: true,
   });
   if (!values.round1) die('synthesize: --round1 is required');
-  const fs = await import('node:fs');
-  const round1 = JSON.parse(fs.readFileSync(values.round1, 'utf-8'));
-  const round2 = values.round2 ? JSON.parse(fs.readFileSync(values.round2, 'utf-8')) : {};
-  const syn = synthesize(round1, round2);
+  const round1 = readJsonArg(values.round1);
+  const round2 = values.round2 ? readJsonArg(values.round2) : {};
+
+  // --skipped auditor="reason" records a lane that was deliberately not run, so
+  // the report cannot present its silence as a clean bill of health.
+  const skippedPersonas = (values.skipped ?? []).map((spec) => {
+    const at = spec.indexOf('=');
+    return at === -1
+      ? { persona: spec, reason: null }
+      : { persona: spec.slice(0, at), reason: spec.slice(at + 1) };
+  });
+
+  // --degraded adversary records a lane that was TRIED and FAILED, which is not
+  // the same as one deliberately skipped and must not be spelled the same way.
+  const failedPersonas = (values.degraded ?? []).map((spec) => spec.split('=')[0]);
+
+  // An EMPTY --round2-skipped value is a silent undeclared skip wearing a
+  // declaration's clothes (an unset shell var expands to ""), so it is a
+  // usage error, not a no-op.
+  if (values['round2-skipped'] !== undefined && values['round2-skipped'].trim() === '') {
+    die('synthesize: --round2-skipped requires a non-empty reason');
+  }
+
+  const syn = synthesize(round1, round2, {
+    skippedPersonas, failedPersonas, round2Skipped: values['round2-skipped'] ?? null,
+  });
   const md = renderMarkdown(syn);
 
   if (values.out) writeFileSync(values.out, md, 'utf-8');
@@ -267,6 +304,8 @@ async function cmdSynthesize(rest) {
     const { renderHtml } = await import('./html.mjs');
     writeFileSync(values['html-out'], renderHtml(syn), 'utf-8');
   }
+
+  logProgress(`✅ verdict: ${syn.consensusLabel} · ${syn.findings.length} findings`);
   return syn.consensusLabel.startsWith('BLOCK') ? 1 : 0;
 }
 

@@ -150,7 +150,11 @@ Code 1 is what you wire into a CI gate.
 
 ### `synthesize` subcommand
 
-Used internally by the Skill, also useful standalone if you have round-1/round-2 JSON from somewhere else and just want the report:
+Standalone: turn round-1/round-2 JSON from any source into a report. The
+Claude Code Skill reaches this same logic through its own thin bridge script
+(`skills/adverse-review/scripts/synthesize.mjs`), which also supports
+`--skipped`, `--degraded`, and `--round2-skipped` for declaring lanes the
+Skill's plan chose not to run.
 
 ```bash
 adverse synthesize \
