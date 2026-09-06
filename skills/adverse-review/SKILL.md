@@ -224,10 +224,7 @@ own. The loop reads the plan rather than a fixed roster:
 
 ```bash
 WORKTREES=$(mktemp -d)
-AGENTS=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
-  .lanes.filter((l) => l.run)
-  .flatMap((l) => (l.agents === 2 ? [`${l.persona}-a`, `${l.persona}-b`] : [l.persona]))
-  .join(" ")' "$ADVERSE_RUN/plan.json")
+AGENTS=$(node ${SKILL_DIR}/scripts/plan.mjs --agents "$ADVERSE_RUN/plan.json")
 for agent in $AGENTS; do
   git worktree add --detach "$WORKTREES/$agent" HEAD
 done
@@ -412,13 +409,9 @@ until now. Pass the roster the plan ran, so a lane whose payload is missing or
 unreadable fails closed instead of reading as "found nothing":
 
 ```bash
-EXPECT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
-  .lanes.filter((l) => l.run).map((l) => l.persona).join(",")' "$ADVERSE_RUN/plan.json")
-node ${SKILL_DIR}/scripts/plan.mjs --escalate --expect "$EXPECT" --json \
-    "$ADVERSE_RUN"/round1-*.json > "$ADVERSE_RUN/escalation.json"
-ROUNDS=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).rounds' "$ADVERSE_RUN/escalation.json")
-CAP=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).maxIterations' "$ADVERSE_RUN/escalation.json")
-R2_REASON=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).roundsReason' "$ADVERSE_RUN/escalation.json")
+EXPECT=$(node ${SKILL_DIR}/scripts/plan.mjs --expect "$ADVERSE_RUN/plan.json")
+eval "$(node ${SKILL_DIR}/scripts/plan.mjs --escalate --expect "$EXPECT" --sh \
+    "$ADVERSE_RUN"/round1-*.json)"
 ```
 
 Two dials move, both deterministic:

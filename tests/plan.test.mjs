@@ -301,3 +301,162 @@ test('--files does not surrender the deletion floor', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- --agents: the worktree loop's list, read from plan.json ----------------
+
+function writePlanFile(dir, lanes) {
+  const p = path.join(dir, 'plan.json');
+  writeFileSync(p, JSON.stringify({ lanes }));
+  return p;
+}
+
+test('--agents lists one name per running lane, and skips a lane the plan skipped', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-agents-'));
+  try {
+    const plan = writePlanFile(dir, [
+      { persona: 'auditor', run: true, agents: 1, reason: 'r' },
+      { persona: 'pragmatist', run: false, agents: 0, reason: 'skip' },
+    ]);
+    const r = runPlan(['--agents', plan]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), 'auditor');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--agents expands a split lane into one letter-suffixed name per agent, not hardcoded to two', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-agents2-'));
+  try {
+    const plan = writePlanFile(dir, [
+      { persona: 'auditor', run: true, agents: 3, reason: 'split three ways' },
+      { persona: 'steward', run: true, agents: 1, reason: 'never split' },
+    ]);
+    const r = runPlan(['--agents', plan]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(r.stdout.trim().split(' '), ['auditor-a', 'auditor-b', 'auditor-c', 'steward']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--agents rejects a lane with a malformed `agents` count instead of silently dropping it', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-agents3-'));
+  try {
+    const plan = writePlanFile(dir, [{ persona: 'auditor', run: true, agents: null, reason: 'r' }]);
+    const r = runPlan(['--agents', plan]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /invalid `agents` count/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--agents on a plan.json missing `lanes` is a usage error, not a silent empty list', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-agents4-'));
+  try {
+    const plan = path.join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ oops: true }));
+    const r = runPlan(['--agents', plan]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a plan\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--agents combined with --escalate is a usage error — the two modes do not mix', () => {
+  const r = runPlan(['--agents', 'plan.json', '--escalate']);
+  assert.equal(r.status, 2);
+});
+
+// --- --expect <plan.json>: the round-2 roster, read instead of retyped ------
+
+test('--expect <plan.json> prints the run-lane roster, comma-joined', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-expect-'));
+  try {
+    const plan = writePlanFile(dir, [
+      { persona: 'auditor', run: true, agents: 1, reason: 'r' },
+      { persona: 'adversary', run: true, agents: 1, reason: 'r' },
+      { persona: 'pragmatist', run: false, agents: 0, reason: 'skip' },
+    ]);
+    const r = runPlan(['--expect', plan]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), 'auditor,adversary');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--expect <plan.json> feeds straight into --escalate --expect', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-expect2-'));
+  try {
+    const plan = writePlanFile(dir, [{ persona: 'auditor', run: true, agents: 1, reason: 'r' }]);
+    const expectOut = runPlan(['--expect', plan]);
+    assert.equal(expectOut.status, 0, expectOut.stderr);
+    const roundOne = path.join(dir, 'round1-auditor.json');
+    writeFileSync(roundOne, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));
+    const r = runPlan(['--escalate', '--expect', expectOut.stdout.trim(), roundOne]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /round 2: skip/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--expect <plan.json> missing `lanes` is a usage error', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-expect3-'));
+  try {
+    const plan = path.join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ oops: true }));
+    const r = runPlan(['--expect', plan]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a plan\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- --escalate --sh: ROUNDS/CAP/R2_REASON as one eval-able block -----------
+
+test('--escalate --sh prints ROUNDS/CAP/R2_REASON as shell assignments', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-sh-'));
+  try {
+    const f = path.join(dir, 'round1-auditor.json');
+    writeFileSync(f, JSON.stringify({
+      persona: 'auditor', verdict: 'reject', summary: 's',
+      findings: [{ severity: 'critical', kind: 'defect', title: 't' }],
+    }));
+    const r = runPlan(['--escalate', '--expect', 'auditor', '--sh', f]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^ROUNDS=\d+$/m);
+    assert.match(r.stdout, /^CAP=5$/m); // escalated: round 1 has a blocking critical
+    assert.match(r.stdout, /^R2_REASON='.*'$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--escalate --sh quotes an embedded single quote safely for eval', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-plan-sh2-'));
+  try {
+    // A missing expected lane drives roundsReason through the fail-closed
+    // "expected lane "<name>" has no readable round-1 payload" phrasing —
+    // naming an unheard-from persona with an apostrophe puts one right in
+    // the reason string, so `eval`-ing the output has to reconstruct it.
+    const f = path.join(dir, 'round1-auditor.json');
+    writeFileSync(f, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));
+    const r = runPlan(['--escalate', '--expect', "auditor,o'brien", '--sh', f]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /R2_REASON=/);
+    const out = execFileSync('bash', ['-c', `${r.stdout}\nprintf '%s' "$R2_REASON"`], { encoding: 'utf-8' });
+    assert.match(out, /o'brien/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--escalate --sh together with --json is a usage error — pick one output format', () => {
+  const r = runPlan(['--escalate', '--expect', 'auditor', '--sh', '--json', 'whatever.json']);
+  assert.equal(r.status, 2);
+});
