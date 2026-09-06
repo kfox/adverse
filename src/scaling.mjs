@@ -234,8 +234,8 @@ export function planReview({ files = [], diff = '', numstat = null, numstatMatch
       agents,
       reason: agents === SPLIT_AGENTS
         ? 'always runs; split across two agents because a large diff exhausts one reviewer\'s budget'
-        : persona === 'steward'
-          ? 'always runs, one agent — its unit of work is a claim, and partitioning files does not partition claims'
+        : PERSONAS[persona].soloReason
+          ? `always runs, one agent — ${PERSONAS[persona].soloReason}`
           : size.bucket === 'large' && PER_FILE_LANES.has(persona)
             ? 'always runs; one agent — a single changed file cannot be partitioned'
             : 'always runs — correctness has no skippable case',
