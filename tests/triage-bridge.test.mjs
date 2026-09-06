@@ -561,6 +561,22 @@ test('a --plan persona outside the registry is refused, not read as a phantom la
   assert.match(r.stderr, /not a persona/);
 });
 
+test('a --plan persona outside the registry is refused even when the lane was NOT split', () => {
+  // The registry check used to reach plan lanes only through
+  // `--merge-personas`, which a lane with `agents: 1` never becomes — so this
+  // exact plan was accepted (exit 0) and its phantom lane shaped the roster.
+  // src/scaling.mjs's parsePlan checks every lane, split or not.
+  const p = path.join(repo, 'round1-plan-unsplit.json');
+  writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));
+  const plan = writePlan(repo, [{ persona: 'referee', run: true, agents: 1, reason: 'solo' }]);
+  const out = path.join(repo, 'briefing-plan-unsplit.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', p, '--plan', plan, '--repo', repo, '--base', 'base', '--out', out],
+    { encoding: 'utf-8', timeout: 30_000 });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /not a persona/);
+});
+
 test('a --plan file with no `lanes` array is a usage error, not a silent no-op', () => {
   const p = path.join(repo, 'round1-plan-malformed.json');
   writeFileSync(p, JSON.stringify({ persona: 'auditor', verdict: 'approve', summary: 's', findings: [] }));

@@ -10,6 +10,10 @@
 
 import { readFileSync } from 'node:fs';
 
+import { importFromSrc } from './package-root.mjs';
+
+const { parsePlan, splitLanes } = await importFromSrc('scaling.mjs');
+
 export function readJson(file, prefix) {
   try {
     return JSON.parse(readFileSync(file, 'utf-8'));
@@ -62,40 +66,25 @@ export function makeWriteGuard(prefix) {
   };
 }
 
-// Every lane the plan mentions, as `{persona, agents, run}` — the WHOLE
-// roster, including the lanes it decided not to run. Callers need both halves:
-// which lanes were split (agents > 1) and which lanes the plan ruled out.
-// Filtering to the split ones here threw the second half away before any
-// caller could ask, so a payload from a lane the plan marked `run: false` was
-// accepted as a reviewer and counted toward consensus.
+// Every lane the plan mentions, as parsed lanes — the WHOLE roster, including
+// the lanes it decided not to run. Callers need both halves: which lanes were
+// split (agents > 1) and which lanes the plan ruled out. Filtering to the split
+// ones here threw the second half away before any caller could ask, so a
+// payload from a lane the plan marked `run: false` was accepted as a reviewer
+// and counted toward consensus.
+//
+// The shape rules themselves live in src/scaling.mjs beside `planReview`, the
+// function that writes this file — three readers had each validated a
+// different half of it. This is the bridge half: turn the thrown message into
+// this contract's exit 2, since a script that could not read its input never
+// got as far as judging a review.
 export function readPlanLanes(file, prefix) {
-  const plan = readJson(file, prefix);
-  if (!plan || !Array.isArray(plan.lanes)) {
-    process.stderr.write(`${prefix}: ${file}: not a plan.json (missing \`lanes\`)\n`);
+  try {
+    return parsePlan(readJson(file, prefix)).lanes;
+  } catch (e) {
+    process.stderr.write(`${prefix}: ${file}: ${e.message}\n`);
     process.exit(2);
   }
-  // A lane that is not an object would throw on property access, and this
-  // bridge's contract is that exit 2 means "could not read an input" and never
-  // a stack trace. Same reason validate.mjs's phase map is null-prototype.
-  for (const l of plan.lanes) {
-    if (!l || typeof l !== 'object' || Array.isArray(l) || typeof l.persona !== 'string') {
-      process.stderr.write(`${prefix}: ${file}: a lane is not an object with a \`persona\` string\n`);
-      process.exit(2);
-    }
-  }
-  return plan.lanes.map((l) => ({ persona: l.persona, agents: l.agents, run: l.run === true }));
 }
 
-export const splitPersonas = (lanes) =>
-  lanes.filter((l) => l.run && l.agents > 1).map((l) => l.persona);
-
-
-// combine.mjs and triage.mjs both take --merge-personas <persona>, typed by
-// hand once per lane the plan actually split. plan.mjs already decided that
-// roster (kfox/adverse#19 item 4); --plan <plan.json> reads it back instead
-// of retyping it, and can be combined with explicit --merge-personas flags —
-// the two are unioned, not exclusive.
-export function splitPersonasFromPlan(file, prefix) {
-  return splitPersonas(readPlanLanes(file, prefix));
-}
-
+export const splitPersonas = (lanes) => splitLanes(lanes).map((l) => l.persona);

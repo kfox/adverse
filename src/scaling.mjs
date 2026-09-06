@@ -252,6 +252,77 @@ export function planReview({ files = [], diff = '', numstat = null, numstatMatch
   };
 }
 
+// --- Reading a plan back -----------------------------------------------------
+//
+// `planReview` above writes plan.json; four readers each grew their own idea of
+// what one is, and each checked a different half. bridge-io's `readPlanLanes`
+// validated the lane SHAPE and not the persona registry; plan.mjs's
+// `readPlanFile` validated the REGISTRY and not the shape; only the `--agents`
+// projection ever validated an `agents` count, so every other reader's
+// `agents > 1` test read whatever the field happened to hold. One reader, in
+// the module that writes the file it parses.
+//
+// Throws rather than exiting: `src/` describes a review, the bridges own the
+// process. Same split as `loadLedger`.
+
+// `agents` is OPTIONAL, and its default follows `run` — `agentsFor` above
+// records 0 for a lane that does not run, so 0 is a legitimate count and not a
+// malformed one. A hand-written plan naming only the lane it cares about is
+// legitimate too (combine.mjs's `--plan` contract rests on it), so absence is
+// never an error. Present-but-malformed is: `Array.from({ length: undefined })`
+// silently yields an EMPTY array, so a bad count drops a lane's worktrees
+// instead of failing, and `undefined > 1` quietly un-splits a split lane.
+function parseLane(lane, personas) {
+  if (!lane || typeof lane !== 'object' || Array.isArray(lane)) {
+    throw new Error(`a lane is not an object: ${JSON.stringify(lane)}`);
+  }
+  if (!personas.includes(lane.persona)) {
+    throw new Error(`lane persona ${JSON.stringify(lane.persona)} is not a persona`
+      + ` (expected one of ${personas.join(', ')})`);
+  }
+  const run = lane.run === true;
+  // `=== undefined`, not `??`: a key absent from the JSON parses as undefined
+  // and is the legitimate hand-written case, while an explicit `null` is a
+  // count someone wrote down wrong. `??` collapses the two and defaults the
+  // malformed one to a working value.
+  const agents = lane.agents === undefined ? (run ? 1 : 0) : lane.agents;
+  const floor = run ? 1 : 0;
+  if (!Number.isInteger(agents) || agents < floor) {
+    throw new Error(`lane '${lane.persona}' has an invalid \`agents\` count`
+      + ` (${JSON.stringify(lane.agents)})`);
+  }
+  return { ...lane, agents, run };
+}
+
+export function parsePlan(plan, { personas = DEFAULT_PERSONAS } = {}) {
+  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.lanes)) {
+    throw new Error('not a plan.json (missing `lanes`)');
+  }
+  return { ...plan, lanes: plan.lanes.map((l) => parseLane(l, personas)) };
+}
+
+export const runLanes = (lanes) => lanes.filter((l) => l.run);
+
+// The lanes a caller must expect two payloads from. Round 2 spawns one agent
+// per persona regardless, so this is a round-1 question only.
+export const splitLanes = (lanes) => runLanes(lanes).filter((l) => l.agents > 1);
+
+// Keyed on lanes the plan explicitly RULED OUT rather than on lanes it named,
+// because a plan need not be exhaustive: rejecting every persona a hand-written
+// plan happens not to list would refuse real reviewers. A lane recorded
+// `run: false` is the case the plan is actually making a claim about.
+export const skippedLanes = (lanes) => lanes.filter((l) => !l.run);
+
+// One name per running lane, or one per agent (`persona-a`, `persona-b`, …)
+// for a lane split across more than one — read from that lane's own `agents`
+// count, never a repeated literal 2, so a future SPLIT_AGENTS change still
+// gets the right worktrees.
+export function agentNames(lanes) {
+  return runLanes(lanes).flatMap((l) => (l.agents === 1
+    ? [l.persona]
+    : Array.from({ length: l.agents }, (_, i) => `${l.persona}-${String.fromCharCode(97 + i)}`)));
+}
+
 // Re-plan after round 1, the earliest moment finding criticality is knowable.
 // Accepts the keyed-by-persona object combine.mjs produces or an array of
 // per-persona payloads ({persona, findings}).
