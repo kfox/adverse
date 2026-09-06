@@ -47,7 +47,8 @@
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { readJson, usage } from './bridge-io.mjs';
+import { makeWriteGuard, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+
 import { importFromSrc } from './package-root.mjs';
 
 const { validateVerify } = await importFromSrc('prompts.mjs');
@@ -74,7 +75,8 @@ if (!values.verify.length || !values.outdir) {
       + ' [--briefing briefing.json]');
 }
 
-const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
+const claimDest = makeWriteGuard('verify');
+
 
 // The anchor a reopened finding gets when `--briefing` did not supply one.
 // Blocking on purpose: `isBlocking` is `kind is not advisory && severity is
@@ -125,11 +127,8 @@ for (const src of values.verify) {
   // Same registry check as triage.mjs and combine.mjs, at the earlier reader:
   // the persona string keys the output filename and, downstream, triage's
   // verdicts map — a re-cased or invented name would mint a phantom reviewer.
-  if (!KNOWN_PERSONAS.has(payload?.persona)) {
-    process.stderr.write(`verify: ${src}: unknown persona ${JSON.stringify(payload?.persona)}`
-      + ` (expected one of ${DEFAULT_PERSONAS.join(', ')})\n`);
-    process.exit(1);
-  }
+  requireKnownPersona(payload?.persona, { prefix: 'verify', file: src, personas: DEFAULT_PERSONAS });
+
   const err = validateVerify(payload, payload.persona);
   if (err) {
     process.stderr.write(`verify: ${src}: ${err}\n`);
@@ -164,7 +163,10 @@ for (const src of values.verify) {
   };
 
 
-  const dest = `${values.outdir}/round1-${payload.persona}.verified.json`;
+  // The roster check above was here from the start; the collision check was
+  // not, so two payloads for one persona still collapsed onto one file.
+  const dest = claimDest(`${values.outdir}/round1-${payload.persona}.verified.json`, src);
+
   writeFileSync(dest, JSON.stringify(out, null, 2), 'utf-8');
   process.stdout.write(`verified ${src} -> ${dest}\n`);
 }

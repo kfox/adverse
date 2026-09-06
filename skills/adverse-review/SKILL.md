@@ -508,8 +508,15 @@ node ${SKILL_DIR}/scripts/combine.mjs --round1 "$ADVERSE_RUN"/round1-*.json \
     # lane --degraded. Without --plan (or an explicit --merge-personas), a
     # duplicate persona is an error (a file passed twice).
 node ${SKILL_DIR}/scripts/combine.mjs --round2 "$ADVERSE_RUN"/round2-*.repaired.json \
+    --plan "$ADVERSE_RUN/plan.json" \
     --out "$ADVERSE_RUN"/round2.json
+    # --plan on round 2 is the ROSTER half only — round 2 spawns one agent per
+    # persona, so there is nothing to merge, and --merge-personas is still
+    # refused here. What it buys is the gate: a payload from a lane the plan
+    # recorded `run: false` is a stale file or a spoof, and this is the one
+    # place that can tell.
 ```
+
 
 Combine the `.repaired.json` files, not the raw ones. That is the whole reason
 Phase 5 exists.

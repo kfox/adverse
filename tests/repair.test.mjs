@@ -142,3 +142,63 @@ test('an unreadable --briefing file is exit 2, not exit 1 — this run could not
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- the persona keys the output filename -----------------------------------
+//
+// verify.mjs added exactly this guard in the same change that created this
+// bridge, and wrote down why: "the persona string keys the output filename …
+// a re-cased or invented name would mint a phantom reviewer". The reasoning
+// was not applied to the bridge sitting next to it.
+
+function briefingAt(dir) {
+  const briefing = path.join(dir, 'briefing.json');
+  writeFileSync(briefing, JSON.stringify({
+    findings: [{ id: 'F1', title: 'T', reporter: 'auditor' }],
+  }));
+  return briefing;
+}
+
+function round2At(dir, name, persona) {
+  const file = path.join(dir, name);
+  writeFileSync(file, JSON.stringify({
+    persona, validates: [], challenges: [], added: [],
+  }));
+  return file;
+}
+
+test('an invented persona is refused rather than minting a phantom reviewer', () => {
+  const dir = freshTmp();
+  try {
+    const src = round2At(dir, 'round2-referee.json', 'referee');
+    const r = runRepair(['--briefing', briefingAt(dir), '--round2', src, '--outdir', dir]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /unknown persona "referee"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a re-cased persona is refused — it is a different key to the synthesizer', () => {
+  const dir = freshTmp();
+  try {
+    const src = round2At(dir, 'round2-Auditor.json', 'Auditor');
+    const r = runRepair(['--briefing', briefingAt(dir), '--round2', src, '--outdir', dir]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /unknown persona "Auditor"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two payloads claiming one persona refuse to collide, rather than one overwriting the other', () => {
+  const dir = freshTmp();
+  try {
+    const a = round2At(dir, 'round2-auditor.json', 'auditor');
+    const b = round2At(dir, 'round2-auditor-stale.json', 'auditor');
+    const r = runRepair(['--briefing', briefingAt(dir), '--round2', a, '--round2', b, '--outdir', dir]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /already written this run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

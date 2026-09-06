@@ -213,3 +213,23 @@ test('without --briefing a reopened finding still blocks', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('two verify payloads for one persona refuse to collide', () => {
+  const dir = freshTmp();
+  try {
+    // verify.mjs had the roster check from the start and not this one, so two
+    // payloads for one persona still collapsed onto a single output file
+    // before combine.mjs globbed the directory.
+    const mk = (name) => {
+      const f = path.join(dir, name);
+      writeFileSync(f, JSON.stringify({ persona: 'auditor', verified: [], added: [] }));
+      return f;
+    };
+    const r = runVerify(['--verify', mk('verify-auditor.json'),
+                         '--verify', mk('verify-auditor-stale.json'), '--outdir', dir]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /already written this run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

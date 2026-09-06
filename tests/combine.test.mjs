@@ -393,19 +393,82 @@ test('a lane the plan did NOT split still trips the duplicate guard under --plan
   }
 });
 
-test('--plan is refused for --round2, same as --merge-personas', () => {
+// --plan carries two answers, and round 2 needs one of them. The SPLIT half is
+// round-1 only — round 2 spawns one agent per persona, so merging two payloads
+// would drop one reviewer's work. The ROSTER half applies to both: the lanes
+// round 2 runs are a subset of the lanes the plan ran, so a payload from a
+// lane the plan ruled out is a stale file in either round. This test used to
+// assert that --plan was refused outright for --round2, which is what left
+// round-2 combine with no roster gate at all.
+test('--plan is accepted for --round2, and still enforces the roster there', () => {
+  const dir = freshTmp();
+  try {
+    const a = review(dir, 'auditor');
+    const plan = writePlan(dir, [
+      { persona: 'auditor', run: true, agents: 1, reason: 'runs' },
+      { persona: 'pragmatist', run: false, agents: 0, reason: 'small diff' },
+    ]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round2', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(out, 'utf-8'))), ['auditor']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--merge-personas is still refused for --round2 even alongside --plan', () => {
   const dir = freshTmp();
   try {
     const a = review(dir, 'auditor');
     const plan = writePlan(dir, [{ persona: 'auditor', run: true, agents: 2, reason: 'split' }]);
     const out = path.join(dir, 'combined.json');
-    const r = runCombine(['--round2', a, '--plan', plan, '--out', out]);
+    const r = runCombine(['--round2', a, '--plan', plan, '--merge-personas', 'auditor', '--out', out]);
     assert.equal(r.status, 2);
     assert.match(r.stderr, /applies only to --round1/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a payload from a lane the plan recorded `run: false` is refused', () => {
+  const dir = freshTmp();
+  try {
+    // The plan's only persona check used to be membership in DEFAULT_PERSONAS,
+    // so a real lane the plan never spawned was accepted as a reviewer and
+    // counted toward the distinct-persona consensus tally.
+    const a = review(dir, 'auditor');
+    const p = review(dir, 'pragmatist');
+    const plan = writePlan(dir, [
+      { persona: 'auditor', run: true, agents: 1, reason: 'runs' },
+      { persona: 'pragmatist', run: false, agents: 0, reason: 'small diff' },
+    ]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, p, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /recorded 'pragmatist' as not run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a lane the plan ran that sent nothing is called out, not silently missing', () => {
+  const dir = freshTmp();
+  try {
+    const a = review(dir, 'auditor');
+    const plan = writePlan(dir, [
+      { persona: 'auditor', run: true, agents: 1, reason: 'runs' },
+      { persona: 'steward', run: true, agents: 1, reason: 'runs' },
+    ]);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /the plan ran steward but no payload arrived/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 
 test('a plan.json with a persona outside the registry is refused, not read as a phantom lane', () => {
   const dir = freshTmp();

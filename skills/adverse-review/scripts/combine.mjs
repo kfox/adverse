@@ -22,7 +22,8 @@
 import { parseArgs } from 'node:util';
 import { writeFileSync } from 'node:fs';
 
-import { readJson, splitPersonasFromPlan, usage } from './bridge-io.mjs';
+import { readJson, readPlanLanes, splitPersonas, usage } from './bridge-io.mjs';
+
 import { importFromSrc } from './package-root.mjs';
 
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
@@ -52,17 +53,38 @@ if (hasRound1 === hasRound2) {
 }
 
 const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
-const mergePersonas = new Set([
-  ...(values['merge-personas'] ?? []),
-  ...(values.plan ? splitPersonasFromPlan(values.plan, 'combine') : []),
-]);
+
+// The plan carries two answers and this only ever read one. `agents > 1` says
+// which lanes were split; `run` says which lanes EXIST — and discarding that
+// half meant membership in DEFAULT_PERSONAS was the only gate, so a payload
+// from a lane the plan never ran was accepted as a reviewer and counted toward
+// consensus. Both halves come off one read now.
+const planLanes = values.plan ? readPlanLanes(values.plan, 'combine') : null;
+// Keyed on lanes the plan explicitly RULED OUT rather than on lanes it named,
+// because a plan need not be exhaustive: a hand-written one that mentions only
+// the split lane is legitimate, and rejecting every persona it happens not to
+// list would refuse real reviewers. A lane recorded `run: false` is the case
+// the plan is actually making a claim about.
+const notRun = planLanes
+  ? new Set(planLanes.filter((l) => !l.run).map((l) => l.persona)) : null;
+const ranPersonas = planLanes
+  ? planLanes.filter((l) => l.run).map((l) => l.persona) : null;
+
+
 // A split lane exists only in round 1; round 2 spawns one agent per persona
 // from the briefing. Round-2 payloads carry validates/challenges, not
-// findings, so a merge would silently drop the second payload's work.
-if (mergePersonas.size && hasRound2) {
-  process.stderr.write('combine: --merge-personas/--plan applies only to --round1\n');
+// findings, so a merge would silently drop the second payload's work. The
+// ROSTER half of --plan still applies to round 2 — the lanes round 2 runs are
+// a subset of the lanes the plan ran, so the gate is sound either way.
+const mergePersonas = new Set([
+  ...(values['merge-personas'] ?? []),
+  ...(planLanes && hasRound1 ? splitPersonas(planLanes) : []),
+]);
+if (values['merge-personas']?.length && hasRound2) {
+  process.stderr.write('combine: --merge-personas applies only to --round1\n');
   process.exit(2);
 }
+
 for (const p of mergePersonas) {
   if (!KNOWN_PERSONAS.has(p)) {
     process.stderr.write(`combine: ${p}: not a persona (${DEFAULT_PERSONAS.join(', ')})\n`);
@@ -87,6 +109,13 @@ for (const path of inputs) {
       + ` (expected one of ${DEFAULT_PERSONAS.join(', ')})\n`);
     process.exit(1);
   }
+  if (notRun?.has(payload.persona)) {
+    process.stderr.write(`combine: ${path}: the plan recorded '${payload.persona}' as not run,`
+      + ' so a payload from it is a stale file or a spoof, not a reviewer\n');
+    process.exit(1);
+  }
+
+
   if (hasRound1) {
     // Off-contract verdicts degrade to `reject`, loudly: synthesis scores an
     // unknown string as neutral and counts only the literal `reject` as a
@@ -122,5 +151,20 @@ for (const p of mergePersonas) {
   }
 }
 
+// A lane the plan ran that produced no payload reviewed nothing, and "reviewed
+// and found nothing" is the same input downstream as "never looked". Warned
+// rather than refused: the Pragmatist legitimately runs in round 1 and not in
+// round 2, so silence is not always a failure — but it is never something the
+// run should discover by noticing a missing row.
+if (ranPersonas) {
+  const silent = ranPersonas.filter((p) => !(p in combined));
+
+  if (silent.length) {
+    process.stderr.write(`combine: the plan ran ${silent.join(', ')} but no payload arrived.`
+      + ' If that lane failed, declare it: `synthesize --degraded <persona>`.\n');
+  }
+}
+
 writeFileSync(values.out, JSON.stringify(combined, null, 2), 'utf-8');
+
 process.stdout.write(`combined ${inputs.length} reviews -> ${values.out}\n`);

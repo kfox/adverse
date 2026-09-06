@@ -23,7 +23,11 @@
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { readJson, usage } from './bridge-io.mjs';
+import { makeWriteGuard, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { importFromSrc } from './package-root.mjs';
+
+const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
+
 
 // Positionals are round-2 files, so `--round2 run/round2-*.json` works. Same
 // reason as triage.mjs: strict parsing without this throws on the second path
@@ -50,7 +54,10 @@ const groupIds = new Set((briefing.groups ?? []).map((g) => g.id));
 
 let repaired = 0, unresolved = 0, checked = 0;
 
+const claimDest = makeWriteGuard('repair');
+
 for (const src of values.round2) {
+
   const payload = readJson(src, 'repair');
 
   for (const key of ['validate', 'challenge']) {
@@ -86,8 +93,15 @@ for (const src of values.round2) {
     }
   }
 
-  const dest = `${values.outdir}/round2-${payload.persona}.repaired.json`;
+  // `payload.persona` names the file this writes. Unchecked, an invented or
+  // re-cased name minted a phantom reviewer for combine.mjs's glob to pick up,
+  // and a repeated one silently replaced the lane that wrote first — the
+  // cheapest way to counterfeit the distinct-persona count synthesis treats as
+  // consensus.
+  requireKnownPersona(payload.persona, { prefix: 'repair', file: src, personas: DEFAULT_PERSONAS });
+  const dest = claimDest(`${values.outdir}/round2-${payload.persona}.repaired.json`, src);
   writeFileSync(dest, JSON.stringify(payload, null, 2), 'utf-8');
+
   process.stdout.write(`repaired ${src} -> ${dest}\n`);
 }
 
