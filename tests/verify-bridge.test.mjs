@@ -354,6 +354,40 @@ test('a briefed finding cited by an id the briefing does not carry binds by titl
   }
 });
 
+test('an anchor document whose findings carry no id is still reachable by title', () => {
+  // The early return that guards `bindToBriefing` used to test `briefed.size`
+  // alone. A document whose findings carry no `id` fills `briefedByTitle` and
+  // leaves `briefed` empty, so that line returned first and the title index it
+  // was added alongside was unreachable for exactly the input that motivated
+  // it. Both indexes are tested now; before this test, narrowing the condition
+  // back to `!briefed.size` changed nothing the suite could see.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: [
+      { severity: 'info', kind: 'design', file: 'src/a.mjs', line: 5,
+        counterpart: null, title: 'the module is two modules in one file', fix: null },
+    ] }));
+    const src = path.join(dir, 'verify-pragmatist.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'pragmatist',
+      verified: [{ id: 'F1', title: 'the module is two modules in one file',
+        status: 'open', reason: 'the seam is unchanged' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /anchor not inherited/);
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-pragmatist.verified.json'), 'utf8')).findings;
+    assert.equal(f.kind, 'design', 'an advisory finding must not come back blocking');
+    assert.equal(f.severity, 'info');
+    assert.equal(f.line, 5);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an ambiguous title binds to neither finding and falls back to blocking', () => {
   // Two briefed findings share a title, so it cannot say which is meant.
   // Guessing is how a severity gets copied off the wrong finding, so this

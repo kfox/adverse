@@ -1088,6 +1088,27 @@ test('a weak noted match hedges instead of claiming it is this finding', () => {
   assert.doesNotMatch(f.adjudicated.note, /NOTED this/);
 });
 
+test('a weak fixed match hedges instead of asserting the fix failed', () => {
+  // The rung `isRegressionCandidate` already guards and this sentence did not.
+  // A file-wide `fixed` match told round 2 "the fix did not work" while
+  // `briefing.regressed` was empty, because that list requires
+  // `matchScore >= SETTLING_SCORE` and this sentence required nothing — the
+  // tool asserting a regression its own arithmetic declined to count. The
+  // whole ladder tests match strength now, and this is the rung that got it
+  // last; before this test, disabling the guard changed nothing the suite
+  // could see.
+  const fixed = entry({ disposition: 'fixed', line: null, severity: null,
+    title: 'the retry loop is unbounded', reason: 'bounded the loop at 8 tries' });
+  const elsewhere = finding({ line: 400, title: 'a completely different defect' });
+  const [f] = annotate([elsewhere], ledgerWith(fixed));
+
+  assert.ok(f.adjudicated.matchScore < SETTLING_SCORE, 'a file-wide match, not an identity');
+  assert.equal(f.adjudicated.settled, false);
+  assert.match(f.adjudicated.note, /too weak to say it was THIS finding/);
+  assert.doesNotMatch(f.adjudicated.note, /did not work/);
+  assert.doesNotMatch(f.adjudicated.note, /REGRESSED/i);
+});
+
 test('a strong noted match still names the finding outright', () => {
   const noted = entry({ disposition: 'noted', severity: null, reason: 'out of scope' });
   const [f] = annotate([finding()], ledgerWith(noted));
