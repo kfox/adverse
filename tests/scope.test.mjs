@@ -216,6 +216,22 @@ test('scanning a very long line is still fast', () => {
 
 const removedLine = (line) => `--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n-${line}\n`;
 
+test('a removed over-long line is reported even when an added one preceded it', () => {
+  // The length signal used to dedupe across BOTH scans on one shared key, so a
+  // diff that added and removed a 300-character line reported only the added
+  // side — asserting nothing unreadable was removed, when a removed over-long
+  // line is exactly the bulk-deletion case the backstop exists for.
+  const long = 'x'.repeat(300);
+  const diff = [
+    'diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1 +1 @@',
+    `-${long}`, `+${long}`,
+  ].join('\n');
+  const r = assessScope({ files: ['src/render/widget.js'], diff });
+  const kinds = r.evidence.map((e) => e.kind).sort();
+  assert.deepEqual(kinds, ['unreadable', 'unreadable-removed'],
+    JSON.stringify(r.evidence));
+});
+
 test('the removed-guard spans do not backtrack catastrophically', () => {
   // Every unit here is repeated to 512 KB as ONE removed line. The second half
   // of the list is one entry per span-bearing pattern, each followed by the

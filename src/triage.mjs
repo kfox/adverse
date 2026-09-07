@@ -281,7 +281,7 @@ export function crossReferenceFindings(findings) {
   // In-degree, capped the same way. The out-degree cap alone bounded how far
   // one finding could REACH and said nothing about how many could reach IT, so
   // a single well-placed target still collected an edge from every other
-  // finding in the run and sat at the centre of the resulting component.
+  // finding in the run and sat at the center of the resulting component.
   const inDegree = new Map();
   return crossReferences.filter((e) => {
     const seen = inDegree.get(e.to) ?? 0;
@@ -412,7 +412,7 @@ function connectedComponents(findings, { clusters, crossReferences }) {
   // finding's prose naming another's file says far less than two reporters
   // landing on the same lines, and transitivity is greedy. The cap used to be
   // applied only AFTER the closure had run, so a chain of weak edges still
-  // swallowed the review and `oversized` merely labelled the result — 34
+  // swallowed the review and `oversized` merely labeled the result — 34
   // findings collapsed into one 29-member "root cause" spanning 10 files and
   // all four lanes. Bounding the closure itself is what keeps a group small
   // enough to be a root cause at all.

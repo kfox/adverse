@@ -267,7 +267,7 @@ test('a payload that fails the schema is exit 1, and nothing is written', () => 
 test('a payload cannot write a heading into the report through its `commit`', () => {
   // Shape 6 of the vacuous-test list is the live risk on the `commit` pattern:
   // pinning what the pattern accepts proves nothing about anything USING it.
-  // So this drives the whole path the injected string travelled — payload to
+  // So this drives the whole path the injected string traveled — payload to
   // `summary` to the report — and asserts the run stops before the file that
   // carries it is written.
   const dir = freshTmp();
@@ -347,6 +347,217 @@ test('--refold is how a deliberate re-read of the same commit says so', () => {
                        '--outdir', dir, '--refold']);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /1 pass\(es\) from 1 lane\(s\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a lane choice rides the choose mode\'s own JSON into the fold artifact', () => {
+  // Nothing else records HOW the reviewing lane was picked: a fold produced
+  // after --closed-by-none used to be byte-identical to one produced after a
+  // named exclusion list, so a reader could not tell a declared disinterest
+  // from a checked one. The choice is stamped by the bridge, and the summary —
+  // the one string synthesize copies into the report — says which basis it was.
+  const dir = gitRepo();
+  try {
+    const choose = run(['--repo', dir, '--commit', 'HEAD', '--closed-by', 'steward', '--json']);
+    assert.equal(choose.status, 0, choose.stderr);
+    const choice = JSON.parse(choose.stdout);
+    assert.equal(choice.disinterest, 'declared-list');
+    writeFileSync(path.join(dir, 'lane-choice.json'), choose.stdout);
+    writeFileSync(path.join(dir, 'regression-pass-1.json'),
+      JSON.stringify(pass({ persona: choice.persona, commit: 'HEAD' })));
+
+    const r = run(['--payload', path.join(dir, 'regression-pass-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json'), '--repo', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, `round1-${choice.persona}.regression.json`), 'utf-8'));
+    assert.equal(out.passes[0].laneChoice.disinterest, 'declared-list');
+    assert.equal(out.passes[0].laneChoice.conflicted, false);
+    assert.match(out.summary, /lane choice on record: declared-list/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a pass with no lane choice on file says so in the summary', () => {
+  const dir = freshTmp();
+  try {
+    const r = fold(dir, { 'regression-adversary-1.json': pass() });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    assert.match(out.summary, /lane choice unrecorded for 1 of 1 pass\(es\)/);
+    assert.equal('laneChoice' in out.passes[0], false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an overridden routing is warned about and never stamped', () => {
+  // The choice picked one lane and a different lane ran the pass: that is the
+  // orchestrator overriding the routing, which must not read as a recorded
+  // choice.
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'lane-choice.json'), JSON.stringify({
+      persona: 'steward', commit: 'abc1234', conflicted: false,
+      disinterest: 'declared-list', reason: 'steward: chosen',
+    }));
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /picked steward for abc1234, but this pass was run by adversary/);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    assert.equal('laneChoice' in out.passes[0], false);
+    assert.match(out.summary, /lane choice unrecorded/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('without a repo, a prefix spelling is not identity for stamping', () => {
+  // Staleness and stamping fail in opposite directions: a loose prefix match
+  // there refuses a fold (noisy), here it signs the wrong pass with another
+  // commit's audit record (silent). A 4-char spelling matched an unrelated
+  // pass outright, so the repo-less fallback is exact equality, and the pass
+  // stays noisily unstamped instead.
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'lane-choice.json'), JSON.stringify({
+      persona: 'adversary', commit: 'abc1', conflicted: false,
+      disinterest: 'declared-none', reason: 'nobody excluded',
+    }));
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /matches no pass in this fold/);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    assert.equal('laneChoice' in out.passes[0], false);
+    assert.match(out.summary, /lane choice unrecorded/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two choices matching one pass are refused as ambiguous, not first-won', () => {
+  const dir = freshTmp();
+  try {
+    for (const [name, reason] of [['choice-1.json', 'first'], ['choice-2.json', 'second']]) {
+      writeFileSync(path.join(dir, name), JSON.stringify({
+        persona: 'adversary', commit: 'abc1234', conflicted: false,
+        disinterest: 'declared-none', reason,
+      }));
+    }
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'choice-1.json'),
+                   '--choice', path.join(dir, 'choice-2.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /2 lane choices .* stamping would guess/);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    assert.equal('laneChoice' in out.passes[0], false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a choice commit carrying control characters is not a lane choice', () => {
+  // The commit is interpolated verbatim into this bridge's stderr diagnostics,
+  // where an embedded escape could rewrite what the operator sees. No honest
+  // rev spelling contains one.
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'lane-choice.json'), JSON.stringify({
+      persona: 'adversary', commit: 'abc1234\u001b[2K\rall clear', conflicted: false,
+      disinterest: 'declared-none', reason: 'r',
+    }));
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json')]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /not a lane choice/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a file that is not a lane choice is refused, not stamped', () => {
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'lane-choice.json'),
+      JSON.stringify({ persona: 'steward', commit: 'abc1234' }));
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json')]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /not a lane choice/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a fold naming more distinct commits than one run produces is refused', () => {
+  // The staleness check resolves each distinct commit spelling through git and
+  // the payload-file count is the one input nothing else bounds, so a glob over
+  // more than one run's files became a subprocess-per-file loop before it
+  // became a wrong answer. One iteration's passes name a handful of commits.
+  const dir = freshTmp();
+  try {
+    const files = {};
+    for (let i = 0; i < 65; i++) {
+      files[`regression-adversary-${i + 1}.json`] =
+        pass({ commit: `abc${String(i).padStart(4, '0')}` });
+    }
+    const r = fold(dir, files);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /65 distinct commits/);
+    assert.match(r.stderr, /more than one run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two abbreviations of one commit are one staleness key', () => {
+  // The commit is supplied by the pass payload and REVISION admits any
+  // abbreviation length, so re-running the same commit under a longer sha used
+  // to slip the guard and re-sign the leftover as this iteration's evidence.
+  const dir = freshTmp();
+  try {
+    const files = { 'regression-adversary-1.json': pass({ commit: 'abc1234' }) };
+    assert.equal(fold(dir, files).status, 0);
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'),
+      JSON.stringify(pass({ commit: 'abc1234def5678abc1234def5678abc1234def56' })));
+    const again = run(['--payload', path.join(dir, 'regression-adversary-1.json'),
+                       '--outdir', dir]);
+    assert.equal(again.status, 2, again.stdout);
+    assert.match(again.stderr, /already folded/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with --repo, two spellings of one commit resolve to one staleness key', () => {
+  // The prefix fallback above cannot see that HEAD and its sha are one commit;
+  // the repository can.
+  const dir = gitRepo();
+  try {
+    const sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'],
+      { encoding: 'utf-8' }).trim();
+    const files = { 'regression-adversary-1.json': pass({ commit: 'HEAD' }) };
+    assert.equal(fold(dir, files).status, 0);
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'),
+      JSON.stringify(pass({ commit: sha })));
+    const again = run(['--payload', path.join(dir, 'regression-adversary-1.json'),
+                       '--outdir', dir, '--repo', dir]);
+    assert.equal(again.status, 2, again.stdout);
+    assert.match(again.stderr, /already folded/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -538,14 +749,22 @@ test('an unreadable payload is exit 2 — this run never read its input', () => 
 });
 
 test('choosing a lane reads the commit itself and reports its reasoning', () => {
-  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by', 'auditor', '--json']);
-  assert.equal(r.status, 0, r.stderr);
-  const choice = JSON.parse(r.stdout);
-  assert.notEqual(choice.persona, 'auditor', 'the lane that reported it does not review it');
-  assert.notEqual(choice.persona, 'pragmatist');
-  assert.equal(choice.commit, 'HEAD');
-  assert.equal(choice.conflicted, false);
-  assert.ok(choice.reason.includes(choice.persona));
+  // A scratch repo, not this checkout's HEAD: verifying a release archive runs
+  // this suite where no .git exists, and the property under test is the
+  // bridge's reasoning, not this repository's latest commit.
+  const dir = gitRepo();
+  try {
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by', 'auditor', '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    const choice = JSON.parse(r.stdout);
+    assert.notEqual(choice.persona, 'auditor', 'the lane that reported it does not review it');
+    assert.notEqual(choice.persona, 'pragmatist');
+    assert.equal(choice.commit, 'HEAD');
+    assert.equal(choice.conflicted, false);
+    assert.ok(choice.reason.includes(choice.persona));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a commit nobody can read still names a lane, loudly', () => {
@@ -605,9 +824,14 @@ test('a split lane\'s half is a --closed-by name the bridge accepts', () => {
   // The discriminating case: refusing everything that is not a bare persona
   // would refuse `auditor-a`, which is exactly the id `agentNames` emits and
   // the one `laneOf` exists to resolve.
-  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by', 'auditor-a', '--json']);
-  assert.equal(r.status, 0, r.stderr);
-  assert.notEqual(JSON.parse(r.stdout).persona, 'auditor');
+  const dir = gitRepo();
+  try {
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by', 'auditor-a', '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.notEqual(JSON.parse(r.stdout).persona, 'auditor');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('no --closed-by at all is refused, and nothing is printed about a lane', () => {
@@ -629,12 +853,17 @@ test('--closed-by-none runs the pass and says on whose word nobody was excluded'
   // the omission must not make the pass unrunnable on a commit that closes no
   // reported finding. What it must not do is produce the same sentence a
   // checked exclusion earns.
-  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by-none', '--json']);
-  assert.equal(r.status, 0, r.stderr);
-  const choice = JSON.parse(r.stdout);
-  assert.match(choice.reason, /the caller declared that this commit closes no finding/);
-  assert.doesNotMatch(choice.reason, /it reported none of the findings/);
-  assert.deepEqual(choice.unresolved, []);
+  const dir = gitRepo();
+  try {
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-none', '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    const choice = JSON.parse(r.stdout);
+    assert.match(choice.reason, /the caller declared that this commit closes no finding/);
+    assert.doesNotMatch(choice.reason, /it reported none of the findings/);
+    assert.deepEqual(choice.unresolved, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('--closed-by-none beside a --closed-by name is refused, not merged', () => {

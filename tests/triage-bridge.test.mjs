@@ -167,7 +167,7 @@ test('an omitted --gate is recorded as null, not left out of the briefing', () =
 
 test('the summary line reports every tally, and reports the run the file describes', () => {
   // One assertion site for the whole summary block. Each of these counts used
-  // to ride along on whichever behavioural test happened to produce it, so the
+  // to ride along on whichever behavioral test happened to produce it, so the
   // advisory line in particular was asserted in exactly one place and by
   // accident.
   const { briefing, stdout } = runTriage(repo, [

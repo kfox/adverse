@@ -287,7 +287,7 @@ test('groupFindings: an unknown id in the MIDDLE of a cluster does not split it'
 
 test('groupFindings: a co-citation chain cannot grow a component past the cap', () => {
   // The cap used to be applied AFTER the closure had run, so a chain of weak
-  // edges swallowed the review and `oversized` merely labelled the result. On
+  // edges swallowed the review and `oversized` merely labeled the result. On
   // the run that filed the issue that was 34 findings in one 29-member "root
   // cause" across 10 files and all four lanes.
   const n = MAX_CONFIRMABLE_MEMBERS * 3;
@@ -302,7 +302,7 @@ test('groupFindings: a co-citation chain cannot grow a component past the cap', 
     assert.equal(g.oversized, false);
   }
   // And nothing is lost: a refused edge leaves its findings individually
-  // decidable, which is the pre-grouping behaviour and the safe state.
+  // decidable, which is the pre-grouping behavior and the safe state.
   assert.ok(groups.length > 1, 'the chain should break into several small groups');
 });
 
@@ -337,7 +337,7 @@ test('groupFindings: a component at the cap is not oversized in a big enough rev
 
 test('groupFindings: the cap is relative too — most of a small review cannot collapse', () => {
   // MAX_CONFIRMABLE_MEMBERS is absolute, and the invariant it is written for is
-  // not: 8 of 34 findings honours "one ruling must not collapse most of a
+  // not: 8 of 34 findings honors "one ruling must not collapse most of a
   // review", and 7 of 10 does not — that is 70% under a single disposition.
   const findings = Array.from({ length: 10 }, (_, i) =>
     f({ id: `F${i + 1}`, reporter: i % 2 ? 'steward' : 'auditor', file: `f${i}.py`, line: i }));
@@ -721,7 +721,7 @@ test('crossReferenceFindings: a DISPROVED anchor cannot be a citation target', (
 test('crossReferenceFindings: in-degree is capped, not just out-degree', () => {
   // The out-degree cap bounded how far one finding could REACH and said
   // nothing about how many could reach IT, so one well-placed target still sat
-  // at the centre of the component.
+  // at the center of the component.
   const target = { id: 'T', reporter: 'adversary', file: 'hot.mjs', line: 5, detail: 'x' };
   const sources = Array.from({ length: 9 }, (_, i) => ({
     id: `S${i}`, reporter: 'auditor', file: `s${i}.mjs`, line: i + 1,

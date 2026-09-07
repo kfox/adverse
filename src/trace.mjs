@@ -90,8 +90,12 @@ export function projectLine(hunks, line) {
   return { status: 'untouched', line: line + delta };
 }
 
+const GIT_TIMEOUT_MS = 10_000;
+
 function git(repo, args) {
-  return execFileSync('git', args, { cwd: repo, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 });
+  return execFileSync('git', args, {
+    cwd: repo, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024, timeout: GIT_TIMEOUT_MS,
+  });
 }
 
 // A ref is read out of the ledger, which is a JSON file on disk that the model

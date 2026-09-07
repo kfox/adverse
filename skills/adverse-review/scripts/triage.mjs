@@ -36,10 +36,9 @@
 // verdict.
 
 import { writeFileSync } from 'node:fs';
-import { parseArgs } from 'node:util';
 import path from 'node:path';
 
-import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
@@ -57,7 +56,11 @@ const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, makeClaimChecker } =
 // with strict parsing the second and later paths arrive as positionals. Node
 // then throws ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL and Phase 3 aborts before
 // any round-2 work happens. combine.mjs has always accepted them; so does this.
-const { values, positionals } = parseArgs({
+const USAGE = 'Usage: triage.mjs --round1 a.json [--round1 b.json …] [--merge-personas <persona>]… [--plan plan.json] --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>';
+
+const { values, positionals } = parseBridgeArgs({
+  prefix: 'triage',
+  usage: USAGE,
   options: {
     round1: { type: 'string', multiple: true },
     repo:   { type: 'string' },
@@ -74,7 +77,7 @@ const { values, positionals } = parseArgs({
 
 values.round1 = [...(values.round1 ?? []), ...positionals];
 if (!values.round1.length || !values.repo || !values.out) {
-  usage('Usage: triage.mjs --round1 a.json [--round1 b.json …] [--merge-personas <persona>]… [--plan plan.json] --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>');
+  usage(USAGE);
 }
 
 const repo = path.resolve(values.repo);

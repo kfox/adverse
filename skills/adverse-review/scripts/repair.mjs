@@ -20,9 +20,7 @@
 // The real fix belongs upstream in src/synthesis.mjs — join on ID, or on
 // file/line proximity — at which point this script becomes dead weight.
 
-import { parseArgs } from 'node:util';
-
-import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { makeWriteQueue, parseBridgeArgs, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { DEFAULT_PERSONAS, laneAgentOf } = await importFromSrc('personas.mjs');
@@ -31,7 +29,11 @@ const { DEFAULT_PERSONAS, laneAgentOf } = await importFromSrc('personas.mjs');
 // Positionals are round-2 files, so `--round2 run/round2-*.json` works. Same
 // reason as triage.mjs: strict parsing without this throws on the second path
 // the shell expands, and the glob is the obvious thing to type.
-const { values, positionals } = parseArgs({
+const USAGE = 'Usage: repair.mjs --briefing <briefing.json> --round2 a.json [--round2 b.json …] --outdir <dir>';
+
+const { values, positionals } = parseBridgeArgs({
+  prefix: 'repair',
+  usage: USAGE,
   options: {
     briefing: { type: 'string' },
     round2:   { type: 'string', multiple: true },
@@ -43,7 +45,7 @@ const { values, positionals } = parseArgs({
 
 values.round2 = [...(values.round2 ?? []), ...positionals];
 if (!values.briefing || !values.round2.length || !values.outdir) {
-  usage('Usage: repair.mjs --briefing <briefing.json> --round2 a.json [--round2 b.json …] --outdir <dir>');
+  usage(USAGE);
 }
 
 const briefing = readJson(values.briefing, 'repair');

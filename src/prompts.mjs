@@ -81,6 +81,14 @@ const FINDING_SCHEMA = `    {
 // pattern that refuses honest input is a worse defect than the injection it
 // closes. So: SAFE_REF's vocabulary, plus the length bound a prose cell needs
 // and that SAFE_REF does not have.
+//
+// Honest spellings this pattern still refuses, named so the next reader does
+// not rediscover them from a refused payload: reflog forms (`HEAD@{1}` — `@`
+// is the email-autolink character the comment below rules out), and a leading
+// `_` or `.` (git accepts `_branch`; the first character is pinned
+// alphanumeric, which is also what refuses an option-shaped `-rev`). Fix
+// agents are prompted to write shas, so the cost stays theoretical until a
+// prompt asks for something else.
 const REVISION = /^[0-9A-Za-z][0-9A-Za-z._/~^{}-]{0,63}$/;
 
 // The one thing left that REVISION's vocabulary admits and a signed sentence
@@ -902,8 +910,13 @@ const union = (values) => values.map((v) => `"${v}"`).join(' | ');
 // for the test that pins it: today's three values contain no `$`, so an
 // injected value is the only thing that can hold this honest.
 export function withClassification(schema, classifications) {
-  return schema.replace(/\n {4}\}$/,
+  const out = schema.replace(/\n {4}\}$/,
     () => `,\n      "classification": ${union(classifications)}\n    }`);
+  if (out === schema) {
+    throw new Error('withClassification: the schema does not end in the object'
+      + ' close the classification splices into');
+  }
+  return out;
 }
 
 const CLASSIFIED_FINDING_SCHEMA = withClassification(FINDING_SCHEMA, CLASSIFICATIONS);
@@ -1210,7 +1223,7 @@ export function validatePhase2(obj, personaName, { agent } = {}) {
   // the key would fail every payload from a run that had none — and a reviewer
   // that declines to rule costs only the collapse, never a finding: an unruled
   // group leaves its citations reported and decided individually, which is
-  // exactly the behaviour that predates grouping.
+  // exactly the behavior that predates grouping.
   if ('groups' in obj) {
     if (!Array.isArray(obj.groups)) return '`groups` must be an array.';
     for (let i = 0; i < obj.groups.length; i++) {

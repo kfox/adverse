@@ -318,8 +318,14 @@ reviewer is the one selection an interested party must not make:
 
 ```bash
 node ${SKILL_DIR}/scripts/regression.mjs --repo . --commit <fix-sha> \
-    --closed-by <persona> [--closed-by <persona> …]
+    --closed-by <persona> [--closed-by <persona> …] \
+    --json > "$ADVERSE_RUN"/lane-choice-<fix-sha>.json
 ```
+
+Save the `--json` output: it is the only record of HOW the reviewing lane was
+picked and on whose word, and the fold below stamps it onto the pass so the
+report can say which. Without it, a pass chosen under `--closed-by-none` is
+indistinguishable on disk from one chosen against a named exclusion list.
 
 `--closed-by` is every persona that reported a finding this commit closed,
 spelled the way the registry spells it — lowercase, or a split lane's half like
@@ -409,8 +415,15 @@ beside the verifications:
 node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/*/regression-*.json
 
 node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/*/regression-*.json \
-    --outdir "$ADVERSE_RUN" ${LEDGER:+--ledger "$LEDGER" --repo .}
+    --outdir "$ADVERSE_RUN" --choice "$ADVERSE_RUN"/lane-choice-*.json \
+    --repo . ${LEDGER:+--ledger "$LEDGER"}
 ```
+
+`--repo` is unconditional: it is what lets the fold resolve two spellings of
+one commit to one identity, for the staleness check and for matching each
+lane choice to its pass. Without it the fold falls back to exact string
+equality — safe, but a choice recorded under an abbreviated sha then goes
+unstamped, and the lane summary reports it unrecorded.
 
 Pass `--ledger` whenever the run has one. The fold then annotates any finding
 that re-litigates a settled decision with the recorded disposition and reason —
@@ -450,7 +463,8 @@ ledger attached, and loop:
 
 ```bash
 node ${SKILL_DIR}/scripts/verify.mjs --verify "$ADVERSE_RUN"/*/verify-*.json \
-    --outdir "$ADVERSE_RUN" --briefing "$ADVERSE_RUN"/briefing.json
+    --outdir "$ADVERSE_RUN" --briefing "$ADVERSE_RUN"/briefing.json \
+    --report "$ADVERSE_RUN"/report.json
 
 node ${SKILL_DIR}/scripts/triage.mjs \
     --round1 "$ADVERSE_RUN"/round1-*.verified.json \
@@ -481,7 +495,10 @@ whose own verdict was `reject`.
 Pass `--briefing` (the previous iteration's, still on disk at this point) so a
 reopened finding keeps the severity, kind and anchor it was first reported
 with. Without it each one falls back to a blocking `warning`/`behavioral`:
-noisy rather than silent, and recoverable by passing the flag.
+noisy rather than silent, and recoverable by passing the flag. The inherited
+anchor also makes the reopened finding matchable by the ledger — a prior
+`declined` can settle it and a prior `fixed` flags it REGRESSED — both
+consequences of the anchor, not of the severity alone.
 
 The bridge binds by id and then by title, and the second route is not a
 convenience. `briefing.mjs` re-mints finding ids **positionally on every triage
@@ -491,15 +508,17 @@ every such verification at the blocking fallback, which for a `design` finding
 contradicts the rule that design never blocks and made the loop unable to
 converge on advisory work.
 
-One case neither route reaches: a finding a round-2 reviewer **added**. It is
-in `briefing.json` under no key at all — triage's only finding input is
-`--round1` — so its verification keeps the blocking `warning`/`behavioral`
-fallback with a null anchor. That is noisy rather than silent, which is the
-direction to fail in, but it is a gap and not a covered case: an advisory
-round-2 addition verified `open` will hold the loop open until someone records
-a decision on it. A title that matches two briefed findings binds to neither: it cannot say
-which is meant, and guessing is how a severity gets copied off the wrong
-finding, so that case falls back to blocking and says so.
+`--report` is what reaches a finding a round-2 reviewer **added**. It is in
+`briefing.json` under no key at all — triage's only finding input is
+`--round1` — and the previous iteration's `report.json` is the only file that
+holds it, so pass that too (title-bound; the report carries no ids). Without
+the flag, such a verification keeps the blocking `warning`/`behavioral`
+fallback with a null anchor: noisy rather than silent, but an advisory
+round-2 addition verified `open` then holds the loop open until someone
+records a decision on it. A title that matches two findings in either source
+binds to neither: it cannot say which is meant, and guessing is how a severity
+gets copied off the wrong finding, so that case falls back to blocking and
+says so.
 
 The full `verified` array also rides along on the reshaped file, so you can
 read every disposition — closed and moot included — while deciding what to

@@ -11,6 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -81,5 +82,39 @@ test('an ordinary destination is still written', () => {
     assert.equal(readFileSync(dest, 'utf-8'), '{"written":true}');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Every bridge parses strictly, so before parseBridgeArgs existed the first
+// thing anyone types at an unfamiliar CLI (`--help`) was an uncaught Node
+// stack trace at exit 1 — which under the exit-code contract claims a payload
+// failed its schema. The per-bridge probe below proves each bridge routes
+// through the shared wrapper; the two parse-refusal shapes are then pinned on
+// one bridge, because the path is the same shared function for all ten.
+
+const here = path.dirname(new URL(import.meta.url).pathname);
+const BRIDGES = ['collect', 'combine', 'converge', 'decisions', 'plan',
+  'repair', 'regression', 'triage', 'validate', 'verify'];
+const bridgePath = (name) =>
+  path.join(here, '..', 'skills', 'adverse-review', 'scripts', `${name}.mjs`);
+
+test('--help prints usage at exit 0 on every bridge', () => {
+  for (const name of BRIDGES) {
+    const r = spawnSync(process.execPath, [bridgePath(name), '--help'],
+      { encoding: 'utf-8' });
+    assert.equal(r.status, 0, `${name}: ${r.stderr}`);
+    assert.match(r.stdout, /^Usage:/, `${name} stdout: ${r.stdout}`);
+    assert.equal(r.stderr, '', `${name} wrote to stderr on --help`);
+  }
+});
+
+test('a parse refusal is the usage text at exit 2, never a stack trace', () => {
+  for (const argv of [['--no-such-flag'], ['--json=true']]) {
+    const r = spawnSync(process.execPath, [bridgePath('plan'), ...argv],
+      { encoding: 'utf-8' });
+    assert.equal(r.status, 2, `${argv}: exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stderr, /^plan: /, `${argv} names the bridge`);
+    assert.match(r.stderr, /Usage: plan\.mjs/, `${argv} prints usage`);
+    assert.doesNotMatch(r.stderr, /at .*parse_args/, `${argv} stack-traced`);
   }
 });

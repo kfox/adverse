@@ -34,16 +34,22 @@
 // declared to the synthesizer (`--skipped`), and a skipped round 2 declared
 // with `--round2-skipped`; an undeclared gap reads exactly like a clean pass.
 
-import { parseArgs } from 'node:util';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-import { readJson, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { agentNames, escalate, parsePlan, planReview, runLanes } = await importFromSrc('scaling.mjs');
 
-const { values, positionals } = parseArgs({
+const USAGE = 'Usage: plan.mjs --repo <dir> [--base <ref>] [--files <list>] [--pin <substring>]… [--json]\n'
+  + '       plan.mjs --agents <plan.json>\n'
+  + '       plan.mjs --expect <plan.json>\n'
+  + '       plan.mjs --escalate --expect auditor,steward,… (--json | --sh) round1-<persona>*.json …';
+
+const { values, positionals } = parseBridgeArgs({
+  prefix: 'plan',
+  usage: USAGE,
   options: {
     repo:     { type: 'string' },
     base:     { type: 'string' },

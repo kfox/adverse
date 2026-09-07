@@ -116,10 +116,12 @@ function rulingAgent(persona, payload, entry) {
 
 // ---------- Provenance ------------------------------------------------------
 //
-// "The fix introduced this" and "round 2 noticed this" are different facts, and
-// an operator reading a ranked list cannot act on the first without knowing
-// which it is. Both arrive as `added` findings — a regression found against a
-// commit that already landed IS the `added` shape, and giving it a parallel
+// "A fix commit's regression pass found this" and "round 2 noticed this" are
+// different facts, and an operator reading a ranked list cannot act on the
+// first without knowing which it is — the stamp records which pass found the
+// finding, never that the fix caused it; causation lives in the
+// classification. Both arrive as `added` findings — a regression found against
+// a commit that already landed IS the `added` shape, and giving it a parallel
 // channel would mean every consumer of `findings` had to learn about a second
 // one — so the distinction rides on the finding instead.
 //
@@ -455,7 +457,7 @@ function buildFinding(persona, raw, agent = persona) {
 //              finding stays blocking until someone decides it
 //   oversized  ruled `one`, but carrying more citations than one disposition
 //              can honestly cover (src/triage.mjs, MAX_CONFIRMABLE_MEMBERS)
-//   proposed   nobody ruled — the pre-grouping behaviour, kept as the default
+//   proposed   nobody ruled — the pre-grouping behavior, kept as the default
 //
 // Every state but `confirmed` leaves the members exactly as they were, so a
 // missing, contested, or oversized ruling costs the speedup and never a
@@ -977,7 +979,7 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
       `(${syn.findings.length} total across ${Object.keys(syn.verdicts).length} reviewers)  `,
   );
   // `disputed` is reported beside this number, not folded into it. A finding
-  // one persona challenged is labelled `disputed` the moment the FIRST
+  // one persona challenged is labeled `disputed` the moment the FIRST
   // challenger appears, before reporters are counted, so `isOpenBlocking`
   // excludes a critical three lanes reported and one disagreed with — and the
   // headline read zero while the stop condition still held the loop open on

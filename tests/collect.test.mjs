@@ -197,8 +197,16 @@ test('collectDiff requires a git repo', () => {
 });
 
 test('a base that looks like a git option is refused', () => {
-  assert.throws(
-    () => collectDiff(process.cwd(), '--output=/tmp/x'),
-    /looks like an option/,
-  );
+  // A scratch repo, not process.cwd(): verifying a release archive runs this
+  // suite where no .git exists, and the repo check fires before the option
+  // check does.
+  const dir = buildGitRepo();
+  try {
+    assert.throws(
+      () => collectDiff(dir, '--output=/tmp/x'),
+      /looks like an option/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -9,6 +9,7 @@
 // script that never got as far as reading its input exits 2, everywhere.
 
 import { constants, readFileSync, writeFileSync } from 'node:fs';
+import { parseArgs } from 'node:util';
 
 import { importFromSrc } from './package-root.mjs';
 
@@ -26,6 +27,30 @@ export function readJson(file, prefix) {
 export function usage(text) {
   process.stderr.write(text.endsWith('\n') ? text : `${text}\n`);
   process.exit(2);
+}
+
+// Every bridge parses with `strict: true`, so `--help`, an unknown flag, and
+// `=value` on a boolean all THROW — an uncaught Node stack trace at exit 1,
+// which under this contract claims a payload failed its schema. `--help`
+// answers with the usage text at exit 0; any other parse refusal is exit 2
+// with its one-line reason above the usage text, because a process that never
+// parsed its arguments never read an input.
+export function parseBridgeArgs({ prefix, usage: usageText, ...config }) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      ...config,
+      options: { ...config.options, help: { type: 'boolean' } },
+    });
+  } catch (e) {
+    if (typeof e.code !== 'string' || !e.code.startsWith('ERR_PARSE_ARGS')) throw e;
+    usage(`${prefix}: ${e.message.split('\n')[0]}\n${usageText}`);
+  }
+  if (parsed.values.help) {
+    process.stdout.write(usageText.endsWith('\n') ? usageText : `${usageText}\n`);
+    process.exit(0);
+  }
+  return parsed;
 }
 
 // The persona string keys the output filename of three bridges, and the

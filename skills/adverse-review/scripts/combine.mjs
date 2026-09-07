@@ -27,10 +27,9 @@
 // re-cased name (`Auditor`) used to mint a phantom fifth reviewer whose
 // agreement with its own other half read as cross-lane consensus.
 
-import { parseArgs } from 'node:util';
 import { writeFileSync } from 'node:fs';
 
-import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 
 import { importFromSrc } from './package-root.mjs';
 
@@ -40,7 +39,12 @@ const { checkRoster } = await importFromSrc('roster.mjs');
 const { isLaneAgent } = await importFromSrc('personas.mjs');
 const { agentNames } = await importFromSrc('scaling.mjs');
 
-const { values, positionals } = parseArgs({
+const USAGE = 'Usage: combine.mjs (--round1 | --round2) a.json b.json …'
+  + ' [--merge-personas <persona>]… [--plan plan.json] --out <combined.json>';
+
+const { values, positionals } = parseBridgeArgs({
+  prefix: 'combine',
+  usage: USAGE,
   options: {
     round1: { type: 'string', multiple: true },
     round2: { type: 'string', multiple: true },
@@ -53,8 +57,7 @@ const { values, positionals } = parseArgs({
 });
 
 if (!values.out) {
-  usage('Usage: combine.mjs (--round1 | --round2) a.json b.json …'
-    + ' [--merge-personas <persona>]… [--plan plan.json] --out <combined.json>');
+  usage(USAGE);
 }
 
 const hasRound1 = values.round1 !== undefined;

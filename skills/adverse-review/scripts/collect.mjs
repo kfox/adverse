@@ -2,16 +2,19 @@
 // Skill bridge: collect source code into a single text block + file list.
 // The same logic powers the standalone CLI (`adverse review`).
 
-import { parseArgs } from 'node:util';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { usage } from './bridge-io.mjs';
+import { parseBridgeArgs, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { collectDirectory, collectDiff } = await importFromSrc('collect.mjs');
 
-const { values } = parseArgs({
+const USAGE = 'Usage: collect.mjs --target <path> [--diff [base]] --out <file> [--files-out <file>]';
+
+const { values } = parseBridgeArgs({
+  prefix: 'collect',
+  usage: USAGE,
   options: {
     target:      { type: 'string' },
     diff:        { type: 'string' },
@@ -22,7 +25,7 @@ const { values } = parseArgs({
 });
 
 if (!values.target || !values.out) {
-  usage('Usage: collect.mjs --target <path> [--diff [base]] --out <file> [--files-out <file>]');
+  usage(USAGE);
 }
 
 const target = path.resolve(values.target);

@@ -1014,7 +1014,7 @@ test('a persona cannot confirm that its own findings are one thing', () => {
 test('split and contested need no quorum — both dissolve the group', () => {
   const { round1, groups } = oneGuard();
   // Dissolving fails toward MORE decisions, which is the safe direction, so a
-  // lone reviewer saying "these are separate" is always honoured.
+  // lone reviewer saying "these are separate" is always honored.
   assert.equal(
     synthesize(round1, { auditor: ruling('auditor', 'G1', 'split') }, { rootCauseGroups: groups }).rootCauses[0].status,
     'split');
@@ -1170,11 +1170,11 @@ test('both renderers name the half of a split lane that ruled', () => {
 
 // --- provenance: which pass found it ------------------------------------------
 //
-// "The fix introduced this" and "round 2 noticed this" are different facts, and
-// an operator working a ranked list cannot act on the first without knowing
-// which it is. Both arrive as `added` findings on purpose (a regression against
-// a landed commit IS the `added` shape), so the report has to carry the
-// difference on the finding itself.
+// "A fix commit's regression pass found this" and "round 2 noticed this" are
+// different facts, and an operator working a ranked list cannot act on the
+// first without knowing which it is. Both arrive as `added` findings on purpose
+// (a regression against a landed commit IS the `added` shape), so the report
+// has to carry the difference on the finding itself.
 
 const regressionPass = (persona, findings) =>
   ({ persona, provenance: 'regression', verdict: 'conditional', summary: '', findings });

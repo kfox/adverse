@@ -16,9 +16,10 @@
 //
 // The reshape stamps `provenance: "regression"` on every finding it emits.
 // Synthesis reads that off the entry (src/synthesis.mjs) and both renderers
-// print it, because "the fix introduced this" is a different fact from "round 2
-// noticed this" and an operator working a ranked list cannot act on the first
-// without knowing which it is.
+// print it, because "a fix commit's regression pass found this" is a different
+// fact from "round 2 noticed this" and an operator working a ranked list cannot
+// act on the first without knowing which it is. The stamp never claims the fix
+// CAUSED the finding — causation lives in the classification.
 //
 // The verdict is DERIVED, never judged. This pass casts no vote on the change —
 // it answers one question about one commit — but every downstream consumer
@@ -56,9 +57,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { parseArgs } from 'node:util';
 
-import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { makeWriteQueue, parseBridgeArgs, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { closeQuietly, openRegularFileSync } = await importFromSrc('fsSafe.mjs');
@@ -70,11 +70,20 @@ const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 const { stampedFieldClaim } = await importFromSrc('synthesis.mjs');
 const { PROVENANCE } = await importFromSrc('taxonomy.mjs');
 
+const MAX_FOLD_COMMITS = 64;
+
 // Positionals are payloads, so `--payload run/regression-*.json` works — the
 // same reason triage.mjs and verify.mjs accept them: strict parsing without
 // this throws on the second path the shell expands, and the glob is the obvious
 // thing to type.
-const { values, positionals } = parseArgs({
+const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
+  + ' (--closed-by <persona>… | --closed-by-none) [--json]\n'
+  + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
+  + ' [--refold] [--choice <lane-choice.json>]… [--repo <dir>] [--ledger <ledger.json>]';
+
+const { values, positionals } = parseBridgeArgs({
+  prefix: 'regression',
+  usage: USAGE,
   options: {
     repo:             { type: 'string' },
     commit:           { type: 'string' },
@@ -82,6 +91,7 @@ const { values, positionals } = parseArgs({
     'closed-by-none': { type: 'boolean' },
     payload:          { type: 'string', multiple: true },
     outdir:           { type: 'string' },
+    choice:           { type: 'string', multiple: true },
     ledger:           { type: 'string' },
     refold:           { type: 'boolean' },
     json:             { type: 'boolean' },
@@ -90,16 +100,13 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
 });
 
-const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
-  + ' (--closed-by <persona>… | --closed-by-none) [--json]\n'
-  + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
-  + ' [--refold] [--ledger <ledger.json> --repo <dir>]';
-
 const payloads = [...(values.payload ?? []), ...positionals];
 
 if (payloads.length) {
   if (!values.outdir) usage(USAGE);
-  if (values.ledger && !values.repo) usage(USAGE);
+  if (values.ledger && !values.repo) {
+    usage(`regression: --ledger requires --repo, the repository the ledger is bound to\n${USAGE}`);
+  }
   foldPayloads(payloads, values.outdir, values.ledger
     ? loadBoundLedger(values.ledger, path.resolve(values.repo)) : null);
 } else if (values.commit) {
@@ -338,14 +345,41 @@ function priorFold(dest) {
   }
 }
 
-function staleSources(byPersona, outdir) {
+// Two spellings of one commit must be one staleness key. REVISION admits any
+// abbreviation length and the commit is supplied by the pass payload, so the
+// one input this check keys on is chosen by the checked party: a re-run of the
+// same commit under a longer sha slipped past the guard and re-signed the
+// leftover as this iteration's evidence. With --repo, every spelling resolves
+// through the repository; without one, a hex prefix relationship is identity
+// and a symbolic rev can only match itself.
+function makeCommitMatcher(repo) {
+  if (!repo) {
+    const HEX = /^[0-9a-f]{4,40}$/;
+    return (priors, commit) => priors.has(commit)
+      || (HEX.test(commit) && [...priors].some((p) => HEX.test(p)
+        && (p.startsWith(commit) || commit.startsWith(p))));
+  }
+  // resolveRef owns the invocation and its SAFE_REF gate; the memo here only
+  // keeps this one-shot fold from re-spawning for a spelling it already asked
+  // about, unresolvable ones included — the repository does not change under a
+  // single fold.
+  const keys = new Map();
+  const canon = (rev) => {
+    if (!keys.has(rev)) keys.set(rev, resolveRef(repo, rev) ?? rev);
+    return keys.get(rev);
+  };
+  return (priors, commit) => [...priors].some((p) => canon(p) === canon(commit));
+}
+
+function staleSources(byPersona, outdir, repo) {
   const stale = [], unreadable = [], unwritable = [];
+  const sameCommit = makeCommitMatcher(repo);
   for (const [persona, lane] of byPersona) {
     const prior = priorFold(`${outdir}/round1-${persona}.regression.json`);
     if (prior.unreadable) unreadable.push(prior.unreadable);
     if (prior.unwritable) unwritable.push(prior.unwritable);
     lane.passes.forEach((pass, i) => {
-      if (prior.commits.has(pass.commit)) stale.push(`${lane.sources[i]} (${pass.commit})`);
+      if (sameCommit(prior.commits, pass.commit)) stale.push(`${lane.sources[i]} (${pass.commit})`);
     });
   }
   return { stale, unreadable, unwritable };
@@ -388,8 +422,8 @@ function plural(items, one, many) {
 // makes the stale list incomplete: a lane whose prior fold could not be parsed
 // has an empty folded-commit set, so its own passes cannot be recognized as
 // stale, and refusing on that list would present a subset as the whole.
-function refuseKnownFolds(byPersona, outdir, refold) {
-  const { stale, unreadable, unwritable } = staleSources(byPersona, outdir);
+function refuseKnownFolds(byPersona, outdir, { refold, repo }) {
+  const { stale, unreadable, unwritable } = staleSources(byPersona, outdir, repo);
 
   if (unwritable.length) {
     process.stderr.write(`regression: ${unwritable.join(', ')} `
@@ -419,6 +453,33 @@ function refuseKnownFolds(byPersona, outdir, refold) {
       + ' meant to re-read those commits.\n');
     process.exit(2);
   }
+}
+
+// A lane choice the choose mode printed, read back so the fold can stamp it on
+// the pass it covers. Nothing else records HOW the reviewing lane was picked,
+// and a fold produced after --closed-by-none used to be byte-identical to one
+// produced after a named exclusion list — the report could not say which.
+// The shape is this bridge's own --json output; a file that is not one is a
+// wrong path, not a variant.
+function readChoices(files) {
+  return files.map((src) => {
+    const c = readJson(src, 'regression');
+    requireKnownPersona(c?.persona, { prefix: 'regression', file: src, personas: DEFAULT_PERSONAS });
+    // No control characters in the commit: it is interpolated verbatim into
+    // this bridge's own stderr diagnostics, where an embedded escape or \r
+    // could rewrite what the operator sees on that line. No honest rev
+    // spelling contains one.
+    const ok = typeof c.commit === 'string' && c.commit && !c.commit.startsWith('-')
+      && !/[\x00-\x1f\x7f]/.test(c.commit)
+      && typeof c.reason === 'string' && typeof c.conflicted === 'boolean'
+      && ['declared-list', 'declared-none'].includes(c.disinterest);
+    if (!ok) {
+      process.stderr.write(`regression: ${src}: not a lane choice (expected the --json output`
+        + ' of the choose mode: commit, reason, conflicted, disinterest)\n');
+      process.exit(1);
+    }
+    return { ...c, src, matched: false };
+  });
 }
 
 // One file per LANE, not one per pass. An iteration lands several fix commits
@@ -454,10 +515,71 @@ function foldPayloads(sources, outdir, bound) {
     byPersona.set(payload.persona, lane);
   }
 
+  // The staleness check resolves each distinct commit spelling through git, and
+  // the number of payload files is the one input nothing else bounds — each
+  // spelling is model-written. An iteration's passes name a handful of fix
+  // commits, so a fold naming more than this is a glob over more than one run's
+  // files, refused before it becomes a subprocess-per-file loop.
+  const distinctCommits = new Set(
+    [...byPersona.values()].flatMap((lane) => lane.passes.map((p) => p.commit)));
+  if (distinctCommits.size > MAX_FOLD_COMMITS) {
+    process.stderr.write(`regression: these payloads name ${distinctCommits.size} distinct`
+      + ` commits; one iteration's passes name a handful (limit ${MAX_FOLD_COMMITS}), so this`
+      + ' glob is reading more than one run\'s files — narrow it or clean the outdir\n');
+    process.exit(2);
+  }
+
   // Before anything is written, and for EVERY lane: a fold that refuses one
   // lane's stale pass after overwriting another lane's file has already
   // published half of what it refused.
-  refuseKnownFolds(byPersona, outdir, values.refold === true);
+  refuseKnownFolds(byPersona, outdir,
+    { refold: values.refold === true, repo: values.repo ?? null });
+
+  // The lane choices, matched to passes by persona and (canonicalized) commit.
+  // Stamped by this bridge, never by the payload: the pass says what was found,
+  // the choice says who was picked to look and on whose word, and a pass with
+  // no choice on file says so rather than saying nothing. A choice whose lane
+  // does not match the pass's is the orchestrator having overridden the
+  // routing, which is exactly what must not pass silently — warned, and the
+  // pass stays unrecorded.
+  const choices = readChoices(values.choice ?? []);
+  // NOT makeCommitMatcher's repo-less fallback: staleness and stamping fail in
+  // opposite directions. There a loose prefix match refuses a fold, which is
+  // noisy; here it signs the wrong pass with another commit's audit record,
+  // which is silent — a 4-char spelling matched an unrelated pass outright.
+  // Without a repository to resolve spellings, two different strings are not
+  // provably one commit, so the fallback is exact equality, and a pass left
+  // unstamped says so in the lane summary.
+  const sameCommit = values.repo
+    ? makeCommitMatcher(values.repo)
+    : (priors, commit) => priors.has(commit);
+  for (const [persona, lane] of byPersona) {
+    for (const pass of lane.passes) {
+      const matches = choices.filter((c) => sameCommit(new Set([c.commit]), pass.commit));
+      if (!matches.length) continue;
+      if (matches.length > 1) {
+        process.stderr.write(`regression: ${matches.length} lane choices`
+          + ` (${matches.map((c) => c.src).join(', ')}) match the ${persona} pass on`
+          + ` ${pass.commit}, so stamping would guess which is on record — none stamped\n`);
+        continue;
+      }
+      const [match] = matches;
+      if (match.persona !== persona) {
+        process.stderr.write(`regression: lane choice ${match.src} picked ${match.persona}`
+          + ` for ${pass.commit}, but this pass was run by ${persona} — the routing was`
+          + ' overridden, so the choice is not stamped\n');
+        continue;
+      }
+      match.matched = true;
+      pass.laneChoice = {
+        disinterest: match.disinterest, conflicted: match.conflicted, reason: match.reason,
+      };
+    }
+  }
+  for (const c of choices.filter((x) => !x.matched)) {
+    process.stderr.write(`regression: lane choice ${c.src} (${c.persona}, ${c.commit})`
+      + ' matches no pass in this fold\n');
+  }
 
   // Queued, not written, for the same reason the refusal above is one decision
   // over all lanes: the publish is one event. bridge-io.mjs holds that ordering
@@ -472,13 +594,20 @@ function foldPayloads(sources, outdir, bound) {
       adjudicated += lane.findings.filter((f) => f.adjudicated).length;
     }
     const commits = lane.passes.map((p) => p.commit).join(', ');
+    // The choice state rides in the SUMMARY because the summary is the one
+    // string synthesize copies into the report — a field beside it would be a
+    // record nothing renders.
+    const unrecorded = lane.passes.filter((pass) => !pass.laneChoice).length;
+    const choiceNote = unrecorded === 0
+      ? ` (lane choice on record: ${[...new Set(lane.passes.map((pass) => pass.laneChoice.disinterest))].join(', ')})`
+      : ` (lane choice unrecorded for ${unrecorded} of ${lane.passes.length} pass(es))`;
     const out = {
       persona,
       // Derived, never judged — see the header. `conditional` and `approve` are
       // the only two reachable, the same pair verify.mjs derives when nothing
       // it verified is still open.
       verdict: lane.findings.length ? 'conditional' : 'approve',
-      summary: `regression pass on ${commits}: ${lane.findings.length} finding(s)`,
+      summary: `regression pass on ${commits}: ${lane.findings.length} finding(s)${choiceNote}`,
       provenance: PROVENANCE.regression,
       findings: lane.findings,
       passes: lane.passes,
