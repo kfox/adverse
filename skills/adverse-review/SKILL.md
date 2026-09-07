@@ -764,6 +764,12 @@ mints an id for each entry (`NF-<batch>-<n>`, which cannot collide with triage's
 block it prints before you record — a channel you forward without reading is
 the same footnote in a new place.
 
+**Every fix commit gets a regression pass** (Phase 9), run by a lane that did
+not report the findings it closes. `fix.txt` tells the agent so, and names the
+four questions that pass will ask — which is what makes the agent's own "What
+else this changed" section honest. Run it per commit, while the diff is small
+and its intent is still known.
+
 **Do not re-run the panel to look for siblings of a finding you fixed.** The fix
 agent has already done it, better and cheaper: a reviewer is reasoning about a
 diff and the fix agent is holding a working reproduction. Asked for a sibling
@@ -835,6 +841,81 @@ was real — precisely the frame of mind that ships a hasty patch. A verificatio
 pass that only ever confirms closures would launder new defects into the tree
 one iteration at a time.
 
+### The regression pass — one per fix commit, by a lane that did not report it
+
+Verification asks the reporter whether its finding is closed. Nobody is asking
+what else the fix changed, and the reporter is the worst available lens for it:
+it is the agent most invested in the finding being closed. The `added` channel
+exists to catch exactly that and is being asked of the one reviewer least
+motivated to find anything there.
+
+The cost of leaving it unasked, measured: one campaign's first iteration fixed
+25 findings and its second found 40 — at least one of them *created by* the
+first. New warning paths added by a fix became fresh per-message work inside a
+bounded drain loop, so the bound stopped bounding. The fix was correct in
+isolation and wrong in context, which is the characteristic shape and the one
+nobody catches by reading a diff for correctness.
+
+So: **one read-only pass per fix commit, run once, on complete work, by a lane
+that did not report any of the findings that commit closed.** Not oversight of a
+fix agent while it works — a half-applied change is indistinguishable from a
+bug, it pays for a second full-context agent holding the same lens, and by the
+time it objects the edits exist.
+
+Which lane is not yours to choose. You just fixed the code; picking your own
+reviewer is the one selection an interested party must not make:
+
+```bash
+node ${SKILL_DIR}/scripts/regression.mjs --repo . --commit <fix-sha> \
+    --closed-by <persona> [--closed-by <persona> …]
+```
+
+`--closed-by` is every persona that reported a finding this commit closed. The
+answer is the Adversary when the fix diff crosses a trust boundary and the
+Auditor otherwise (`assessScope`, the same signal that gates the Adversary in
+Phase 1), skipping any lane that reported into the commit — and never the
+Pragmatist, whose findings are advisory and so cannot hold a regression. When
+every eligible lane reported into the commit it says `CONFLICTED` and picks one
+anyway: skipping is the silent direction, and a skipped pass reads exactly like
+a clean one. Print that line into your Phase 7 notes when it fires.
+
+Spawn one subagent, with that persona's system prompt and:
+
+1. `${SKILL_DIR}/scripts/prompts/regression.txt`
+2. **the repository's own constraint block** — the same one the fix agents got
+3. the fix commit's diff: `git show <fix-sha>`, and what it was written to close
+4. the path to write its own JSON object to: `$ADVERSE_RUN/regression-<persona>.json`
+
+One agent per fix commit, and it is cheap precisely because the fix diff is
+small and the intent is known — the two properties that make a full re-review
+expensive are both absent. It **supplements** verification rather than replacing
+it: they answer different questions and only one of them is about closure.
+
+This is also the **first role to try on a smaller model** (#53). It is
+read-only, single-question, bounded in output, and the most repeated role in the
+loop, so a weak result costs an observation rather than a commit. Measure the
+right thing if you try it: not "did the commit land green", but whether the pass
+still recognizes an anomaly nobody handed it — the recognition, not the
+procedure, is what the role is for.
+
+Then fold every pass of the iteration in one call, and feed the result to triage
+beside the verifications:
+
+```bash
+node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/regression-*.json
+
+node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/regression-*.json \
+    --outdir "$ADVERSE_RUN"
+```
+
+The reshape stamps each finding `provenance: "regression"`, and both renderers
+print it: "the fix introduced this" is a different fact from "round 2 noticed
+this", and an operator reading a ranked list cannot act on the first without
+knowing which it is. The findings themselves feed `added` like any other new
+finding — a regression against a commit that already landed *is* that shape.
+
+### Loop
+
 Feed `verified` + `added` back through triage → synthesize → Phase 7, with the
 ledger attached, and loop:
 
@@ -844,9 +925,15 @@ node ${SKILL_DIR}/scripts/verify.mjs --verify "$ADVERSE_RUN"/verify-*.json \
 
 node ${SKILL_DIR}/scripts/triage.mjs \
     --round1 "$ADVERSE_RUN"/round1-*.verified.json \
+    --round1 "$ADVERSE_RUN"/round1-*.regression.json \
     --repo . --base "$BASE" --gate "$GATE" --ledger "$LEDGER" \
     --out "$ADVERSE_RUN"/briefing.json
 ```
+
+Drop the second `--round1` line when no regression pass ran. If a lane both
+verified its own findings and ran a regression pass on someone else's fix
+commit, it arrives twice — add `--merge-personas <persona>`, which unions the
+findings and keeps the worse verdict, exactly as it does for a split lane.
 
 `verify.mjs` validates each payload against the schema before anything trusts
 it — the same discipline every other leg of this flow already has — then
@@ -879,6 +966,32 @@ that fix was supposed to cover.
 Finding and group IDs are **per-run**, re-derived by each triage pass. The
 ledger does not depend on them: a recorded group carries its own title and
 citation titles, which is what the next iteration matches and renders.
+
+### Four cheaper answers than another panel
+
+A maintainer running this loop across several repositories re-ran the full panel
+after every fix batch and reported that fixing a batch "resulted in many
+regressions and new bugs (including criticals) every single time", which then
+needed another full review — "not a cheap or speedy proposition." The re-panel
+is the single largest expense in the loop and it is not what this skill asks
+for. Before reaching for one:
+
+- **Phase 9 exists.** Verification plus the regression pass above answers both
+  questions a re-panel would, against a small diff with the intent known. A full
+  re-panel after a fix batch is not the prescribed path.
+- **Smaller fix commits.** Regression risk scales worse than linearly with diff
+  size, and the pass above is cheap enough to run on every commit only because
+  each commit is small.
+- **Fix in dependency order.** A test cannot be trusted until what it reads is
+  correct, so a test-only commit that lands before the code it pins is a green
+  gate that proves nothing.
+- **Decline more.** The loop's exit condition is *decisions recorded*, not
+  *findings fixed* — `declined` and `deferred` both settle a finding, and both
+  keep the ledger from raising it again. A real-but-low-consequence finding
+  fixed hastily is net negative: it is unreviewed code written by whoever was
+  most convinced the finding was real. A campaign that fixes everything is
+  choosing maximum churn, and every orchestrator defaults to fixing because
+  nothing else tells it otherwise.
 
 ## Phase 10 — hand over
 

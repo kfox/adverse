@@ -313,18 +313,19 @@ skills/adverse-review/
     collect.mjs               # Skill bridge: source collection
     combine.mjs               # Skill bridge: combine per-persona JSON
     triage.mjs                # Skill bridge: claim/kind checks, grouping, briefing
-    validate.mjs              # Skill bridge: schema-check an agent-written round1/round2/verify/fix payload
+    validate.mjs              # Skill bridge: schema-check an agent-written round1/round2/verify/fix/regression payload
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
     plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
     verify.mjs                # Skill bridge: validate a verify payload, reshape for triage
+    regression.mjs            # Skill bridge: pick the lane for a fix commit's regression pass, fold what it found
     decisions.mjs             # Skill bridge: fold fix payloads into decisions.json
     dump-prompts.mjs          # Regenerate prompt files from src/ (a test enforces it)
     prompts/                  # Generated — edit src/, then re-run dump-prompts.mjs
   agents/                     # Generated — subagent definitions, one per persona
       auditor.txt, adversary.txt, steward.txt, pragmatist.txt
-      round1.txt, round2.txt, verify.txt, fix.txt
+      round1.txt, round2.txt, verify.txt, fix.txt, regression.txt
 
 tests/
   *.test.mjs                  # node --test, no Jest/Mocha

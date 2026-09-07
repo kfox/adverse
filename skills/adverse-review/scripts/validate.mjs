@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Skill bridge: validate an agent-written round-1/round-2/verify/fix payload.
+// Skill bridge: validate an agent-written round-1/round-2/verify/fix/regression
+// payload.
 //
 // Phases 2, 4, and 9 used to have the orchestrating model retype or reassemble
 // each subagent's JSON reply on the way to disk. That hand was a defect
@@ -21,7 +22,7 @@ import { parseArgs } from 'node:util';
 import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { validateFix, validatePhase1, validatePhase2, validateVerify } =
+const { validateFix, validatePhase1, validatePhase2, validateRegression, validateVerify } =
   await importFromSrc('prompts.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 
@@ -45,6 +46,11 @@ const VALIDATORS = Object.assign(Object.create(null), {
   round2: { validate: validatePhase2, byPersona: true },
   verify: { validate: validateVerify, byPersona: true },
   fix:    { validate: validateFix,    byPersona: false },
+  // Lane-scoped like the first three: the regression pass is run BY a lane
+  // (src/regression.mjs picks which), so `regression-adversary.json` names the
+  // persona its payload has to agree with — the check that catches a pass filed
+  // under the lane that reported the finding it was run to keep away from.
+  regression: { validate: validateRegression, byPersona: true },
 });
 
 const { values, positionals } = parseArgs({
@@ -55,7 +61,8 @@ const { values, positionals } = parseArgs({
 
 const phase = values.phase && VALIDATORS[values.phase];
 if (!phase || !positionals.length) {
-  usage('Usage: validate.mjs --phase round1|round2|verify|fix <file.json> [file2.json …]\n'
+  usage('Usage: validate.mjs --phase round1|round2|verify|fix|regression'
+    + ' <file.json> [file2.json …]\n'
     + `  --phase must be one of: ${Object.keys(VALIDATORS).join('|')}`);
 }
 

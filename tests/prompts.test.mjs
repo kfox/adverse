@@ -11,6 +11,7 @@ import { AUDITOR, PERSONAS } from '../src/personas.mjs';
 import {
   PHASE1_INSTRUCTIONS,
   validateFix,
+  validateRegression,
   validateVerify,
   buildPhase1Prompt,
   buildPhase2Prompt,
@@ -223,12 +224,14 @@ test('skill prompt files match their generators', async () => {
   const { PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS } =
     await import('../src/prompts.mjs');
 
-  const { FIX_INSTRUCTIONS, VERIFY_INSTRUCTIONS } = await import('../src/prompts.mjs');
+  const { FIX_INSTRUCTIONS, REGRESSION_INSTRUCTIONS, VERIFY_INSTRUCTIONS } =
+    await import('../src/prompts.mjs');
   const expected = new Map([
     ['round1.txt', PHASE1_INSTRUCTIONS],
     ['round2.txt', PHASE2_BRIEFING_INSTRUCTIONS],
     ['verify.txt', VERIFY_INSTRUCTIONS],
     ['fix.txt', FIX_INSTRUCTIONS],
+    ['regression.txt', REGRESSION_INSTRUCTIONS],
   ]);
   for (const p of Object.values(PERSONAS)) expected.set(`${p.name}.txt`, p.system + '\n');
 
@@ -481,6 +484,174 @@ test('fix prompt says declining is a complete outcome, and reserves `deferred`',
   assert.match(FIX_INSTRUCTIONS, /Declining a finding, with reasoning, is a complete and legitimate outcome/);
   assert.match(FIX_INSTRUCTIONS, /decisions recorded\*, not \*findings fixed/);
   assert.match(FIX_INSTRUCTIONS, /`deferred` is the third\s+disposition the ledger accepts and it is not yours/);
+});
+
+// --- regression pass ----------------------------------------------------------
+// The read-only pass over one fix commit, run by a lane that did not report the
+// findings it closes (src/regression.mjs picks which). Its payload is
+// lane-scoped like round 1's, and two of its rules are more than structure:
+// `checked` must answer all four questions, and an `intended-inert` finding is
+// `info`.
+
+const goodChecked = () => [
+  { question: 'stricter', against: 'every caller of validateFix in skills/' },
+  { question: 'permissive', against: 'the signal list assessScope scans' },
+  { question: 'hot-path', against: 'the drain loop the new warning sits in' },
+  { question: 'shared-state', against: 'the module-scope writes in dump-prompts.mjs' },
+];
+
+const goodRegression = (over = {}) => ({
+  persona: 'adversary',
+  commit: 'abc1234',
+  checked: goodChecked(),
+  added: [{
+    severity: 'critical', kind: 'behavioral', file: 'src/asid.py', line: 243,
+    counterpart: null, title: 'the bounded drain lost its bound',
+    detail: 'the new warning path is per-message work inside the bound',
+    fix: 'throttle it', classification: 'unintended',
+  }],
+  ...over,
+});
+
+test('regression: a populated payload validates', () => {
+  assert.equal(validateRegression(goodRegression(), 'adversary'), null);
+});
+
+test('regression: a pass that found nothing validates — that is the common case', () => {
+  assert.equal(validateRegression(goodRegression({ added: [] }), 'adversary'), null);
+});
+
+test('regression: rejects a non-object, missing keys, and another lane\'s persona', () => {
+  assert.match(validateRegression([], 'adversary'), /object/);
+  assert.match(validateRegression(null, 'adversary'), /object/);
+  const p = goodRegression();
+  delete p.checked;
+  assert.match(validateRegression(p, 'adversary'), /Missing required keys.*checked/);
+  assert.match(validateRegression(goodRegression(), 'auditor'), /`persona` must be 'auditor'/);
+});
+
+test('regression: the commit it read has to be named', () => {
+  // The pass is per fix commit and the report says which one; a payload that
+  // cannot say what it read cannot be answered later.
+  assert.match(validateRegression(goodRegression({ commit: '   ' }), 'adversary'), /`commit`/);
+  assert.match(validateRegression(goodRegression({ commit: null }), 'adversary'), /`commit`/);
+});
+
+test('regression: silence is a claim — all four questions, exactly once each', () => {
+  const without = (q) => goodChecked().filter((c) => c.question !== q);
+  for (const question of ['stricter', 'permissive', 'hot-path', 'shared-state']) {
+    assert.match(validateRegression(goodRegression({ checked: without(question) }), 'adversary'),
+      new RegExp(`never answers \\["${question}"\\]`), `${question} must be required`);
+  }
+  // Four entries, one question answered twice: the count a reader glances at is
+  // still four, and a question has gone unanswered.
+  const twice = [...without('shared-state'), { question: 'stricter', against: 'again' }];
+  assert.match(validateRegression(goodRegression({ checked: twice }), 'adversary'),
+    /answers "stricter" twice/);
+  assert.match(validateRegression(goodRegression({ checked: [] }), 'adversary'), /never answers/);
+});
+
+test('regression: an answer has to say what was read, and name a real question', () => {
+  const swap = (over) => goodChecked().map((c) => (c.question === 'stricter' ? { ...c, ...over } : c));
+  assert.match(validateRegression(goodRegression({ checked: swap({ against: '  ' }) }), 'adversary'),
+    /checked\[0\]\.against is empty/);
+  assert.match(validateRegression(goodRegression({ checked: swap({ question: 'vibes' }) }), 'adversary'),
+    /checked\[0\]\.question must be one of/);
+  assert.match(validateRegression(goodRegression({ checked: 'four' }), 'adversary'),
+    /`checked` must be an array/);
+});
+
+test('regression: every finding carries a classification, and it must be one of the three', () => {
+  const withFinding = (over) =>
+    goodRegression({ added: [{ ...goodRegression().added[0], ...over }] });
+  const bare = { ...goodRegression().added[0] };
+  delete bare.classification;
+  assert.match(validateRegression(goodRegression({ added: [bare] }), 'adversary'),
+    /added\[0\]\.classification must be one of/);
+  assert.match(validateRegression(withFinding({ classification: 'probably-fine' }), 'adversary'),
+    /added\[0\]\.classification must be one of/);
+  // The shared finding rules still apply on top of it.
+  assert.match(validateRegression(withFinding({ kind: 'vibes' }), 'adversary'), /kind/);
+});
+
+test('regression: an intended-inert finding reported louder than `info` is refused', () => {
+  // Nothing downstream can tell an inert change happened. A pass whose notes
+  // arrive at the same severity as its defects is one an operator learns to
+  // skim, which is how an alarmist pass becomes an unread one.
+  const inert = (severity) => goodRegression({
+    added: [{ ...goodRegression().added[0], classification: 'intended-inert', severity }],
+  });
+  assert.match(validateRegression(inert('critical'), 'adversary'), /classified intended-inert/);
+  assert.match(validateRegression(inert('warning'), 'adversary'), /classified intended-inert/);
+  assert.equal(validateRegression(inert('info'), 'adversary'), null);
+  // The rule is about that one classification, not about `info` generally.
+  assert.equal(validateRegression(goodRegression({
+    added: [{ ...goodRegression().added[0], classification: 'intended-undocumented' }],
+  }), 'adversary'), null);
+});
+
+test('regression prompt asks one question and forbids editing', () => {
+  const { REGRESSION_INSTRUCTIONS } = PROMPTS;
+  assert.match(REGRESSION_INSTRUCTIONS, /This diff was written to close F7\. What else did it change\?/);
+  assert.match(REGRESSION_INSTRUCTIONS, /## You edit nothing/);
+  assert.match(REGRESSION_INSTRUCTIONS,
+    /A reviewer that starts fixing stops being able to report what the\nfix changed/);
+});
+
+test('regression prompt draws the same scope boundary verify.txt draws', () => {
+  // Two prompts telling a reviewer where a fix diff ends must say it the same
+  // way; one of them drifting is how a pass starts re-reporting the round the
+  // ledger already settled.
+  const CONFINE = 'Confine yourself to the fix diff. Problems elsewhere in the change were the'
+    + '\nearlier round\'s business and are either recorded or were let go on purpose.';
+  assert.ok(PROMPTS.VERIFY_INSTRUCTIONS.includes(CONFINE), 'verify states the boundary');
+  assert.ok(PROMPTS.REGRESSION_INSTRUCTIONS.includes(CONFINE), 'the regression pass repeats it');
+});
+
+test('the fix prompt\'s promise and the regression prompt agree on the four questions', () => {
+  // FIX_INSTRUCTIONS tells a fix agent this pass is coming and names what it
+  // will ask; the agent writes its own "What else this changed" section against
+  // that list. A promise the pass does not keep is worse than no promise.
+  for (const question of ['What got stricter', 'What got more permissive',
+                          'What moved onto a hot path', 'What shared state gained a writer']) {
+    assert.ok(PROMPTS.FIX_INSTRUCTIONS.includes(question), `fix.txt must promise: ${question}`);
+    assert.ok(PROMPTS.REGRESSION_INSTRUCTIONS.includes(question),
+      `regression.txt must ask: ${question}`);
+  }
+});
+
+test('regression prompt carries the concrete failure for each question, not just the question', () => {
+  const { REGRESSION_INSTRUCTIONS } = PROMPTS;
+  // The bounded-drain case in full: it is the shape nobody catches by reading a
+  // diff for correctness, and the one this whole pass was built for.
+  assert.match(REGRESSION_INSTRUCTIONS, /new per-message work inside the bounded drain/);
+  assert.match(REGRESSION_INSTRUCTIONS, /a byte on the wire bought unbounded work/);
+  assert.match(REGRESSION_INSTRUCTIONS, /top-level `deferred` key rather than ignoring it/);
+  assert.match(REGRESSION_INSTRUCTIONS, /signal that fires on every\n\s+diff carries no information/);
+  assert.match(REGRESSION_INSTRUCTIONS, /rewrote the twelve files\n\s+it was about to compare/);
+});
+
+test('regression prompt states the three-way classification and that silence is a claim', () => {
+  const { REGRESSION_INSTRUCTIONS } = PROMPTS;
+  for (const c of ['intended-inert', 'intended-undocumented', 'unintended']) {
+    assert.ok(REGRESSION_INSTRUCTIONS.includes(`\`${c}\``), `${c} must be defined`);
+  }
+  assert.match(REGRESSION_INSTRUCTIONS, /## Silence is a claim/);
+  assert.match(REGRESSION_INSTRUCTIONS,
+    /`added` on its own is indistinguishable from a pass that never ran/);
+  // The middle category is the one the loop has no other channel for, and it
+  // only becomes matchable later if the file that now lies is named.
+  assert.match(REGRESSION_INSTRUCTIONS, /usually a `contract` finding/);
+});
+
+test('regression prompt shows one finding schema, not a second copy of it', () => {
+  // The schema is FINDING_SCHEMA with `classification` spliced in. If that
+  // splice ever stops matching, the prompt silently ships the shared schema
+  // without the field the validator requires.
+  const { REGRESSION_INSTRUCTIONS } = PROMPTS;
+  assert.match(REGRESSION_INSTRUCTIONS, /"counterpart": "<path this code contradicts/);
+  assert.match(REGRESSION_INSTRUCTIONS,
+    /"fix":\s+"<concrete remediation, or null if you don't have one>",\n\s+"classification"/);
 });
 
 // --- subagent definitions ----------------------------------------------------

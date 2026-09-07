@@ -338,16 +338,17 @@ export const PERSONAS = Object.freeze({
 
 export const DEFAULT_PERSONAS = Object.freeze(['auditor', 'adversary', 'steward', 'pragmatist']);
 
-// Whether a lane takes part in round 2. A lane whose every kind is ADVISORY
-// has nothing to validate or challenge with: advisory findings cannot block,
-// so there is no blocking claim for it to go on record about, and going on
-// record is all round 2 is. The Pragmatist is that lane today.
+// Does this lane own nothing but ADVISORY kinds? Such a lane can make no claim
+// that blocks anything, and two separate questions turn on that one fact:
+// whether it takes part in round 2 (below), and whether it may run a fix
+// commit's regression pass (src/regression.mjs). One predicate rather than two
+// copies, because those answers must never disagree — a lane with no blocking
+// claim to go on record about in round 2 has none to report a regression with
+// either.
 //
-// Derived from the registry rather than naming the Pragmatist, so a second
-// advisory-only lane is covered the day someone adds it — and so the two
-// places that need this answer (suppressing the round-2 silence warning, and
-// refusing a round-2 payload) read one predicate instead of two copies that
-// can drift.
+// An UNKNOWN persona is not advisory-only. Both callers fail toward giving a
+// lane work, and a name this registry has never heard of is a roster problem
+// for roster.mjs to refuse, not a lane to quietly demote here.
 //
 // `Object.hasOwn`, not a bare index: `persona` is model-written, and
 // `PERSONAS['__proto__']` on a plain object answers with Object.prototype.
@@ -355,11 +356,19 @@ export const DEFAULT_PERSONAS = Object.freeze(['auditor', 'adversary', 'steward'
 // Without that the property is untestable: the Pragmatist is the only such
 // lane today, so any test over the real registry agrees with a hard-coded
 // `persona !== 'pragmatist'` and cannot tell the two implementations apart.
+export function advisoryOnlyLane(persona, { personas = PERSONAS } = {}) {
+  if (!Object.hasOwn(personas, persona)) return false;
+  const kinds = personas[persona].kinds ?? [];
+  return kinds.length > 0 && kinds.every((kind) => ADVISORY_KINDS.has(kind));
+}
+
+// Whether a lane takes part in round 2. A lane whose every kind is ADVISORY
+// has nothing to validate or challenge with: advisory findings cannot block,
+// so there is no blocking claim for it to go on record about, and going on
+// record is all round 2 is. The Pragmatist is that lane today.
 export function crossReviews(persona, round = 1, { personas = PERSONAS } = {}) {
   if (round !== 2) return true;
-  if (!Object.hasOwn(personas, persona)) return true;
-  const kinds = personas[persona].kinds ?? [];
-  return kinds.length === 0 || !kinds.every((kind) => ADVISORY_KINDS.has(kind));
+  return !advisoryOnlyLane(persona, { personas });
 }
 
 // Whether an agent id names THIS lane. A lane the plan did not split writes no

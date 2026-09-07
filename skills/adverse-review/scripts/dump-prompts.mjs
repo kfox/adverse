@@ -28,7 +28,8 @@ import { fileURLToPath } from 'node:url';
 import { importFromSrc } from './package-root.mjs';
 
 const { PERSONAS } = await importFromSrc('personas.mjs');
-const { FIX_INSTRUCTIONS, PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS, VERIFY_INSTRUCTIONS } =
+const { FIX_INSTRUCTIONS, PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS,
+        REGRESSION_INSTRUCTIONS, VERIFY_INSTRUCTIONS } =
   await importFromSrc('prompts.mjs');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -61,8 +62,8 @@ export function agentDefinition(persona) {
   ].join('\n');
 }
 
-// One per persona, plus round1, round2, verify and fix.
-const SHARED_PROMPT_FILES = 4;
+// One per persona, plus round1, round2, verify, fix and regression.
+const SHARED_PROMPT_FILES = 5;
 
 // Every write lives in here, and nothing calls it on import. That is the whole
 // point of the function: `tests/prompts.test.mjs` imports this module for
@@ -84,6 +85,7 @@ function main() {
   writeFileSync(path.join(outDir, 'round2.txt'), PHASE2_BRIEFING_INSTRUCTIONS, 'utf-8');
   writeFileSync(path.join(outDir, 'verify.txt'), VERIFY_INSTRUCTIONS, 'utf-8');
   writeFileSync(path.join(outDir, 'fix.txt'), FIX_INSTRUCTIONS, 'utf-8');
+  writeFileSync(path.join(outDir, 'regression.txt'), REGRESSION_INSTRUCTIONS, 'utf-8');
 
   mkdirSync(agentsDir, { recursive: true });
   for (const p of Object.values(PERSONAS)) {
