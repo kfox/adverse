@@ -288,7 +288,6 @@ test('laneAgentOf returns the persona it was given, untouched', () => {
 // ternary, so this bounds the copies it can recognize and does not claim there
 // can never be another.
 const HAND_SPELLED_LANE_AGENT_RULE = [
-  'skills/adverse-review/scripts/repair.mjs',
   'src/synthesis.mjs',
 ];
 

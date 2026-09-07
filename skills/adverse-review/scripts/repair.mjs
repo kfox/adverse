@@ -26,7 +26,7 @@ import { parseArgs } from 'node:util';
 import { makeWriteGuard, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { DEFAULT_PERSONAS, isLaneAgent } = await importFromSrc('personas.mjs');
+const { DEFAULT_PERSONAS, laneAgentOf } = await importFromSrc('personas.mjs');
 
 
 // Positionals are round-2 files, so `--round2 run/round2-*.json` works. Same
@@ -112,15 +112,18 @@ for (const src of values.round2) {
   // round-2 payloads under one persona now (kfox/adverse#50), and keying the
   // destination on the persona collapsed them onto one path — where the write
   // guard, doing its job, refused the second half as a spoof and took the
-  // whole phase down with it. `isLaneAgent` is what makes this safe to
+  // whole phase down with it. `laneAgentOf` is what makes this safe to
   // interpolate: the id is model-written and it is about to be a filename, so
   // an id that is not this lane's persona plus a letter suffix is a path, and
-  // falls back to the persona rather than being trusted.
+  // falls back to the persona rather than being trusted. One shared answer
+  // rather than a fifth hand-spelled ternary — this was the copy that
+  // interpolated its result into a path, and the rule had drifted between the
+  // copies twice before it was consolidated.
   //
   // The guard itself stays live and still matters: a repeated agent id would
   // silently replace the half that wrote first, which is the cheapest way to
   // counterfeit the distinct-reviewer count synthesis treats as consensus.
-  const agent = isLaneAgent(payload.persona, payload.agent) ? payload.agent : payload.persona;
+  const agent = laneAgentOf(payload.persona, payload.agent);
   const dest = claimDest(`${values.outdir}/round2-${agent}.repaired.json`, src);
   writeFileSync(dest, JSON.stringify(payload, null, 2), 'utf-8');
 
