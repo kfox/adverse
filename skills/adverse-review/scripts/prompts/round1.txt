@@ -50,8 +50,12 @@ is.
 in `-<letter>.json` — `round1-auditor-a.json` — then `agent` is exactly
 `auditor-a`, and omitting the key is refused: a half that omits the id cannot
 be told from the whole lane. If the filename names no half, or you were given
-no path to write to at all, then omit the key — or write your bare persona
-name, which asserts the same thing and is accepted too. Nothing else is: the
+no path to write to at all, then OMIT the key. Writing your bare persona name
+instead still validates on its own, but it is not the same thing at the merge:
+`combine.mjs` reads any non-empty `agent` as a claim, so a bare name beside a
+sibling that claims `auditor-a` makes that sibling's payload look like a
+missing half and the pair is refused. Omitting is the answer that is right in
+both places. Nothing else is accepted: the
 validator derives the expected id from the filename and refuses a payload that
 disagrees with it. Write the one path you were given, and nothing else: an id
 naming a lane you are not is a reviewer who does not exist.

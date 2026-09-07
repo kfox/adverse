@@ -1223,6 +1223,45 @@ test('the stamp a bridge applies is refused from a payload, wherever it is writt
   assert.equal(stampedFieldClaim(null), null, 'an unreadable payload is the schema\'s to refuse');
 });
 
+test('a long whitespace run in a payload value does not stall the renderer', () => {
+  // `/\s*[\r\n]+\s*/` was two quantifiers over one class with the second able
+  // to fail, so a whitespace run holding no newline backtracked from every
+  // starting position. Measured on the old form: 64,000 spaces took 6.5
+  // seconds and 256,000 took 103. The bound below is ~100x the fixed timing
+  // and ~1/100th of the broken one, so it is not a flaky benchmark — it is the
+  // difference between linear and quadratic.
+  // Through `file`, not `summary`: a summary is clipped to a few hundred
+  // characters before it reaches the renderer, so that path never carried the
+  // run. A locator is not clipped, which is the field the report named.
+  const file = `${' '.repeat(256_000)}x.mjs`;
+  const started = Date.now();
+  const report = renderMarkdown(synthesize({
+    auditor: { persona: 'auditor', verdict: 'reject', summary: 's', findings: [
+      { severity: 'critical', kind: 'defect', file, line: 1, counterpart: null,
+        title: 't', detail: 'd', fix: null },
+    ] },
+  }, {}));
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 1000, `rendering took ${elapsed} ms`);
+  assert.ok(report.includes('x.mjs'), 'and the value still arrives in full');
+});
+
+test('a value with leading or trailing spaces keeps them through the code span', () => {
+  // CommonMark strips one space from each end of a code span when both ends
+  // have one, so a `summary` of " spaced " rendered as `spaced` — the value an
+  // operator reads differing from the value recorded, inside the sentence the
+  // tool signs. Verified against pandoc's GFM reader: the unpadded span gives
+  // <code>spaced</code>, the padded one <code> spaced </code>.
+  const report = renderMarkdown(synthesize({
+    auditor: { persona: 'auditor', verdict: 'approve', summary: ' spaced ', findings: [] },
+  }, {}));
+
+  // The pad is a space inside the fence, so the recorded value is delimited by
+  // two spaces rather than one and survives the reader's strip.
+  assert.match(report, /`  spaced  `/);
+});
+
 test('a payload-chosen key is bounded before it reaches the operator', () => {
   // The sink is not only a terminal: SKILL.md tells the orchestrator to append
   // this line to the retry prompt it sends the agent. Measured before the
