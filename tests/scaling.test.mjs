@@ -17,7 +17,7 @@ import {
   DEFAULT_MAX_ITERATIONS, DELETED_LINES_ADVERSARY_FLOOR, ESCALATED_MAX_ITERATIONS,
   LARGE_MIN_CHANGED_LINES, LARGE_MIN_FILES, SMALL_MAX_CHANGED_LINES, SMALL_MAX_FILES,
   MAX_SPLIT_AGENTS, SPLIT_AGENTS, agentNames, diffSize, escalate, parseNumstat, parsePlan, planReview,
-  runLanes, skippedLanes, splitLanes,
+  runLanes, sizeSkippable, skippedLanes, splitLanes,
 } from '../src/scaling.mjs';
 
 const filesOf = (n) => Array.from({ length: n }, (_, i) => `src/render/mod${i}.mjs`);
@@ -453,4 +453,31 @@ test('agentNames suffixes a split lane per agent and leaves a solo lane bare', (
 test('agentNames reads the lane\'s own count, not a hardcoded two', () => {
   const lanes = lanesOf({ persona: 'auditor', run: true, agents: 3 });
   assert.deepEqual(agentNames(lanes), ['auditor-a', 'auditor-b', 'auditor-c']);
+});
+
+// The size skip and round 2's participation rule and the regression pass's
+// eligibility are three readers of ONE sentence — "nothing this lane reports
+// can block" — and the planner held a third copy of it, without the
+// `kinds.length` guard the shared predicate has. A registry is injected because
+// the Pragmatist is the only advisory-only lane in the real one, so any
+// assertion over that registry agrees with a hard-coded `!== 'pragmatist'` and
+// cannot tell one implementation from the other.
+const registry = {
+  reviewer: { kinds: ['defect', 'design'] },
+  advisor: { kinds: ['design'] },
+  // A lane registered with no kinds at all. `[].every(...)` is vacuously true,
+  // which is how the planner's copy came to disagree with the shared one.
+  blank: { kinds: [] },
+};
+
+test('a lane with no kinds is not size-skippable — an empty list is not an advisory list', () => {
+  assert.equal(sizeSkippable('blank', { personas: registry }), false);
+});
+
+test('size-skippability is the advisory-only question, asked of the registry', () => {
+  assert.equal(sizeSkippable('advisor', { personas: registry }), true);
+  assert.equal(sizeSkippable('reviewer', { personas: registry }), false);
+  // Unknown names fail toward giving the lane work rather than throwing on
+  // `undefined.kinds`, which is what indexing the registry directly did.
+  assert.equal(sizeSkippable('nobody', { personas: registry }), false);
 });
