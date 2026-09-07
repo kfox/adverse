@@ -455,7 +455,7 @@ function buildFinding(persona, raw, agent = persona) {
 //              finding stays blocking until someone decides it
 //   oversized  ruled `one`, but carrying more citations than one disposition
 //              can honestly cover (src/triage.mjs, MAX_CONFIRMABLE_MEMBERS)
-//   proposed   nobody ruled — the pre-grouping behaviour, kept as the default
+//   proposed   nobody ruled — the pre-grouping behavior, kept as the default
 //
 // Every state but `confirmed` leaves the members exactly as they were, so a
 // missing, contested, or oversized ruling costs the speedup and never a
@@ -977,7 +977,7 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
       `(${syn.findings.length} total across ${Object.keys(syn.verdicts).length} reviewers)  `,
   );
   // `disputed` is reported beside this number, not folded into it. A finding
-  // one persona challenged is labelled `disputed` the moment the FIRST
+  // one persona challenged is labeled `disputed` the moment the FIRST
   // challenger appears, before reporters are counted, so `isOpenBlocking`
   // excludes a critical three lanes reported and one disagreed with — and the
   // headline read zero while the stop condition still held the loop open on

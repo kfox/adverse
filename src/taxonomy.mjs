@@ -49,7 +49,7 @@ export const SEVERITY_RANK = Object.freeze(
 // them; nothing deterministic rules on them). `one` collapses the group into a
 // single fix and a single disposition with its citations attached; `split`
 // dissolves it back into independent findings. Anything else — including
-// silence — leaves the group a candidate, which is the pre-grouping behaviour
+// silence — leaves the group a candidate, which is the pre-grouping behavior
 // and therefore the safe default.
 export const GROUP_RULINGS = Object.freeze(new Set(['one', 'split']));
 

@@ -267,7 +267,7 @@ test('a payload that fails the schema is exit 1, and nothing is written', () => 
 test('a payload cannot write a heading into the report through its `commit`', () => {
   // Shape 6 of the vacuous-test list is the live risk on the `commit` pattern:
   // pinning what the pattern accepts proves nothing about anything USING it.
-  // So this drives the whole path the injected string travelled — payload to
+  // So this drives the whole path the injected string traveled — payload to
   // `summary` to the report — and asserts the run stops before the file that
   // carries it is written.
   const dir = freshTmp();

@@ -1014,7 +1014,7 @@ test('a persona cannot confirm that its own findings are one thing', () => {
 test('split and contested need no quorum — both dissolve the group', () => {
   const { round1, groups } = oneGuard();
   // Dissolving fails toward MORE decisions, which is the safe direction, so a
-  // lone reviewer saying "these are separate" is always honoured.
+  // lone reviewer saying "these are separate" is always honored.
   assert.equal(
     synthesize(round1, { auditor: ruling('auditor', 'G1', 'split') }, { rootCauseGroups: groups }).rootCauses[0].status,
     'split');

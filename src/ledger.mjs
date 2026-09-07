@@ -752,7 +752,7 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
   //
   // `synthesis.mjs` labels a finding `disputed` the moment ONE challenger
   // appears, before it counts reporters, so a critical two personas found and
-  // one disagreed with is labelled the same as a lone hunch. Treating that as
+  // one disagreed with is labeled the same as a lone hunch. Treating that as
   // defeated let any single persona erase a blocking critical from the run by
   // posting one challenge. A dispute is not a verdict; it is the case that most
   // needs adjudicating, and this tool already has the mechanism for that — a

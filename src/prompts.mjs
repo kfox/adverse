@@ -1210,7 +1210,7 @@ export function validatePhase2(obj, personaName, { agent } = {}) {
   // the key would fail every payload from a run that had none — and a reviewer
   // that declines to rule costs only the collapse, never a finding: an unruled
   // group leaves its citations reported and decided individually, which is
-  // exactly the behaviour that predates grouping.
+  // exactly the behavior that predates grouping.
   if ('groups' in obj) {
     if (!Array.isArray(obj.groups)) return '`groups` must be an array.';
     for (let i = 0; i < obj.groups.length; i++) {

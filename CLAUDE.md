@@ -40,3 +40,13 @@ Never pass an `addyosmani/adverse` value to `--repo`, to `--base`, or in a
 `gh api` path. Before any `gh` command that writes, read the target back and
 confirm it is this fork. `git remote -v` is the ground truth: `origin` is the
 fork, `upstream` is Addy's.
+
+## Spelling
+
+Everything in this repository is written in American English — prose, code,
+comments, prompts, and commit messages: `behavior`, `center`, `labeled`,
+`traveled`, `honored`, `analyze`, `license`. `grey`/`gray` and
+`canceled`/`cancelled` are interchangeable in American English and both are
+accepted. Two spellings are load-bearing as written and must never be swept:
+`cancelled()` is a GitHub Actions expression function, and a test fixture whose
+whole purpose is to be a plausible typo stays a typo.
