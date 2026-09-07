@@ -597,6 +597,7 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     --round1 "$ADVERSE_RUN"/round1.json \
     --round2 "$ADVERSE_RUN"/round2.json \
     --briefing "$ADVERSE_RUN"/briefing.json \
+    --plan "$ADVERSE_RUN"/plan.json \
     --out "$ADVERSE_RUN"/report.md \
     --json-out "$ADVERSE_RUN"/report.json \
     --html-out "$ADVERSE_RUN"/report.html
@@ -605,6 +606,9 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     #   --skipped pragmatist="small diff; design findings are advisory"
     # and, when Phase 4 skipped round 2:
     #   --round2-skipped "$R2_REASON"
+    # --plan makes the skipped-lane accounting arithmetic: a lane the plan ran
+    # that has no payload and no --skipped/--degraded refuses the synthesis,
+    # because its silence otherwise reads as a clean review.
 ```
 
 `--briefing` is what carries the candidate root causes and round 2's rulings

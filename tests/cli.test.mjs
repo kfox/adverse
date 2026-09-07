@@ -333,6 +333,37 @@ test('--help on a subcommand prints usage at exit 0, and a parse refusal is exit
   assert.doesNotMatch(refusal.stderr, /at .*parse_args/);
 });
 
+test('--plan reconciles the run the payloads prove against the run the plan describes', () => {
+  // A planned lane with no payload reviewed nothing, and "reviewed and found
+  // nothing" is the same input downstream as "never looked" — the silence
+  // --skipped/--degraded exist to break, previously checked by nobody.
+  const out = freshTmp();
+  try {
+    const round1 = {
+      auditor: { persona: 'auditor', verdict: 'approve', summary: 'ok', findings: [] },
+      steward: { persona: 'steward', verdict: 'approve', summary: 'ok', findings: [] },
+    };
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify(round1));
+    writeFileSync(path.join(out, 'plan.json'), JSON.stringify({
+      lanes: [
+        { persona: 'auditor', run: true },
+        { persona: 'steward', run: true },
+        { persona: 'adversary', run: true },
+        { persona: 'pragmatist', run: false, reason: 'small diff' },
+      ],
+    }));
+    const args = ['synthesize', '--round1', path.join(out, 'r1.json'),
+      '--plan', path.join(out, 'plan.json'), '--out', path.join(out, 'report.md')];
+
+    const silent = runCli(args);
+    assert.equal(silent.status, 2, silent.stderr);
+    assert.match(silent.stderr, /the plan ran adversary/);
+
+    const declared = runCli([...args, '--degraded', 'adversary']);
+    assert.ok(declared.status === 0 || declared.status === 1, declared.stderr);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
 test('help is an option the parser owns, not a substring scanned out of argv', () => {
   // The first cut scanned the raw argv for --help/-h, so any option VALUE equal
   // to -h silently skipped the run and exited 0 — on a CI gate whose exit-code
