@@ -179,19 +179,29 @@ const ADVISORY_ONLY_CALLERS = {
 
 const SRC_DIR = new URL('../src/', import.meta.url);
 
+// Every directory the sibling scan reads, for the reason that scan reads them:
+// the fifth hand-spelled copy of the lane-agent rule lived in
+// `skills/adverse-review/scripts/`, not in `src/`. Scanning only `src/` while
+// the test's own name said "every call site" meant a caller added under
+// `scripts/` passed 22/22 — verified by mutation before widening this.
+const CALLER_SCAN_DIRS = ['src', 'bin', 'skills/adverse-review/scripts'];
+
 // `src/` basenames that CALL the predicate. Comment lines are skipped — half
 // the modules discuss it — and so is its own declaration; an `import` names it
 // without a following paren and so never matches.
 function callersOfAdvisoryOnlyLane() {
   const callers = [];
 
-  for (const name of readdirSync(SRC_DIR)) {
+  for (const dir of CALLER_SCAN_DIRS) {
+  const base = new URL(`../${dir}/`, import.meta.url);
+  for (const name of readdirSync(base)) {
     if (!name.endsWith('.mjs')) continue;
-    const calls = readFileSync(new URL(name, SRC_DIR), 'utf-8').split('\n')
+    const calls = readFileSync(new URL(name, base), 'utf-8').split('\n')
       .filter((line) => line.includes('advisoryOnlyLane(')
         && !line.trimStart().startsWith('//')
         && !line.includes('function advisoryOnlyLane('));
     if (calls.length) callers.push(name);
+  }
   }
 
   return callers.sort();
@@ -280,9 +290,10 @@ test('laneAgentOf returns the persona it was given, untouched', () => {
 // here. What IS listed is a call that uses the answer as a ternary condition
 // and supplies its own default, which is `laneAgentOf` written out longhand.
 //
-// src/briefing.mjs was a fourth. src/synthesis.mjs's `claimedAgent` and
-// repair.mjs's filename key are the two that remain, and both are owned
-// elsewhere. Every `isLaneAgent` reference under src/, bin/ and
+// src/briefing.mjs was a fourth, and repair.mjs's filename key a fifth. What
+// remains is whatever this array lists — do not restate its length in prose,
+// which is the defect the sibling table was built to delete and which this
+// comment then reintroduced one commit later. Every `isLaneAgent` reference under src/, bin/ and
 // skills/adverse-review/scripts/ was read to build this list; what the scan
 // below cannot see is the same rule written as an `if`/`else` instead of a
 // ternary, so this bounds the copies it can recognize and does not claim there

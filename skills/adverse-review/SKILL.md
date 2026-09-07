@@ -692,9 +692,11 @@ is `fixed`, `declined`, `deferred`, or `noted`. Only `declined` and `deferred`
 which is which on its own summary line. **Carry `counterpart` on every
 `contract` decision.** That kind's claim is "X contradicts Y", so Y is half its
 identity and the ledger matches on it: an entry carrying no counterpart matches
-only a finding that carries none either. Triage requires one on every `contract`
-finding, so the next pass's finding will have one, your entry will not match it,
-and the finding you just decided comes back. Do not read that as "an entry
+only a finding that carries none either. Triage does not *require* one — it
+annotates a counterpart-less `contract` finding as under-anchored and carries it
+anyway — so whether the next pass's finding names a Y is up to the reviewer who
+writes it. Record yours and the match is decided on identity; omit it and you are
+betting the next reviewer omits it too. Do not read that as "an entry
 without one matches nothing ever again", which is what this line used to say:
 two counterpart-less records with the same title DO match and settle. Both arms
 are pinned by `tests/ledger.test.mjs`, "two counterpart-less contract records

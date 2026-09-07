@@ -440,9 +440,11 @@ export function isLaneAgent(persona, agent) {
 // them differing buys some agent an independent-looking vote on its own
 // finding.
 //
-// src/briefing.mjs calls this. The two that do not yet are listed in
-// `HAND_SPELLED_LANE_AGENT_RULE` in tests/personas.test.mjs, which is checked
-// — a THIRD copy cannot appear quietly, whatever happens to those two.
+// src/briefing.mjs and repair.mjs call this. Whatever still spells the rule by
+// hand is listed in `HAND_SPELLED_LANE_AGENT_RULE` in tests/personas.test.mjs,
+// which is checked — a NEW copy cannot appear quietly. The count is deliberately
+// not written here: the last two counts in this file were both wrong within a
+// commit of being written.
 //
 // `persona` is returned UNTOUCHED, whatever it is. Callers hand this a
 // persona that came off a JSON payload, so a null or undefined lane has to

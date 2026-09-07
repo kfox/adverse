@@ -520,6 +520,19 @@ function matchNote(m, { settled, tooWeak, sameReport }) {
       + 'fix. Not evidence of anything yet: the fix has not been observed. '
       + 'Verify it (Phase 9) and re-synthesize before judging.';
   }
+  // The THIRD time this class has been closed in this function, and the last
+  // rung to get it. `isRegressionCandidate` requires `matchScore >=
+  // SETTLING_SCORE` before it will call a `fixed` match a regression; this
+  // sentence did not, so a score-1 file-wide match told round 2 "the fix did not
+  // work" while `briefing.regressed` was empty — the tool asserting a regression
+  // its own arithmetic declined to count. Every rung now tests match strength:
+  // settled and tooWeak on `isSettled`, `noted` on its own, and this one here.
+  if (m.score < SETTLING_SCORE) {
+    return 'An earlier iteration recorded a fix for something in this file, but the '
+      + 'match is too weak to say it was THIS finding. Do not read it as a failed '
+      + 'fix; judge the finding on its merits, and note the earlier reason is shown '
+      + 'only as context.';
+  }
   return 'This was recorded FIXED in an earlier iteration. If it is still real, '
     + 'the fix did not work — say exactly what the fix missed. That is more '
     + 'important than any new finding on this pass.';

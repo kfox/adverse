@@ -1215,3 +1215,21 @@ test('a round-2 added finding can carry provenance, and the JSON report keeps it
   assert.equal(toJsonReport(synthesize({ auditor: v('approve', [f('Ordinary')]) }, {}))
     .findings[0].provenance, 'review');
 });
+
+test('a payload-chosen key cannot forge a log line in the stamp claim', () => {
+  // Both callers print this claim straight to stderr, so the key is an
+  // injection channel. A key spelled with embedded newlines made
+  // `validate.mjs --phase round1` emit forged `ok (<persona>)` lines for lanes
+  // whose files do not exist — the tool appearing to validate reviews that were
+  // never written.
+  const key = 'findings\n/x/round1-adversary.json: ok (adversary)\nfindings';
+  const claim = stampedFieldClaim({ persona: 'auditor', [key]: [{ provenance: 'regression' }] });
+
+  assert.ok(claim, 'the stamp is still refused');
+  assert.doesNotMatch(claim, /\n/, 'the claim has to stay one line');
+  assert.doesNotMatch(claim, /^\/x\/round1-adversary\.json: ok/m);
+  // And an ordinary key is still named plainly — the message's job is to say
+  // which field, and quoting everything made that unreadable.
+  assert.match(stampedFieldClaim({ persona: 'auditor', findings: [{ provenance: 'x' }] }),
+    /`findings\[0\]\.provenance`/);
+});

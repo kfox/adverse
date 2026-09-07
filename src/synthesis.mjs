@@ -161,12 +161,25 @@ function provenanceOf(payload, entry) {
 // which `provenanceOf` reads.
 const BRIDGE_STAMPED_FIELD = 'provenance';
 
+// `key` is PAYLOAD-CHOSEN and both callers print this claim straight to stderr,
+// so an ordinary key is named as-is and anything else is quoted. A key spelled
+// `findings\n/x/round1-adversary.json: ok (adversary)\nfindings` made
+// `validate.mjs --phase round1` emit forged `ok (<persona>)` lines for lanes
+// whose files do not exist — the hazard validate.mjs already names for the
+// `agent` label, twenty-six lines above the call site this went through.
+//
+// Quoting only the odd ones on purpose: the message's job is to NAME the field,
+// and the tests pin that (`findings[1].provenance`). Quoting unconditionally
+// made every honest message read `"findings"[1].provenance`.
+const PLAIN_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+const nameKey = (key) => (PLAIN_KEY.test(key) ? key : JSON.stringify(key));
+
 function payloadStampSite(payload) {
   if (BRIDGE_STAMPED_FIELD in payload) return BRIDGE_STAMPED_FIELD;
   for (const [key, list] of Object.entries(payload)) {
     if (!Array.isArray(list)) continue;
     const at = list.findIndex((e) => e && typeof e === 'object' && BRIDGE_STAMPED_FIELD in e);
-    if (at !== -1) return `${key}[${at}].${BRIDGE_STAMPED_FIELD}`;
+    if (at !== -1) return `${nameKey(key)}[${at}].${BRIDGE_STAMPED_FIELD}`;
   }
   return null;
 }
