@@ -226,6 +226,24 @@ test('an agent id that is not this lane\'s does not get to name a file', () => {
   }
 });
 
+test('an over-long agent id never reaches writeFileSync — ENAMETOOLONG is not an exit code', () => {
+  // `isLaneAgent`'s `/^[a-z]+$/` bounded the alphabet and not the length, so
+  // `auditor-` plus 300 letters passed the guard, passed the write guard, and
+  // died in writeFileSync with an uncaught stack trace — taking the remaining
+  // payloads of the same invocation with it, since the loop has no per-payload
+  // try. The id falls back to the persona instead.
+  const dir = freshTmp();
+  try {
+    const src = round2At(dir, 'round2-auditor-a.json', 'auditor', `auditor-${'a'.repeat(300)}`);
+    const r = runRepair(['--briefing', briefingAt(dir), '--round2', src, '--outdir', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /round2-auditor\.repaired\.json/);
+    assert.doesNotMatch(r.stderr, /ENAMETOOLONG|Error:/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('two payloads claiming one persona refuse to collide, rather than one overwriting the other', () => {
   const dir = freshTmp();
   try {

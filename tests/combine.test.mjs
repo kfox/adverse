@@ -217,11 +217,11 @@ test('--merge-personas <persona> unions the split lane: findings, worse verdict,
   const dir = freshTmp();
   try {
     const a = reviewAs(dir, 'auditor-a.json', {
-      persona: 'auditor', verdict: 'approve', summary: 'half one',
+      persona: 'auditor', agent: 'auditor-a', verdict: 'approve', summary: 'half one',
       findings: [{ severity: 'warning', kind: 'defect', title: 'from half one' }],
     });
     const b = reviewAs(dir, 'auditor-b.json', {
-      persona: 'auditor', verdict: 'reject', summary: 'half two',
+      persona: 'auditor', agent: 'auditor-b', verdict: 'reject', summary: 'half two',
       findings: [{ severity: 'critical', kind: 'defect', title: 'from half two' }],
     });
     const out = path.join(dir, 'combined.json');
@@ -242,8 +242,10 @@ test('--merge-personas <persona> unions the split lane: findings, worse verdict,
 test('the worse verdict wins in either input order', () => {
   const dir = freshTmp();
   try {
-    const a = reviewAs(dir, 'a.json', { persona: 'auditor', verdict: 'conditional', summary: 's', findings: [] });
-    const b = reviewAs(dir, 'b.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
+    const a = reviewAs(dir, 'a.json',
+      { persona: 'auditor', agent: 'auditor-a', verdict: 'conditional', summary: 's', findings: [] });
+    const b = reviewAs(dir, 'b.json',
+      { persona: 'auditor', agent: 'auditor-b', verdict: 'approve', summary: 's', findings: [] });
     for (const order of [[a, b], [b, a]]) {
       const out = path.join(dir, 'combined.json');
       const r = runCombine(['--round1', ...order, '--merge-personas', 'auditor', '--out', out]);
@@ -258,8 +260,10 @@ test('the worse verdict wins in either input order', () => {
 test('an off-contract verdict is recorded as reject, loudly — it cannot erase its partner\'s reject', () => {
   const dir = freshTmp();
   try {
-    const a = reviewAs(dir, 'a.json', { persona: 'auditor', verdict: 'reject', summary: 's', findings: [] });
-    const b = reviewAs(dir, 'b.json', { persona: 'auditor', verdict: 'REJECTED', summary: 's', findings: [] });
+    const a = reviewAs(dir, 'a.json',
+      { persona: 'auditor', agent: 'auditor-a', verdict: 'reject', summary: 's', findings: [] });
+    const b = reviewAs(dir, 'b.json',
+      { persona: 'auditor', agent: 'auditor-b', verdict: 'REJECTED', summary: 's', findings: [] });
     for (const order of [[a, b], [b, a]]) {
       const out = path.join(dir, 'combined.json');
       const r = runCombine(['--round1', ...order, '--merge-personas', 'auditor', '--out', out]);
@@ -418,8 +422,10 @@ function writePlan(dir, lanes) {
 test('--plan derives --merge-personas from lanes the plan split (agents > 1)', () => {
   const dir = freshTmp();
   try {
-    const a = reviewAs(dir, 'auditor-a.json', { persona: 'auditor', verdict: 'approve', summary: 'half one', findings: [] });
-    const b = reviewAs(dir, 'auditor-b.json', { persona: 'auditor', verdict: 'reject', summary: 'half two', findings: [] });
+    const a = reviewAs(dir, 'auditor-a.json',
+      { persona: 'auditor', agent: 'auditor-a', verdict: 'approve', summary: 'half one', findings: [] });
+    const b = reviewAs(dir, 'auditor-b.json',
+      { persona: 'auditor', agent: 'auditor-b', verdict: 'reject', summary: 'half two', findings: [] });
     const plan = writePlan(dir, [
       { persona: 'auditor', run: true, agents: 2, reason: 'split' },
       { persona: 'steward', run: true, agents: 1, reason: 'not split' },
@@ -438,10 +444,11 @@ test('--plan derives --merge-personas from lanes the plan split (agents > 1)', (
 test('--plan and --merge-personas union rather than override each other', () => {
   const dir = freshTmp();
   try {
-    const a = reviewAs(dir, 'auditor-a.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
-    const b = reviewAs(dir, 'auditor-b.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
-    const s1 = reviewAs(dir, 'steward-a.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
-    const s2 = reviewAs(dir, 'steward-b.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
+    const lane = (persona, agent) => ({ persona, agent, verdict: 'approve', summary: 's', findings: [] });
+    const a = reviewAs(dir, 'auditor-a.json', lane('auditor', 'auditor-a'));
+    const b = reviewAs(dir, 'auditor-b.json', lane('auditor', 'auditor-b'));
+    const s1 = reviewAs(dir, 'steward-a.json', lane('steward', 'steward-a'));
+    const s2 = reviewAs(dir, 'steward-b.json', lane('steward', 'steward-b'));
     // The plan only knows about the auditor split; steward is named by hand.
     const plan = writePlan(dir, [{ persona: 'auditor', run: true, agents: 2, reason: 'split' }]);
     const out = path.join(dir, 'combined.json');
@@ -611,6 +618,122 @@ test('a --plan file with no `lanes` array is a usage error, not a silent no-op',
     const r = runCombine(['--round1', a, '--plan', plan, '--out', out]);
     assert.equal(r.status, 2);
     assert.match(r.stderr, /not a plan\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- a split lane's two halves must be two distinct, real agents ------------
+//
+// validate.mjs binds each id to the filename its payload was written to; this
+// is the merge site, where the two are held against each other. `checkRoster`
+// counts payloads and never reads one, so neither of these was visible here.
+
+const half = (agent, over = {}) => ({
+  persona: 'auditor', agent, verdict: 'approve', summary: 's', findings: [], ...over,
+});
+
+function splitPlan(dir, agents = 2) {
+  return writePlan(dir, [{ persona: 'auditor', run: true, agents, reason: 'split' }]);
+}
+
+test('two halves of a split lane declaring ONE agent id are refused', () => {
+  const dir = freshTmp();
+  try {
+    // Both stamped `auditor-b`: the agent that wrote half A carries its
+    // sibling's name, so its round-2 ruling on its own finding counts as
+    // independent and a cross-validated critical drops to `disputed`.
+    const a = reviewAs(dir, 'dup-a.json', half('auditor-b'));
+    const b = reviewAs(dir, 'dup-b.json', half('auditor-b'));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--plan', splitPlan(dir), '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /already claimed by/);
+    assert.match(r.stderr, /dup-a\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a split half that declares no agent id is refused, not stamped with the lane', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'nameless-a.json', half('auditor-a'));
+    const b = reviewAs(dir, 'nameless-b.json',
+      { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--plan', splitPlan(dir), '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /has to say which half wrote it/);
+    assert.match(r.stderr, /nameless-b\.json/);
+    assert.doesNotMatch(r.stderr, /nameless-a\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an agent id outside the plan\'s roster for that lane is refused', () => {
+  const dir = freshTmp();
+  try {
+    // `auditor-c` is a well-formed id for this lane — it is what a three-way
+    // split's third agent is called — but this plan spawned two agents, so no
+    // such half exists and shape alone cannot say so.
+    const a = reviewAs(dir, 'roster-a.json', half('auditor-a'));
+    const b = reviewAs(dir, 'roster-c.json', half('auditor-c'));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--plan', splitPlan(dir), '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /is not an agent of the 'auditor' lane/);
+    assert.match(r.stderr, /auditor-a or auditor-b/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a hand-declared split with no plan still needs two distinct ids of this lane', () => {
+  const dir = freshTmp();
+  try {
+    // `--merge-personas` without a plan has no roster to check against, so the
+    // membership check is shape (src/personas.mjs, isLaneAgent) — but presence
+    // and distinctness are exactly as load-bearing as they are under a plan.
+    const a = reviewAs(dir, 'hand-a.json', half('auditor-a'));
+    const b = reviewAs(dir, 'hand-b.json', half('adversary-b'));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--merge-personas', 'auditor', '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /is not an agent of the 'auditor' lane/);
+    assert.match(r.stderr, /'auditor-<letter>'/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unsplit lane is not asked for an agent id at all', () => {
+  const dir = freshTmp();
+  try {
+    // The named default: one payload has no sibling to be confused with, and
+    // its `agent` was already held against its own filename by validate.mjs.
+    const a = review(dir, 'auditor');
+    const plan = splitPlan(dir, 1);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(personasIn(out), ['auditor']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a round-2 split lane is held to the same two ids', () => {
+  const dir = freshTmp();
+  try {
+    const cross = (agent) => ({ persona: 'auditor', agent, validate: [], challenge: [], added: [] });
+    const a = reviewAs(dir, 'r2-dup-a.json', cross('auditor-a'));
+    const b = reviewAs(dir, 'r2-dup-b.json', cross('auditor-a'));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round2', a, b, '--plan', splitPlan(dir), '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /already claimed by/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

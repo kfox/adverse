@@ -8,7 +8,6 @@
 // briefing and makes reviewers read the repo themselves. See
 // PHASE2_BRIEFING_INSTRUCTIONS.
 
-import { isLaneAgent } from './personas.mjs';
 import { GROUP_RULINGS, KINDS, SEVERITIES } from './taxonomy.mjs';
 
 export const KIND_RUBRIC = `\`kind\` — what kind of claim this is. This selects how the finding gets
@@ -946,29 +945,53 @@ function validateFinding(f, label) {
   return null;
 }
 
-// `agent` is OPTIONAL, and absent means "this lane was not split", so the
-// agent id is the persona name. Present, it must name THIS lane: `auditor` or
-// `auditor-a`, never `adversary` and never `auditor_a`.
+// `agent` must be the id the CALLER can prove this payload has, which is
+// `expected`: the identity read off the filename the orchestrator gave the
+// agent (skills/adverse-review/scripts/validate.mjs), the one string in a
+// payload's identity that no model wrote. With no expected id supplied the
+// persona IS the expectation — the unsplit lane, and the in-process runner in
+// src/cli.mjs, where one agent per persona means a half id is a claim about a
+// split that never happened.
 //
-// An agent id that does not name its own lane is how a phantom reviewer gets
-// minted — the same class src/roster.mjs refuses for persona names, and worth
-// more here, because the id is what round 2's self-validation guard keys on.
+// Shape was the whole check here, and shape is not identity: `auditor-a` and
+// `auditor-b` are equally well-formed ids for the auditor lane, so
+// `round1-auditor-a.json` declaring `"agent": "auditor-b"` validated clean.
+// Half A's findings were then stamped with half B's name, and half A's honest
+// round-2 payload ruled on its own round-1 finding as if it were its
+// sibling's: `solo` -> `consensus`, `isOpenBlocking` false -> true, for two
+// characters. `isLaneAgent`'s note says an id that does not name its own lane
+// buys an agent an independent-looking vote on its own finding; naming the
+// wrong half of the right lane is the case that note did not cover, and it is
+// the case round 2's guard keys on.
+//
 // A rejection rather than a coercion because this runs on the retry path,
 // where the model can be told what it got wrong; the readers downstream
 // coerce instead, and coerce toward the persona so a bad id can only ever cost
 // an edge, never manufacture one.
-function validateAgent(obj, personaName) {
-  if (!('agent' in obj)) return null;
-  if (!isLaneAgent(personaName, obj.agent)) {
-    return `\`agent\` must be '${personaName}' or '${personaName}-<suffix>',`
-      + ` got ${JSON.stringify(obj.agent)}.`;
+function validateAgent(obj, personaName, expectedAgent) {
+  const expected = expectedAgent ?? personaName;
+  // Absent is legal for exactly one expectation: the persona itself, which is
+  // what an unsplit lane writes (`round1.txt`: "only if your lane was split;
+  // else omit"). When the filename names a half, an unlabeled payload is
+  // refused rather than defaulted — `stampAgent` would give it the bare
+  // persona, and `reportedBy` reads the bare persona as "the whole lane
+  // reported this" and discards the sibling's honest ruling with it. Dropping
+  // one optional field must not buy immunity from cross-examination.
+  if (!('agent' in obj)) {
+    if (expected === personaName) return null;
+    return `\`agent\` must be '${expected}': the file this payload was written to`
+      + ' names that half of the lane, and an unlabeled half cannot be told from'
+      + ' the lane itself.';
+  }
+  if (obj.agent !== expected) {
+    return `\`agent\` must be '${expected}', got ${JSON.stringify(obj.agent)}.`;
   }
   return null;
 }
 
 // Returns null if `obj` is a valid phase-1 review, else an error string suitable
 // for feeding back to the model on retry.
-export function validatePhase1(obj, personaName) {
+export function validatePhase1(obj, personaName, { agent } = {}) {
   if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
     return `Top-level JSON must be an object, got ${typeName(obj)}.`;
   }
@@ -978,7 +1001,7 @@ export function validatePhase1(obj, personaName) {
   if (obj.persona !== personaName) {
     return `\`persona\` must be '${personaName}', got ${JSON.stringify(obj.persona)}.`;
   }
-  const badAgent = validateAgent(obj, personaName);
+  const badAgent = validateAgent(obj, personaName, agent);
   if (badAgent) return badAgent;
   if (!VERDICTS.has(obj.verdict)) {
     return `\`verdict\` must be one of approve|conditional|reject, got ${JSON.stringify(obj.verdict)}.`;
@@ -991,7 +1014,7 @@ export function validatePhase1(obj, personaName) {
   return null;
 }
 
-export function validatePhase2(obj, personaName) {
+export function validatePhase2(obj, personaName, { agent } = {}) {
   if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
     return `Top-level JSON must be an object, got ${typeName(obj)}.`;
   }
@@ -1001,7 +1024,7 @@ export function validatePhase2(obj, personaName) {
   if (obj.persona !== personaName) {
     return `\`persona\` must be '${personaName}', got ${JSON.stringify(obj.persona)}.`;
   }
-  const badAgent = validateAgent(obj, personaName);
+  const badAgent = validateAgent(obj, personaName, agent);
   if (badAgent) return badAgent;
   for (const key of ['validate', 'challenge']) {
     if (!Array.isArray(obj[key])) return `\`${key}\` must be an array.`;

@@ -40,21 +40,58 @@ test('phase1: valid with findings', () => {
   assert.equal(validatePhase1(p, 'auditor'), null);
 });
 
-// `agent` is optional and absent means "this lane was not split". Present, it
-// must name THIS lane — an id naming a lane the payload is not is how a phantom
-// reviewer gets minted, and it is worth more than an invented persona name
-// because the persona has a registry to be checked against and the agent id has
-// none. Round 2's self-validation guard keys on this string.
+// `agent` must be the id the CALLER can prove the payload has — the third
+// argument, which validate.mjs reads off the filename the orchestrator gave
+// the agent. Absent means "this lane was not split", so it is legal only when
+// the expectation is the bare persona. Round 2's self-validation guard keys on
+// this string, and shape alone cannot say which HALF of a lane wrote a file:
+// `auditor-a` and `auditor-b` are equally well-formed for the auditor lane.
 test('phase1/2: an omitted `agent` is valid — an unsplit lane names none', () => {
   assert.equal(validatePhase1(goodPhase1(), 'auditor'), null);
   assert.equal(validatePhase2(goodPhase2(), 'auditor'), null);
 });
 
-test('phase1/2: `agent` may be this lane\'s own name, split or not', () => {
-  for (const agent of ['auditor', 'auditor-a', 'auditor-b']) {
-    assert.equal(validatePhase1({ ...goodPhase1(), agent }, 'auditor'), null, agent);
-    assert.equal(validatePhase2({ ...goodPhase2(), agent }, 'auditor'), null, agent);
+test('phase1/2: `agent` may be the lane\'s own name, or the half the caller names', () => {
+  assert.equal(validatePhase1({ ...goodPhase1(), agent: 'auditor' }, 'auditor'), null);
+  assert.equal(validatePhase2({ ...goodPhase2(), agent: 'auditor' }, 'auditor'), null);
+  const half = { agent: 'auditor-a' };
+  assert.equal(validatePhase1({ ...goodPhase1(), agent: 'auditor-a' }, 'auditor', half), null);
+  assert.equal(validatePhase2({ ...goodPhase2(), agent: 'auditor-a' }, 'auditor', half), null);
+});
+
+// This is the finding: every test here used to hand `validateAgent` a truthful
+// id, so the shape guard was well covered and the BINDING was not tested at
+// all. A half declaring its sibling's id bought itself an independent-looking
+// vote on its own finding in round 2 for two characters.
+test('phase1/2: `agent` naming the SIBLING half is refused, not just the wrong lane', () => {
+  const half = { agent: 'auditor-a' };
+  assert.match(validatePhase1({ ...goodPhase1(), agent: 'auditor-b' }, 'auditor', half),
+    /`agent` must be 'auditor-a', got "auditor-b"/);
+  assert.match(validatePhase2({ ...goodPhase2(), agent: 'auditor-b' }, 'auditor', half),
+    /`agent` must be 'auditor-a', got "auditor-b"/);
+});
+
+test('phase1/2: a half id is refused when the caller names no half', () => {
+  // Nothing said this payload was one half of anything — the unsplit lane and
+  // the in-process runner in src/cli.mjs, where one agent per persona means a
+  // half id is a claim about a split that never happened.
+  for (const agent of ['auditor-a', 'auditor-b']) {
+    assert.match(validatePhase1({ ...goodPhase1(), agent }, 'auditor'),
+      /`agent` must be 'auditor'/, agent);
+    assert.match(validatePhase2({ ...goodPhase2(), agent }, 'auditor'),
+      /`agent` must be 'auditor'/, agent);
   }
+});
+
+test('phase1/2: a payload with no `agent` is refused when the caller names a half', () => {
+  // The omission arm: an unlabeled half is stamped with the bare persona, and
+  // `reportedBy` reads that as the whole lane, discarding the sibling's honest
+  // ruling on it. One dropped optional field must not buy that.
+  const half = { agent: 'auditor-b' };
+  assert.match(validatePhase1(goodPhase1(), 'auditor', half),
+    /`agent` must be 'auditor-b'.*unlabeled half/s);
+  assert.match(validatePhase2(goodPhase2(), 'auditor', half),
+    /`agent` must be 'auditor-b'.*unlabeled half/s);
 });
 
 test('phase1/2: an `agent` naming another lane is refused', () => {

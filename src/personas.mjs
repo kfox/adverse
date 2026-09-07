@@ -371,6 +371,12 @@ export function crossReviews(persona, round = 1, { personas = PERSONAS } = {}) {
   return !advisoryOnlyLane(persona, { personas });
 }
 
+// One letter, which is the whole set `agentNames` can emit:
+// `String.fromCharCode(97 + i)` with `MAX_SPLIT_AGENTS` capping `i` at 25. A
+// longer suffix is not an id this system produces, so accepting one only ever
+// admits a model-written string.
+const LANE_AGENT_SUFFIX = /^[a-z]$/;
+
 // Whether an agent id names THIS lane. A lane the plan did not split writes no
 // id at all and its agent is the persona itself; a lane split in two writes
 // `auditor-a` and `auditor-b` (src/scaling.mjs, `agentNames`, whose suffixes
@@ -384,10 +390,21 @@ export function crossReviews(persona, round = 1, { personas = PERSONAS } = {}) {
 // not name its own lane would buy an agent an independent-looking vote on its
 // own finding, which is the single signal this whole design exists to produce.
 // The id also reaches a filename in repair.mjs, so a suffix that is not
-// letters is a path, not a name.
+// letters is a path, not a name — and a suffix of 300 letters is not a name
+// either. `/^[a-z]+$/` bounded the alphabet and not the length: `auditor-`
+// plus `'a'.repeat(300)` passed this guard, passed repair.mjs's write guard,
+// and died in `writeFileSync` with an uncaught ENAMETOOLONG — a stack trace
+// rather than an exit code, taking every other lane in that invocation with
+// it. `AGENT_LABEL` caps a fix agent's label for the same reason.
+//
+// Naming the wrong HALF of the right lane is a separate hole this predicate
+// cannot close, and does not try to: `auditor-a` and `auditor-b` are both
+// well-formed ids for the auditor lane, so shape can never say which one
+// wrote a given file. The filename says, and skills/adverse-review/scripts/
+// validate.mjs is where the payload is held against it.
 export function isLaneAgent(persona, agent) {
   if (typeof persona !== 'string' || typeof agent !== 'string') return false;
   if (agent === persona) return true;
   const prefix = `${persona}-`;
-  return agent.startsWith(prefix) && /^[a-z]+$/.test(agent.slice(prefix.length));
+  return agent.startsWith(prefix) && LANE_AGENT_SUFFIX.test(agent.slice(prefix.length));
 }

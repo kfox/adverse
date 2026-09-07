@@ -37,6 +37,8 @@ import { importFromSrc } from './package-root.mjs';
 const { mergeSplitCrossReviews, mergeSplitReviews, normalizeVerdict } =
   await importFromSrc('synthesis.mjs');
 const { checkRoster } = await importFromSrc('roster.mjs');
+const { isLaneAgent } = await importFromSrc('personas.mjs');
+const { agentNames } = await importFromSrc('scaling.mjs');
 
 const { values, positionals } = parseArgs({
   options: {
@@ -68,14 +70,86 @@ const payloads = inputs.map((src) => ({ src, payload: readJson(src, 'combine') }
 
 // Who counts as a reviewer — src/roster.mjs, the same rules triage.mjs applies
 // to the same payloads one phase earlier.
-reportRoster(checkRoster(
+const roster = checkRoster(
   payloads.map(({ src, payload }) => ({ persona: payload?.persona, src })),
   {
     lanes: planLanes,
     explicitMerges: values['merge-personas'] ?? [],
     round: hasRound2 ? 2 : 1,
   },
-), 'combine');
+);
+reportRoster(roster, 'combine');
+
+// The ids of one declared split lane, from the plan that named the split —
+// `agentNames` is the same function Phase 1 used to name the worktrees and the
+// files, so this is the roster the orchestrator actually spawned. Null when
+// the plan does not split this persona: `--merge-personas` alone declares a
+// split the plan has no roster for, and shape is then all there is to check.
+function laneAgents(persona) {
+  const lane = planLanes?.find((l) => l.persona === persona);
+  return lane && lane.agents > 1 ? agentNames([lane]) : null;
+}
+
+// Belt and braces on the identity validate.mjs binds to each payload's
+// filename. This is the MERGE site: two payloads become one lane here, and the
+// per-entry stamp that makes the merge safe is only worth as much as the two
+// ids being present, distinct, and this lane's. `checkRoster` counts payloads
+// and never reads one, so both ways that goes wrong were invisible:
+//
+//   - both halves declaring ONE id: the agent that wrote the other half is
+//     stamped with its sibling's name, and its round-2 ruling on its own
+//     finding counts as independent — a cross-validated critical drops to
+//     `disputed` and out of the open-blocking count;
+//   - a half declaring NONE: its entries are stamped with the bare persona,
+//     which `reportedBy` reads as "the whole lane reported this" and uses to
+//     discard its sibling's honest ruling. Immunity from cross-examination for
+//     the price of one omitted optional field.
+//
+// The default is named explicitly: a lane that was NOT declared split is not
+// checked here at all. It has one payload, so there is no sibling to be
+// confused with, and its `agent` was already held against its own filename by
+// validate.mjs.
+function splitAgentProblems(persona, halves) {
+  const legal = laneAgents(persona);
+  const expected = legal ? legal.join(' or ') : `'${persona}-<letter>'`;
+  const claimedBy = new Map();
+  const problems = [];
+  for (const { src, payload } of halves) {
+    const agent = payload?.agent;
+    if (typeof agent !== 'string' || !agent) {
+      problems.push(`${src}: '${persona}' is a declared split lane, so this payload has to`
+        + ` say which half wrote it: \`agent\` must be ${expected}.\n`
+        + '  An unlabeled half is stamped with the bare persona, and its sibling\'s ruling'
+        + ' on it is then discarded as the lane validating itself.');
+      continue;
+    }
+    if (legal ? !legal.includes(agent) : !isLaneAgent(persona, agent)) {
+      problems.push(`${src}: \`agent\` ${JSON.stringify(agent)} is not an agent of the`
+        + ` '${persona}' lane: expected ${expected}.`);
+      continue;
+    }
+    const first = claimedBy.get(agent);
+    if (first) {
+      problems.push(`${src}: \`agent\` ${JSON.stringify(agent)} was already claimed by`
+        + ` ${first} — two halves cannot be one agent.\n`
+        + '  Whichever of the two is lying about its half now has its sibling\'s name on'
+        + ' its findings, and its ruling on its own work would count as independent.'
+        + ' The filename each was written to says which id it owes.');
+      continue;
+    }
+    claimedBy.set(agent, src);
+  }
+  return problems;
+}
+
+const idProblems = [...roster.merged].flatMap((persona) => splitAgentProblems(
+  persona, payloads.filter(({ payload }) => payload?.persona === persona)));
+if (idProblems.length) {
+  // Exit 1, the same way a duplicate persona is refused: these payloads read
+  // fine and fail a domain check, which is a claim about a review.
+  for (const message of idProblems) process.stderr.write(`combine: ${message}\n`);
+  process.exit(1);
+}
 
 // Null prototype: the persona string indexes this map, and a plain object
 // would answer `__proto__` with something truthy.
@@ -86,6 +160,10 @@ const combined = Object.create(null);
 // makes the round-2 merge safe at all: without it both halves' rulings arrive
 // under one persona name and synthesis discards them as the lane validating
 // itself, which is the reason this was refused before kfox/adverse#50.
+//
+// "Safe" reads on the stamps being TRUE, which the merge itself cannot tell —
+// hence the id check above, and validate.mjs binding each id to the filename
+// its payload was written to before this bridge ever sees it.
 const merge = hasRound2 ? mergeSplitCrossReviews : mergeSplitReviews;
 for (const { src, payload } of payloads) {
   if (hasRound1) {

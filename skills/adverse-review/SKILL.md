@@ -314,6 +314,14 @@ other's, so that a half's judgment on its sibling's work counts as the
 independent review it is. Both are needed and neither substitutes for the
 other. Omit `agent` on any lane that was not split.
 
+The id is checked against the **filename**, which is the only identity in a
+payload that no model wrote: `validate.mjs` refuses `round1-auditor-a.json`
+unless its `agent` is exactly `auditor-a`, refuses an unlabeled half, and
+refuses a half id in a file whose name names no half. `combine.mjs --plan`
+refuses a lane whose two halves claim one id or an id the plan never spawned.
+A half declaring its sibling's id would rule on its own finding as if it were
+the other half's — two characters, and consensus is counterfeit.
+
 Each subagent's JSON object, written to its own path rather than returned in
 chat, has this shape:
 

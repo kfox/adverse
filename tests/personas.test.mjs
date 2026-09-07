@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DEFAULT_PERSONAS, PERSONAS } from '../src/personas.mjs';
+import { DEFAULT_PERSONAS, PERSONAS, isLaneAgent } from '../src/personas.mjs';
 import { ADVISORY_KINDS, KINDS } from '../src/taxonomy.mjs';
 
 const all = Object.values(PERSONAS);
@@ -125,5 +125,31 @@ test('every lane that always runs solo explains itself from the registry', () =>
   for (const p of [PERSONAS.steward, PERSONAS.pragmatist]) {
     assert.equal(typeof p.soloReason, 'string', `${p.name} needs a soloReason`);
     assert.ok(p.soloReason.length > 10);
+  }
+});
+
+// --- isLaneAgent: the id is about to be a filename -------------------------
+
+test('isLaneAgent accepts the ids agentNames can emit, and the bare persona', () => {
+  assert.equal(isLaneAgent('auditor', 'auditor'), true);
+  for (const suffix of ['a', 'b', 'z']) {
+    assert.equal(isLaneAgent('auditor', `auditor-${suffix}`), true, suffix);
+  }
+});
+
+test('isLaneAgent bounds the suffix LENGTH, not only its alphabet', () => {
+  // `/^[a-z]+$/` bounded the character class and not the length, and
+  // repair.mjs interpolates the accepted id into a filename: a 300-letter
+  // suffix passed this guard and died in writeFileSync with an uncaught
+  // ENAMETOOLONG, which is not an exit code at all. `agentNames` emits one
+  // letter, so nothing longer is an id this system produces.
+  assert.equal(isLaneAgent('auditor', `auditor-${'a'.repeat(300)}`), false);
+  assert.equal(isLaneAgent('auditor', 'auditor-ab'), false);
+});
+
+test('isLaneAgent refuses another lane, a bad separator, and a non-letter suffix', () => {
+  for (const agent of ['adversary', 'adversary-a', 'auditor_a', 'auditor-', 'Auditor-a',
+                       'auditor-1', 'auditor-A', 'auditor-a/b', '__proto__', '', null, 42]) {
+    assert.equal(isLaneAgent('auditor', agent), false, JSON.stringify(agent));
   }
 });

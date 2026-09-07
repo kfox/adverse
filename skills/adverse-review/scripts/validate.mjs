@@ -12,10 +12,26 @@
 //
 // The persona comes from the filename, not a repeated --persona flag — the
 // whole point is that the orchestrator stops handling the payload, so it
-// should not have to also retype which persona goes with which path. A
-// split-lane file (round1-auditor-a.json) validates as its shared persona;
-// the -a/-b suffix is a filesystem artifact, not part of the identity
-// `persona` is checked against.
+// should not have to also retype which persona goes with which path.
+//
+// The filename carries TWO identities and both are read here. The PERSONA is
+// the lane: round1-auditor-a.json validates as `auditor`, the name its two
+// halves share so that the synthesizer counts one voice for the lane. The
+// full basename is the AGENT — `auditor-a`, the half that actually wrote this
+// file — and that is the string round 2's self-validation guard keys on
+// (src/personas.mjs's isLaneAgent, src/synthesis.mjs's reportedBy).
+//
+// This header used to call the -a/-b suffix "a filesystem artifact, not part
+// of the identity", and the code acted on it: `.replace(/-[ab]$/, '')` threw
+// the suffix away before anything could hold the payload against it. That made
+// this bridge — the one component holding both the filename and the payload —
+// the place where the system's only unforgeable identity was discarded.
+// round1-auditor-a.json declaring `"agent": "auditor-b"` validated clean, and
+// half A's own round-2 payload then ruled on half A's finding as if it were
+// its sibling's: solo -> consensus, openBlocking false -> true, for two
+// characters. The orchestrator names these files when it spawns the agents and
+// each agent writes only the path it was given, so the NAME is evidence and
+// the payload is a claim. Claims are checked against evidence here.
 
 import { parseArgs } from 'node:util';
 
@@ -41,6 +57,12 @@ const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 // payload would be refused as an unknown lane — so the table records which
 // phases are lane-scoped instead of letting the naming convention decide by
 // accident.
+//
+// Both identities ride to every lane-scoped validator as `(payload, persona,
+// { agent })`. round1 and round2 bind the `agent` id (src/prompts.mjs's
+// validateAgent); verify and regression carry no such field — their bridges
+// rebuild the payload with explicit keys and drop anything else — so the
+// option is inert there rather than needing a second flag per row.
 const VALIDATORS = Object.assign(Object.create(null), {
   round1: { validate: validatePhase1, byPersona: true },
   round2: { validate: validatePhase2, byPersona: true },
@@ -66,9 +88,20 @@ if (!phase || !positionals.length) {
     + `  --phase must be one of: ${Object.keys(VALIDATORS).join('|')}`);
 }
 
-function personaFromPath(file) {
-  const base = file.replace(/^.*\//, '').replace(/\.json$/, '');
-  return base.replace(new RegExp(`^${values.phase}-`), '').replace(/-[ab]$/, '');
+// The lane and the half, read off one name. `agent` is null when the basename
+// names no half — the unsplit lane, where the persona is the only id the
+// payload may claim.
+//
+// One letter, not `[ab]`: `agentNames` suffixes a, b, c … and parseLane allows
+// up to MAX_SPLIT_AGENTS of them, so the old pattern also mistook a legitimate
+// three-way split's `auditor-c` for a persona named `auditor-c` and refused it
+// as an unknown lane. `values.phase` is a validated key of VALIDATORS above,
+// never arbitrary text, before it becomes part of a pattern.
+function identityFromPath(file) {
+  const base = file.replace(/^.*\//, '').replace(/\.json$/, '')
+    .replace(new RegExp(`^${values.phase}-`), '');
+  const half = /^(.+)-[a-z]$/.exec(base);
+  return half ? { persona: half[1], agent: base } : { persona: base, agent: null };
 }
 
 const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
@@ -90,7 +123,7 @@ for (const file of positionals) {
     continue;
   }
 
-  const persona = personaFromPath(file);
+  const { persona, agent } = identityFromPath(file);
   // `validatePhase1` only checks that the payload's `persona` equals the one
   // its FILENAME implies, so `round1-referee.json` claiming to be `referee`
   // agreed with itself and validated clean — this bridge blessing a lane that
@@ -101,12 +134,15 @@ for (const file of positionals) {
       + `${DEFAULT_PERSONAS.join(', ')}\n`);
     continue;
   }
-  const err = phase.validate(readJson(file, 'validate'), persona);
+  const err = phase.validate(readJson(file, 'validate'), persona, { agent });
   if (err) {
     failed += 1;
     process.stderr.write(`${file}: ${err}\n`);
   } else {
-    process.stdout.write(`${file}: ok (${persona})\n`);
+    // The identity that was PROVEN, which for a split half is the half — the
+    // orchestrator reads this line, and `ok (auditor)` on a file named
+    // round1-auditor-a.json says less than it looks like it says.
+    process.stdout.write(`${file}: ok (${agent ?? persona})\n`);
   }
 }
 

@@ -43,13 +43,84 @@ test('validates a round1 payload the persona name is read from the filename', ()
   }
 });
 
-test('a split-lane -a/-b suffix is stripped before persona comparison', () => {
+// --- the filename is the identity ------------------------------------------
+// The persona is the lane and the full basename is the AGENT — the half that
+// wrote the file. Both are read here because this is the only component that
+// holds the filename and the payload at once. It used to hold only the first:
+// `.replace(/-[ab]$/, '')` discarded the suffix, so round1-auditor-a.json
+// declaring `"agent": "auditor-b"` validated clean, and half A's own round-2
+// payload then ruled on half A's finding as if it were its sibling's.
+
+test('a split-lane file validates as its shared persona, and reports the half', () => {
   const dir = freshTmp();
   try {
-    const f = write(dir, 'round1-auditor-a.json', goodPhase1);
+    const f = write(dir, 'round1-auditor-a.json', { ...goodPhase1, agent: 'auditor-a' });
     const r = run(['--phase', 'round1', f]);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /ok \(auditor\)/);
+    // The lane is `auditor` — the payload's `persona` was checked against it —
+    // and the identity this line certifies is the half that proved it.
+    assert.match(r.stdout, /ok \(auditor-a\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a payload declaring its SIBLING\'s agent id is refused', () => {
+  const dir = freshTmp();
+  try {
+    for (const phase of ['round1', 'round2']) {
+      const payload = phase === 'round1' ? goodPhase1 : goodPhase2;
+      const f = write(dir, `${phase}-auditor-a.json`, { ...payload, agent: 'auditor-b' });
+      const r = run(['--phase', phase, f]);
+      assert.equal(r.status, 1, `${phase}: ${r.stdout}`);
+      assert.match(r.stderr, /`agent` must be 'auditor-a', got "auditor-b"/);
+      assert.doesNotMatch(r.stdout, /ok \(/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a split-lane file with no `agent` is refused — an unlabeled half is not a half', () => {
+  const dir = freshTmp();
+  try {
+    const f = write(dir, 'round2-auditor-b.json', goodPhase2);
+    const r = run(['--phase', 'round2', f]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /`agent` must be 'auditor-b'/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unsuffixed file accepts a persona-equal `agent` and refuses a half id', () => {
+  const dir = freshTmp();
+  try {
+    const ok = write(dir, 'round1-auditor.json', { ...goodPhase1, agent: 'auditor' });
+    assert.equal(run(['--phase', 'round1', ok]).status, 0);
+
+    // Nothing about round1-auditor.json says a split happened, so a half id is
+    // a claim no filename supports.
+    const bad = write(dir, 'round1-adversary.json',
+      { ...goodPhase1, persona: 'adversary', agent: 'adversary-a' });
+    const r = run(['--phase', 'round1', bad]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /`agent` must be 'adversary', got "adversary-a"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a third half is a lane, not a persona — the suffix is a letter, not just a or b', () => {
+  // parseLane allows up to MAX_SPLIT_AGENTS agents and `agentNames` names the
+  // third one `auditor-c`; the old `-[ab]$` strip read that as a persona named
+  // `auditor-c` and refused a legitimate half as an unknown lane.
+  const dir = freshTmp();
+  try {
+    const f = write(dir, 'round1-auditor-c.json', { ...goodPhase1, agent: 'auditor-c' });
+    const r = run(['--phase', 'round1', f]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ok \(auditor-c\)/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
