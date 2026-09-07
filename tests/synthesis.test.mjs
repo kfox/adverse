@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 
 import {
   isBlocking, isOpenBlocking, mergeSplitCrossReviews, mergeSplitReviews,
-  normalizeVerdict, renderMarkdown, synthesize, toJsonReport, worseVerdict,
+  normalizeVerdict, renderMarkdown, stampedFieldClaim, synthesize, toJsonReport,
+  worseVerdict,
 } from '../src/synthesis.mjs';
 import { renderHtml } from '../src/html.mjs';
 
@@ -1105,6 +1106,34 @@ test('a regression pass marks its findings, and an ordinary round does not', () 
   assert.match(html, /found by a fix commit's regression pass/);
   assert.doesNotMatch(html, /introduced by/,
     'the dashboard must not assert the fix introduced a finding the pass merely found');
+});
+
+test('the stamp a bridge applies is refused from a payload, wherever it is written', () => {
+  // `provenanceOf` above trusts the file. The file is written by a bridge —
+  // and until this guard, by any reviewer who typed the key: a plain
+  // `round1-auditor.json` whose finding carried `"provenance": "regression"`
+  // validated `ok (auditor)` and rendered as "found by the regression pass on
+  // a fix commit that landed", over a pass that never ran.
+  //
+  // The sweep is every list of objects on the payload rather than a named few,
+  // because the phase that grows the next list is the phase that arrives
+  // unguarded. `notes` below is not a key any schema here has.
+  assert.match(stampedFieldClaim({ persona: 'auditor', provenance: 'regression' }),
+    /`provenance` is stamped by the bridge/);
+  assert.match(
+    stampedFieldClaim({ persona: 'auditor', findings: [f('a'), { ...f('b'),
+      provenance: 'regression' }] }),
+    /`findings\[1\]\.provenance` is stamped by the bridge/);
+  assert.match(
+    stampedFieldClaim({ persona: 'auditor', notes: [{ provenance: 'review' }] }),
+    /`notes\[0\]\.provenance` is stamped by the bridge/,
+    'the value does not matter: a payload does not get to say which program wrote it');
+
+  // And the discriminating half — a check that answered every payload would
+  // refuse the whole flow.
+  assert.equal(stampedFieldClaim({ persona: 'auditor', verdict: 'approve', summary: 's',
+    findings: [f('a')], validate: [], challenge: [], added: [] }), null);
+  assert.equal(stampedFieldClaim(null), null, 'an unreadable payload is the schema\'s to refuse');
 });
 
 test('provenance rides on the entry too — a merged payload has one header for two lists', () => {

@@ -23,15 +23,32 @@
 //
 // This header used to call the -a/-b suffix "a filesystem artifact, not part
 // of the identity", and the code acted on it: `.replace(/-[ab]$/, '')` threw
-// the suffix away before anything could hold the payload against it. That made
-// this bridge — the one component holding both the filename and the payload —
-// the place where the system's only unforgeable identity was discarded.
+// the suffix away before anything could hold the payload against it.
 // round1-auditor-a.json declaring `"agent": "auditor-b"` validated clean, and
 // half A's own round-2 payload then ruled on half A's finding as if it were
 // its sibling's: solo -> consensus, openBlocking false -> true, for two
-// characters. The orchestrator names these files when it spawns the agents and
-// each agent writes only the path it was given, so the NAME is evidence and
-// the payload is a claim. Claims are checked against evidence here.
+// characters. The orchestrator names these files when it spawns the agents, so
+// binding the payload's claim to the name it landed under closes that: a
+// payload can no longer disagree with its own path.
+//
+// What the name is NOT is unforgeable, and this header used to say it was. The
+// authority holds only for an agent that writes the one path it was given.
+// Every reviewer subagent has a Write tool and a shared $ADVERSE_RUN, so one
+// that writes a path it was not given supplies its own evidence. Measured, one
+// author, three files:
+//
+//   round1-auditor-a.json + round1-auditor-b.json + round2-auditor-b.json
+//       -> "confidence: consensus", "Open blocking: 1"
+//   round1-auditor-a.json + round1-steward.json (same finding title)
+//       -> "Reported by: auditor, steward · confidence: cross-validated"
+//
+// Both validated clean here, and both are the signal the design trusts most:
+// agreement between agents. Nothing in this repo can close it — the check
+// would have to know which agent wrote a file, and a filesystem does not say.
+// It closes one level up, in the harness, by giving each subagent a directory
+// it alone can write. Until then this bridge catches the CARELESS half and
+// says so, and that is the whole of its claim: it holds a payload against its
+// filename, not against its author.
 
 import { parseArgs } from 'node:util';
 
@@ -41,8 +58,9 @@ import { importFromSrc } from './package-root.mjs';
 const { validateFix, validatePhase1, validatePhase2, validateRegression, validateVerify } =
   await importFromSrc('prompts.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
+const { stampedFieldClaim } = await importFromSrc('synthesis.mjs');
 
-// Null prototype, the same defence combine.mjs already applies to its
+// Null prototype, the same defense combine.mjs already applies to its
 // persona-keyed map. A plain object answers `__proto__` and `constructor` with
 // something truthy, so `--phase __proto__` satisfied the membership guard
 // below and then crashed — violating this bridge's own contract that exit 2
@@ -126,7 +144,8 @@ function identityFromPath(file) {
     .replace(new RegExp(`^${values.phase}-`), '');
   // Stripped only for the phase that HAS passes. Doing it unconditionally
   // would loosen the round1/round2 derivation that binds a half to the file it
-  // was written to, which is the one unforgeable identity in this system.
+  // was written to — the strongest identity this bridge has, and, per the
+  // header, only as strong as an agent writing the path it was given.
   if (phase.passNumbered) base = base.replace(PASS_NUMBER, '');
   const half = /^(.+)-[a-z]$/.exec(base);
   return half ? { persona: half[1], agent: base } : { persona: base, agent: null };
@@ -138,7 +157,7 @@ let failed = 0;
 for (const file of positionals) {
   if (!phase.byPersona) {
     const payload = readJson(file, 'validate');
-    const err = phase.validate(payload);
+    const err = stampedFieldClaim(payload) ?? phase.validate(payload);
     if (err) {
       failed += 1;
       process.stderr.write(`${file}: ${err}\n`);
@@ -162,7 +181,15 @@ for (const file of positionals) {
       + `${DEFAULT_PERSONAS.join(', ')}\n`);
     continue;
   }
-  const err = phase.validate(readJson(file, 'validate'), persona, { agent });
+  // Checked for every phase in the table, before the phase's own schema and
+  // regardless of who is expected to write the file: `provenance` is stamped by
+  // the bridge that writes a regression pass to disk, and a payload that writes
+  // it for itself buys the report's loudest label for a pass that never ran
+  // (src/synthesis.mjs, `stampedFieldClaim`). A reviewer's own round-1 finding
+  // carrying `"provenance": "regression"` used to validate `ok (auditor)` and
+  // render as "found by the regression pass on a fix commit that landed".
+  const payload = readJson(file, 'validate');
+  const err = stampedFieldClaim(payload) ?? phase.validate(payload, persona, { agent });
   if (err) {
     failed += 1;
     process.stderr.write(`${file}: ${err}\n`);

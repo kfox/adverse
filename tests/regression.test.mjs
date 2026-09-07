@@ -24,8 +24,11 @@ const ROUTINE = { files: FILES, diff: diffOf('const gamma = 2.2;') };
 const BOUNDARY = { files: FILES, diff: diffOf('el.innerHTML = req.query.name;') };
 
 test('the trust boundary decides the lens, and its absence is not the same answer', () => {
-  const crossing = chooseRegressionLane({ ...BOUNDARY, closedBy: [] });
-  const ordinary = chooseRegressionLane({ ...ROUTINE, closedBy: [] });
+  // `closesNothing` rather than `closedBy: []`: an empty list is refused now,
+  // because it is what an omitted flag looks like. This test is about the lens,
+  // so it says out loud that there was nothing to exclude.
+  const crossing = chooseRegressionLane({ ...BOUNDARY, closesNothing: true });
+  const ordinary = chooseRegressionLane({ ...ROUTINE, closesNothing: true });
   assert.equal(crossing.persona, 'adversary');
   assert.equal(ordinary.persona, 'auditor');
   assert.equal(crossing.conflicted, false);
@@ -107,7 +110,14 @@ test('unresolvedLanes reports every name this review could not have written', ()
   assert.deepEqual(unresolvedLanes(['pragmatist']), [],
     'the Pragmatist is a lane; that it cannot HOLD a pass is a different rule');
   assert.deepEqual(unresolvedLanes([]), []);
-  assert.deepEqual(unresolvedLanes('auditor'), [], 'a non-array excludes nothing, as before');
+  // This arm used to assert `unresolvedLanes('auditor') -> []`, "a non-array
+  // excludes nothing, as before" — which is the fail-open it was written to
+  // remove, pinned. A caller that passes the wrong shape gets no answer at all
+  // now: the bare string is the plausible mistake (one `--closed-by` before
+  // `multiple: true`), it resolves as a name, so reporting the ITEMS could
+  // never have caught it.
+  assert.throws(() => unresolvedLanes('auditor'), /closedBy must be an array, got string/);
+  assert.throws(() => unresolvedLanes(undefined), /closedBy must be an array, got undefined/);
 });
 
 test('the Pragmatist never runs the pass, not even when nothing else is left', () => {
@@ -121,7 +131,8 @@ test('the Pragmatist never runs the pass, not even when nothing else is left', (
     });
     assert.notEqual(chosen.persona, 'pragmatist');
   }
-  assert.notEqual(chooseRegressionLane({ ...ROUTINE, closedBy: [] }).persona, 'pragmatist');
+  assert.notEqual(chooseRegressionLane({ ...ROUTINE, closesNothing: true }).persona,
+    'pragmatist');
 });
 
 test('an emptied candidate set still returns a lane, and flags itself', () => {
@@ -144,14 +155,57 @@ test('no file list at all fails toward the Adversary, the way assessScope does',
   // An unread diff is not a diff with nothing in it. Both callers of this
   // module hand over whatever git gave them, and a commit nobody could read
   // must not read as a commit with no boundary in it.
-  const chosen = chooseRegressionLane({ closedBy: [], files: [], diff: '' });
+  const chosen = chooseRegressionLane({ closesNothing: true, files: [], diff: '' });
   assert.equal(chosen.persona, 'adversary');
   assert.match(chosen.reason, /crosses a trust boundary/);
 });
 
-test('called with nothing at all, it still answers', () => {
-  const chosen = chooseRegressionLane();
-  assert.equal(typeof chosen.persona, 'string');
-  assert.equal(typeof chosen.reason, 'string');
-  assert.equal(chosen.conflicted, false);
+test('called with no exclusion input at all, it refuses to answer', () => {
+  // This test used to read "called with nothing at all, it still answers" and
+  // assert `typeof chosen.persona === 'string'` — true of every return value,
+  // and what it actually pinned was the fail-open: `chooseRegressionLane()`
+  // chose the auditor and signed "it reported none of the findings this commit
+  // closed" over an exclusion list nobody supplied. There is no honest answer
+  // to give here, so there is no answer.
+  assert.throws(() => chooseRegressionLane(), /closedBy must name at least one agent id/);
+  assert.throws(() => chooseRegressionLane({ ...ROUTINE }),
+    /closedBy must name at least one agent id/);
+  assert.throws(() => chooseRegressionLane({ ...ROUTINE, closedBy: [] }),
+    /closedBy must name at least one agent id/,
+    'an empty list is exactly what an omitted flag looks like');
+  assert.throws(() => chooseRegressionLane({ ...ROUTINE, closedBy: 'auditor' }),
+    /closedBy must be an array, got string/);
+  assert.throws(() => chooseRegressionLane({ ...ROUTINE, closedBy: ['auditor'],
+    closesNothing: true }), /closesNothing contradicts the 1 name\(s\)/,
+  'a caller that says both has not decided which');
+});
+
+test('the only way to exclude nobody is to say so, and the artifact says who said it', () => {
+  // The escape hatch has to stay distinguishable from the fail-open it
+  // replaced. A pass with nothing excluded may not print the sentence a
+  // CHECKED exclusion earns, because the two read identically in a report.
+  const declared = chooseRegressionLane({ ...ROUTINE, closesNothing: true });
+  const checked = chooseRegressionLane({ ...ROUTINE, closedBy: ['steward'] });
+
+  assert.match(declared.reason, /the caller declared that this commit closes no finding/);
+  assert.doesNotMatch(declared.reason, /it reported none of the findings/);
+  assert.match(checked.reason, /it reported none of the findings this commit closed/);
+  assert.doesNotMatch(checked.reason, /the caller declared/);
+  assert.equal(declared.conflicted, false);
+  assert.deepEqual(declared.unresolved, []);
+});
+
+test('a commit description this module cannot read is refused, not assessed', () => {
+  // The same fail-open one field over: a non-list `files` is iterated character
+  // by character and a non-string `diff` stringifies to something with no added
+  // lines in it, so both end at "crosses no trust boundary" — an assessment of
+  // a commit nobody read, over the input that decides whether the Adversary is
+  // the lane. Measured on the unguarded version: `files: 'src/render.mjs'` chose
+  // the auditor and reported no trust-boundary signal.
+  assert.throws(() => chooseRegressionLane(
+    { closedBy: ['auditor'], files: 'src/render/palette.mjs', diff: BOUNDARY.diff }),
+  /files must be an array, got string/);
+  assert.throws(() => chooseRegressionLane(
+    { closedBy: ['auditor'], files: FILES, diff: { added: 'el.innerHTML = q' } }),
+  /diff must be a string, got object/);
 });

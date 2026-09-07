@@ -447,3 +447,77 @@ test('a filename implying a persona outside the registry is refused', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- the fields a bridge stamps, and a payload may not claim ----------------
+// `provenance` is what makes the report print "found by the regression pass on
+// a fix commit that landed" beside a finding, and the bridge that writes a
+// Phase 9 pass to disk is what puts it there. Nothing checked who wrote it, so
+// any reviewer's own payload could buy the label for a pass that never ran.
+
+test('a round-1 finding cannot stamp itself as the regression pass\'s work', () => {
+  const dir = freshTmp();
+  try {
+    const f = write(dir, 'round1-auditor.json', {
+      ...goodPhase1,
+      verdict: 'conditional',
+      findings: [{
+        severity: 'critical', kind: 'defect', title: 'the drain lost its bound',
+        detail: 'forged provenance on an ordinary round-1 finding',
+        provenance: 'regression',
+      }],
+    });
+    const r = run(['--phase', 'round1', f]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /`findings\[0\]\.provenance` is stamped by the bridge/);
+    assert.doesNotMatch(r.stdout, /ok \(/,
+      'this used to print ok (auditor) and render as the regression pass\'s work');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the same field is refused on the payload header, and in every phase', () => {
+  // Both levels, because `provenanceOf` reads the header as well as the entry —
+  // and every phase in the table, because a whitelist of the phases somebody
+  // remembered is how the next one arrives unguarded. The fix phase is in here
+  // too: it is not lane-scoped, so it takes the other branch of the loop.
+  const dir = freshTmp();
+  try {
+    const cases = [
+      ['round1', 'round1-auditor.json', { ...goodPhase1, provenance: 'regression' }],
+      ['round2', 'round2-auditor.json', { ...goodPhase2, provenance: 'regression' }],
+      ['verify', 'verify-auditor.json', { ...goodVerify, provenance: 'regression' }],
+      ['fix', 'fix-auth-guard.json', { ...goodFix, provenance: 'regression' }],
+      ['regression', 'regression-auditor-1.json',
+        { ...goodRegression(), provenance: 'regression' }],
+    ];
+    for (const [phase, name, payload] of cases) {
+      const r = run(['--phase', phase, write(dir, name, payload)]);
+      assert.equal(r.status, 1, `${phase}: ${r.stdout}`);
+      assert.match(r.stderr, /`provenance` is stamped by the bridge/, phase);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ordinary payload is not accused of stamping anything', () => {
+  // The discriminating case: a check that refused every payload would satisfy
+  // both tests above.
+  const dir = freshTmp();
+  try {
+    const f = write(dir, 'round1-auditor.json', {
+      ...goodPhase1,
+      verdict: 'conditional',
+      findings: [{
+        severity: 'warning', kind: 'defect', title: 'an ordinary finding',
+        detail: 'no stamp on it',
+      }],
+    });
+    const r = run(['--phase', 'round1', f]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ok \(auditor\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

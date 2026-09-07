@@ -109,6 +109,28 @@ function laneOf(agent) {
   return DEFAULT_PERSONAS.find((p) => agent === p || agent.startsWith(`${p}-`)) ?? null;
 }
 
+// The three input shapes this module refuses to guess at, because guessing at
+// any of them is the SAME fail-open: a non-list `closedBy` read as "no name in
+// here is unreadable", a non-list `files` iterated character by character, and
+// a non-string `diff` stringified into something with no added lines in it. Two
+// of those three end at "looked and found no trust boundary" and the third at
+// "nobody to exclude", and all three are silent. There is no shape-tolerant
+// answer here that is not a claim about a commit nobody read.
+function shapeOf(value) {
+  if (value === null) return 'null';
+  return Array.isArray(value) ? 'array' : typeof value;
+}
+
+function requireArray(value, label) {
+  if (Array.isArray(value)) return value;
+  throw new TypeError(`regression: ${label} must be an array, got ${shapeOf(value)}`);
+}
+
+function requireString(value, label) {
+  if (typeof value === 'string') return value;
+  throw new TypeError(`regression: ${label} must be a string, got ${shapeOf(value)}`);
+}
+
 // The `closedBy` entries that are not an agent id this review produces, in the
 // order given — `Auditor` (a persona this registry does not spell that way),
 // `auditor_a` (not the id shape), `auditor-ab` (a lane, but not a half
@@ -131,12 +153,68 @@ function laneOf(agent) {
 // skill bridge refuses the run at exit 2 (skills/adverse-review/scripts/
 // regression.mjs), and `chooseRegressionLane` carries it in both the
 // `unresolved` field and the `reason` it signs.
+//
+// The ARGUMENT is a list, and a non-list is a caller bug this will not guess
+// at. `Array.isArray(closedBy) ? closedBy : []` read a string, an object or a
+// number as "a list with no unreadable names in it" — the same fail-open as an
+// omitted flag, reached by passing the wrong shape: `unresolvedLanes('auditor')`
+// answered `[]`, the bridge read that as "every name checks out", and every
+// lane stayed eligible including the one that reported the fix. Wrapping the
+// value in a list instead would not have closed it either, because the
+// plausible mistake is a single well-formed name (`--closed-by` before
+// `multiple: true`), which resolves and so reports nothing. Only the shape can
+// be refused, so the shape is refused here.
 export function unresolvedLanes(closedBy) {
-  const names = Array.isArray(closedBy) ? closedBy : [];
-  return names.filter((agent) => {
+  requireArray(closedBy, 'closedBy');
+  return closedBy.filter((agent) => {
     const lane = laneOf(agent);
     return lane === null || !isLaneAgent(lane, agent);
   });
+}
+
+// What makes an exclusion input USABLE, written down because the DEFAULT is a
+// refusal and a default nobody writes down is a default nobody checked.
+//
+// Usable, and nothing else is:
+//
+//   closedBy: ['auditor', 'steward-b', …]   one or more ids; every lane any of
+//                                           them names is out of the running
+//   closesNothing: true                     the caller's explicit claim that
+//                                           this commit closes no finding any
+//                                           lane reported, so nothing is
+//                                           excluded and the artifact says on
+//                                           whose word
+//
+// The default — the key omitted, `[]`, `null`, a bare string, a number, or both
+// forms at once — throws. `closedBy = []` used to be the default, and `[]` is
+// indistinguishable from "I forgot the flag": the pass then took the first lane
+// in the preference order and signed a `reason` reading "it reported none of the
+// findings this commit closed", which is the exact fail-open this module exists
+// to prevent, reached by typing LESS rather than by typing something wrong.
+// Measured on the bridge before this guard: `regression.mjs --repo . --commit
+// HEAD` with no `--closed-by` at all exited 0 and printed
+// "auditor: … and it reported none of the findings this commit closed".
+//
+// Thrown, not returned, and that is a different call from `unresolvedLanes`'.
+// There a lane still has to be chosen and the caller owns the exit code. Here
+// no lane can be chosen honestly — every return value asserts a disinterest
+// nothing checked — and a throw is the one answer no caller can mistake for a
+// clean artifact.
+function requireExclusionInput(closedBy, closesNothing) {
+  const given = closedBy !== undefined && closedBy !== null;
+  if (given) requireArray(closedBy, 'closedBy');
+  const named = given && closedBy.length > 0;
+
+  if (closesNothing && named) {
+    throw new TypeError('regression: closesNothing contradicts the'
+      + ` ${closedBy.length} name(s) in closedBy — a commit either closes findings some lane`
+      + ' reported or it does not');
+  }
+  if (!closesNothing && !named) {
+    throw new TypeError('regression: closedBy must name at least one agent id that reported a'
+      + ' finding this commit closed; pass closesNothing: true to state that none did.'
+      + ' An empty or absent list would make this pass claim a disinterest nothing checked');
+  }
 }
 
 // `closedBy` is the set of personas (or split-lane agent ids) that reported the
@@ -148,8 +226,17 @@ export function unresolvedLanes(closedBy) {
 // of the Adversary reading a fix commit with no boundary in it is one model
 // call, and the cost of the Auditor reading one that has a boundary in it is a
 // vulnerability nobody looked for.
-export function chooseRegressionLane({ closedBy = [], files = [], diff = '' } = {}) {
-  const scope = assessScope({ files, diff });
+//
+// `closesNothing` is the caller stating, on the record, that this commit closes
+// no finding any lane reported. It is the only way to run the pass with nothing
+// excluded, and it exists so that omitting `closedBy` cannot be that way: see
+// `requireExclusionInput`.
+export function chooseRegressionLane(
+  { closedBy, files = [], diff = '', closesNothing = false } = {}) {
+  requireExclusionInput(closedBy, closesNothing);
+  const names = closedBy ?? [];
+  const scope = assessScope(
+    { files: requireArray(files, 'files'), diff: requireString(diff, 'diff') });
   const boundary = scope.recommend === 'run';
   const order = boundary ? CANDIDATE_ORDER.boundary : CANDIDATE_ORDER.routine;
   const lens = boundary
@@ -157,12 +244,12 @@ export function chooseRegressionLane({ closedBy = [], files = [], diff = '' } = 
     : `the fix diff crosses no trust boundary (${scope.reason})`;
 
   const reported = new Set();
-  for (const agent of Array.isArray(closedBy) ? closedBy : []) {
+  for (const agent of names) {
     const lane = laneOf(agent);
     if (lane) reported.add(lane);
   }
 
-  const unresolved = unresolvedLanes(closedBy);
+  const unresolved = unresolvedLanes(names);
   // The caveat rides in the sentence the artifact prints, not only in the field
   // beside it: the harm was never the lane chosen, it was a `reason` claiming
   // the pass is disinterested while part of the exclusion list had been
@@ -175,14 +262,24 @@ export function chooseRegressionLane({ closedBy = [], files = [], diff = '' } = 
       + ' review produces — read the exclusion above as approximate'
     : '';
 
+  // Whose word the disinterest rests on. With a list, the sentence is checked
+  // against it. Under `closesNothing` there is no list to check it against, so
+  // the sentence attributes the claim instead of asserting it — an artifact
+  // that says "it reported none of the findings this commit closed" when
+  // nothing was excluded is the fail-open in prose, and it reads identically to
+  // a pass that really was disinterested.
+  const disinterest = closesNothing
+    ? 'the caller declared that this commit closes no finding any lane reported, so no lane'
+      + ' was excluded on this run'
+    : 'it reported none of the findings this commit closed';
+
   const disinterested = order.find((persona) => !reported.has(persona));
   if (disinterested) {
     return {
       persona: disinterested,
       conflicted: false,
       unresolved,
-      reason: `${disinterested}: ${lens}, and it reported none of the findings this`
-        + ` commit closed${dropped}`,
+      reason: `${disinterested}: ${lens}, and ${disinterest}${dropped}`,
     };
   }
 

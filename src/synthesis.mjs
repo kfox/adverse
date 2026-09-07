@@ -133,6 +133,53 @@ function provenanceOf(payload, entry) {
     ? PROVENANCE.regression : PROVENANCE.review;
 }
 
+// The other half of that rule: WHO may write the field it reads.
+//
+// `provenanceOf` trusts the file, and the file is written by a bridge —
+// skills/adverse-review/scripts/regression.mjs stamps `regression` on the
+// findings a Phase 9 pass produced, after validating the pass's own payload.
+// Nothing checked that, so any reviewer could put the key on an ordinary
+// round-1, round-2 or verify finding and buy the report's loudest label.
+// Measured before this guard, on a plain `round1-auditor.json` whose finding
+// carried `"provenance": "regression"`:
+//
+//   validate.mjs --phase round1 round1-auditor.json   ->  ok (auditor), exit 0
+//   the rendered report              ->  _Reported by: auditor · confidence:
+//                                        solo · found by the regression pass on
+//                                        a fix commit that landed_
+//
+// No pass ran, no commit was named, and that sentence is the one that points a
+// human at a revert. So the field is INADMISSIBLE from an agent — refused, not
+// stripped, because a reviewer that wrote it either misread the schema or was
+// reaching for a label it has not earned, and each is worth a sentence back.
+// What a bridge stamps, it stamps after this check.
+//
+// Every list of objects on the payload is swept, not a named few: `findings`,
+// `added`, `verified`, `validate`, `challenge` and whatever a later phase adds
+// all reach a reader eventually, and a whitelist would have to be edited by
+// whoever adds the next one. Depth one is enough because that is the depth at
+// which `provenanceOf` reads.
+const BRIDGE_STAMPED_FIELD = 'provenance';
+
+function payloadStampSite(payload) {
+  if (BRIDGE_STAMPED_FIELD in payload) return BRIDGE_STAMPED_FIELD;
+  for (const [key, list] of Object.entries(payload)) {
+    if (!Array.isArray(list)) continue;
+    const at = list.findIndex((e) => e && typeof e === 'object' && BRIDGE_STAMPED_FIELD in e);
+    if (at !== -1) return `${key}[${at}].${BRIDGE_STAMPED_FIELD}`;
+  }
+  return null;
+}
+
+export function stampedFieldClaim(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const site = payloadStampSite(payload);
+  if (!site) return null;
+  return `\`${site}\` is stamped by the bridge that writes a regression pass to disk,`
+    + ' not claimed by a payload: it is what makes the report say a fix commit introduced'
+    + ' a finding. Remove the key.';
+}
+
 // What the report says beside a finding the regression pass found. Spelled out
 // rather than printing the bare word: `regression` next to `confidence: solo`
 // reads as another confidence label, and the fact that matters to a reader

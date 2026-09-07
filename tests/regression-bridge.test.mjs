@@ -169,6 +169,106 @@ test('a payload cannot write a heading into the report through its `commit`', ()
   }
 });
 
+test("an earlier iteration's leftover pass file is refused, not re-signed", () => {
+  // The Phase 9 loop reuses $ADVERSE_RUN and pass numbers restart at 1, so
+  // iteration 2 overwrites `-1` and leaves `-2` for its own glob to find.
+  // Measured on the unguarded fold: the second call printed `2 pass(es) from
+  // 1 lane(s)` and signed `regression pass on newcommit, bbbbbb2` — a commit
+  // from the previous iteration presented as this iteration's evidence.
+  const dir = freshTmp();
+  try {
+    const names = ['regression-adversary-1.json', 'regression-adversary-2.json'];
+    const first = fold(dir, {
+      [names[0]]: pass({ commit: 'aaaaaa1' }),
+      [names[1]]: pass({ commit: 'bbbbbb2' }),
+    });
+    assert.equal(first.status, 0, first.stderr);
+
+    // Iteration 2 rewrites pass 1 only. Pass 2 is a leftover.
+    const second = fold(dir, {
+      [names[0]]: pass({ commit: 'ccccccc3' }),
+      [names[1]]: pass({ commit: 'bbbbbb2' }),
+    });
+    assert.equal(second.status, 2, second.stdout);
+    assert.match(second.stderr, /bbbbbb2\) name commits this outdir has already folded/);
+    assert.doesNotMatch(second.stderr, /ccccccc3/, 'the pass written for THIS fold is not blamed');
+
+    const lane = JSON.parse(readFileSync(path.join(dir, 'round1-adversary.regression.json'),
+      'utf-8'));
+    assert.deepEqual(lane.passes.map((x) => x.commit), ['aaaaaa1', 'bbbbbb2'],
+      'the refused fold wrote nothing: the lane file is still iteration 1\'s');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a second fold of freshly-written passes is not blamed for the first', () => {
+  // The discriminating case for the test above: the guard keys on the commit a
+  // pass names, so an iteration that re-ran every pass has nothing stale in it
+  // and must not need a flag. A guard on "the lane file already exists" would
+  // refuse this one too.
+  const dir = freshTmp();
+  try {
+    const first = fold(dir, { 'regression-adversary-1.json': pass({ commit: 'aaaaaa1' }) });
+    assert.equal(first.status, 0, first.stderr);
+    const second = fold(dir, { 'regression-adversary-1.json': pass({ commit: 'bbbbbb2' }) });
+    assert.equal(second.status, 0, second.stderr);
+    const lane = JSON.parse(readFileSync(path.join(dir, 'round1-adversary.regression.json'),
+      'utf-8'));
+    assert.deepEqual(lane.passes.map((x) => x.commit), ['bbbbbb2']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--refold is how a deliberate re-read of the same commit says so', () => {
+  const dir = freshTmp();
+  try {
+    const files = { 'regression-adversary-1.json': pass({ commit: 'aaaaaa1' }) };
+    assert.equal(fold(dir, files).status, 0);
+    const again = run(['--payload', path.join(dir, 'regression-adversary-1.json'),
+                       '--outdir', dir, '--refold']);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /1 pass\(es\) from 1 lane\(s\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a lane file this fold cannot read is refused, rather than overwritten blind', () => {
+  // The fold cannot tell which passes it would re-sign, which is the same
+  // question the guard above answers — so it refuses in the same direction
+  // instead of treating an unreadable file as an empty one.
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'round1-adversary.regression.json'), '{ truncated');
+    const r = fold(dir, { 'regression-adversary-1.json': pass({ commit: 'aaaaaa1' }) });
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /cannot be read as an earlier fold/);
+    assert.equal(readFileSync(path.join(dir, 'round1-adversary.regression.json'), 'utf-8'),
+      '{ truncated', 'the file it could not read is also the file it did not clobber');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a pass payload cannot pre-stamp the provenance this bridge applies', () => {
+  // `provenance` is what makes the report say a fix commit introduced a
+  // finding, and it is the bridge's stamp. A payload that writes it is claiming
+  // the authority of the program that wrote the file.
+  const dir = freshTmp();
+  try {
+    const r = fold(dir, {
+      'regression-adversary-1.json': pass({ provenance: 'regression' }),
+    });
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /`provenance` is stamped by the bridge/);
+    assert.throws(() => readFileSync(path.join(dir, 'round1-adversary.regression.json')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an unknown persona is exit 1 — the payload read fine and failed the domain check', () => {
   const dir = freshTmp();
   try {
@@ -205,7 +305,11 @@ test('a commit nobody can read still names a lane, loudly', () => {
   // Silence is the failure mode this whole pass exists to remove, so an
   // unreadable commit reports itself and falls toward the Adversary rather than
   // choosing as if the diff were empty.
-  const r = run(['--repo', ROOT, '--commit', 'no-such-rev-here', '--json']);
+  // `--closed-by` is required now, so it is supplied here: this test is about
+  // the unreadable commit, and a run refused for a missing flag would never
+  // reach the git call.
+  const r = run(['--repo', ROOT, '--commit', 'no-such-rev-here',
+                 '--closed-by', 'auditor', '--json']);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /cannot read no-such-rev-here/);
   assert.equal(JSON.parse(r.stdout).persona, 'adversary');
@@ -257,6 +361,41 @@ test('a split lane\'s half is a --closed-by name the bridge accepts', () => {
   const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by', 'auditor-a', '--json']);
   assert.equal(r.status, 0, r.stderr);
   assert.notEqual(JSON.parse(r.stdout).persona, 'auditor');
+});
+
+test('no --closed-by at all is refused, and nothing is printed about a lane', () => {
+  // The arm the earlier fix left open. `--closed-by Auditor` and
+  // `--closed-by auditor-ab` were refused while the plain OMISSION still exited
+  // 0 and printed "auditor: … and it reported none of the findings this commit
+  // closed" with no exclusion applied at all — a clean artifact asserting a
+  // disinterest nothing checked, which is the fail-open the whole guard was
+  // for, reached by typing less instead of typing something wrong.
+  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--json']);
+  assert.equal(r.status, 2, r.stdout);
+  assert.match(r.stderr, /--closed-by is required/);
+  assert.match(r.stderr, /--closed-by-none/, 'the refusal names the escape hatch');
+  assert.equal(r.stdout, '', 'no lane was chosen, so no lane is named');
+});
+
+test('--closed-by-none runs the pass and says on whose word nobody was excluded', () => {
+  // The escape hatch, and the discriminating half of the test above: refusing
+  // the omission must not make the pass unrunnable on a commit that closes no
+  // reported finding. What it must not do is produce the same sentence a
+  // checked exclusion earns.
+  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by-none', '--json']);
+  assert.equal(r.status, 0, r.stderr);
+  const choice = JSON.parse(r.stdout);
+  assert.match(choice.reason, /the caller declared that this commit closes no finding/);
+  assert.doesNotMatch(choice.reason, /it reported none of the findings/);
+  assert.deepEqual(choice.unresolved, []);
+});
+
+test('--closed-by-none beside a --closed-by name is refused, not merged', () => {
+  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by-none',
+                 '--closed-by', 'auditor', '--json']);
+  assert.equal(r.status, 2, r.stdout);
+  assert.match(r.stderr, /--closed-by-none contradicts/);
+  assert.equal(r.stdout, '');
 });
 
 test('neither mode selected is a usage error', () => {

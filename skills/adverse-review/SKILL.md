@@ -1060,6 +1060,13 @@ spelled the way the registry spells it — lowercase, or a split lane's half lik
 handed the pass to the lane that reported the finding under a line asserting it
 had reported none of them.
 
+**The flag is required, and omitting it is the same failure spelled shorter.**
+With no `--closed-by` at all the run used to exit 0 having excluded nobody,
+under that same line — a clean artifact claiming a disinterest nothing checked.
+If the commit really closes no reported finding, say so with
+`--closed-by-none`: the pass then runs with nothing excluded and its `reason`
+attributes that to you rather than asserting it. The two cannot be combined.
+
 The answer is the Adversary when the fix diff crosses a trust boundary and the
 Auditor otherwise (`assessScope`, the same signal that gates the Adversary in
 Phase 1), skipping any lane that reported into the commit — and never the
@@ -1082,6 +1089,14 @@ one iteration, so `regression-<persona>.json` for all of them means N−1 passes
 overwrite each other and vanish before the glob below ever runs. Number them
 from 1 in the order you spawn them: `regression-auditor-1.json`,
 `regression-auditor-2.json`.
+
+Numbering restarts each iteration, and the loop reuses `$ADVERSE_RUN`, so
+iteration 2 overwrites `-1` and *leaves iteration 1's `-2` and `-3` for its own
+glob to pick up* — the Phase 0 "never reuse a fixed run directory" rule, one
+directory deeper. The fold refuses that rather than trusting you to remember
+it: a pass file naming a commit this outdir already folded is exit 2, naming
+the file and the commit. Delete the leftovers, fold into a fresh `--outdir`, or
+pass `--refold` when re-reading the same commit is what you meant.
 
 Digits, never letters. `regression-auditor-c.json` is a well-formed *split-lane
 half* id everywhere else in this skill, and round 2's independence signal keys
