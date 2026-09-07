@@ -1152,6 +1152,16 @@ reopened finding keeps the severity, kind and anchor it was first reported
 with. Without it each one falls back to a blocking `warning`/`behavioral`:
 noisy rather than silent, and recoverable by passing the flag.
 
+The bridge binds by id and then by title, and the second route is not a
+convenience. `briefing.json` is the round-2 *prompt*, built from round 1, and
+`report.json` carries no ids at all — so a finding a round-2 reviewer **added**
+has no briefing id and never will. Binding by id alone put every verification
+of one at the blocking fallback, which for a `design` finding contradicts the
+rule that design never blocks and made the loop unable to converge on advisory
+work. A title that matches two briefed findings binds to neither: it cannot say
+which is meant, and guessing is how a severity gets copied off the wrong
+finding, so that case falls back to blocking and says so.
+
 The full `verified` array also rides along on the reshaped file, so you can
 read every disposition — closed and moot included — while deciding what to
 record in Phase 7. It is not carried into `report.json`: the dispositions that

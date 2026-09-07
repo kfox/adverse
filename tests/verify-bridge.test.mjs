@@ -311,3 +311,71 @@ test('a still-open verification with an empty title still reaches findings', () 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- a round-2 addition can only ever bind by title ------------------------
+// `briefing.json` IS the round-2 prompt, built from round 1, and `report.json`
+// carries no ids at all — so a finding a round-2 reviewer ADDED has no briefing
+// id and never will. Binding by id alone left every verification of one at the
+// blocking `warning`/`behavioral` fallback, which for a `design` finding
+// contradicts the rule that design never blocks, and which SKILL.md wrongly
+// described as "recoverable by passing the flag".
+
+test('a reopened design finding binds by title when its id is not in the briefing', () => {
+  const dir = freshTmp();
+  try {
+    const briefing = briefingWith(dir, {
+      id: 'F1', severity: 'info', kind: 'design', file: 'src/a.mjs', line: 5,
+      counterpart: null, title: 'the module is two modules in one file', fix: null,
+    });
+    const src = path.join(dir, 'verify-pragmatist.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'pragmatist',
+      // The id names nothing: this finding was added in round 2.
+      verified: [{ id: 'R2-3', title: 'the module is two modules in one file',
+        status: 'open', reason: 'the seam is unchanged' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /anchor not inherited/);
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-pragmatist.verified.json'), 'utf8')).findings;
+    assert.equal(f.kind, 'design', 'an advisory finding must not come back blocking');
+    assert.equal(f.severity, 'info');
+    assert.equal(f.file, 'src/a.mjs');
+    assert.equal(f.line, 5);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ambiguous title binds to neither finding and falls back to blocking', () => {
+  // Two briefed findings share a title, so it cannot say which is meant.
+  // Guessing is how a severity gets copied off the wrong finding, so this
+  // fails toward blocking and says so.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: [
+      { id: 'F1', severity: 'info', kind: 'design', file: 'a.mjs', line: 5,
+        counterpart: null, title: 'same title', fix: null },
+      { id: 'F2', severity: 'critical', kind: 'behavioral', file: 'b.mjs', line: 9,
+        counterpart: null, title: 'same title', fix: null },
+    ] }));
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'nope', title: 'same title', status: 'open', reason: 'r' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 1, 'an unbindable verification is reported, not silent');
+    assert.match(r.stderr, /no briefed finding titled "same title"/);
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
+    assert.equal(f.kind, 'behavioral', 'the blocking fallback, not a guess');
+    assert.equal(f.severity, 'warning');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

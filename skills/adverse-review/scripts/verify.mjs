@@ -79,6 +79,8 @@ if (!values.verify.length || !values.outdir) {
 const claimDest = makeWriteGuard('verify');
 
 
+const normalizeTitle = (s) => (typeof s === 'string' ? s.trim().toLowerCase().replace(/\s+/g, ' ') : '');
+
 // The anchor a reopened finding gets when `--briefing` did not supply one.
 // Blocking on purpose: `isBlocking` is `kind is not advisory && severity is
 // not info`, so any weaker default would silently un-block the verification
@@ -88,15 +90,39 @@ const REOPENED_FALLBACK = { severity: 'warning', kind: 'behavioral' };
 // Every finding the previous round briefed, by the ID the verify payload
 // references. Absent without `--briefing`, which is why the fallback above has
 // to stand on its own.
+//
+// Also indexed by TITLE, because an id lookup alone cannot reach a whole class
+// of finding. `briefing.json` IS the round-2 prompt, built from round 1, and
+// `report.json` carries no ids at all — so a finding a round-2 reviewer ADDED
+// has no briefing id, ever, and its verification is unbindable however
+// carefully the operator names it. Measured: a `design`/`info` addition
+// reopened by an unbindable id came back `behavioral`/`warning` with a null
+// anchor and BLOCKED the loop, with `--briefing` passed and the title matching
+// exactly. That breaks two rules at once — "`design` findings never block", and
+// this Skill's own remedy for the fallback ("recoverable by passing the flag",
+// which for this class it is not).
+//
+// A title match is not a weaker key than an id here, it is the stronger one:
+// the id is reviewer-supplied and unbound, and `bindToBriefing` already refuses
+// an id whose entry disagrees with the payload's title. The attack that
+// motivated that check — name an `info` id to make a critical come back
+// non-blocking — is not reachable through a title, because matching a
+// finding's title IS naming that finding.
 const briefed = new Map();
+const briefedByTitle = new Map();
 if (values.briefing) {
   const doc = readJson(values.briefing, 'verify');
   for (const f of doc?.findings ?? []) {
-    if (f && typeof f.id === 'string') briefed.set(f.id, f);
+    if (!f) continue;
+    if (typeof f.id === 'string') briefed.set(f.id, f);
+    const key = normalizeTitle(f.title);
+    // First writer wins, and an ambiguous title indexes nothing: two findings
+    // sharing one title cannot be told apart by it, and guessing which is
+    // meant is how a severity gets copied off the wrong finding.
+    if (key) briefedByTitle.set(key, briefedByTitle.has(key) ? null : f);
   }
 }
 
-const normalizeTitle = (s) => (typeof s === 'string' ? s.trim().toLowerCase().replace(/\s+/g, ' ') : '');
 
 // The briefing entry a verification is actually ABOUT, or null.
 //
@@ -114,10 +140,16 @@ const normalizeTitle = (s) => (typeof s === 'string' ? s.trim().toLowerCase().re
 // id that resolves to nothing is reported the way repair.mjs reports one.
 function bindToBriefing(v, src) {
   if (!briefed.size) return null;
-  const entry = briefed.get(v.id);
+  let entry = briefed.get(v.id);
   if (!entry) {
+    // The id named nothing. Fall back to the title, which is the join key every
+    // downstream edge already rides on — see the index above for why this is
+    // the only route a round-2 addition has.
+    const byTitle = briefedByTitle.get(normalizeTitle(v.title));
+    if (byTitle) return byTitle;
     process.stderr.write(`  ! verify: ${src}: unresolvable id ${JSON.stringify(v.id)}`
-      + ` (title: ${JSON.stringify(v.title)}) — anchor not inherited\n`);
+      + ` and no briefed finding titled ${JSON.stringify(v.title)}`
+      + ' — anchor not inherited\n');
     process.exitCode = 1;
     return null;
   }
