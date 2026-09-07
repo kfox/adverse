@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -358,6 +358,39 @@ test('a prior fold that is not a regular file is refused with --refold too', () 
   }
 });
 
+test('a symlink at the derived path is refused, and its target is not written through', () => {
+  // The same near miss again, one field varied once more, and this one is a
+  // write primitive rather than a crash. `statSync` FOLLOWS a symlink, so a
+  // link whose target is a regular file answered `isFile()` true, and the fold
+  // wrote through it to a path the run directory does not own. That write
+  // became reachable in the same commit that put the unreadable arm behind
+  // `--refold`: before it, a planted link exited 2 with the target intact;
+  // after it, `--refold` overwrote the target and exited 0 reporting success.
+  // Any agent that can write in the run directory can plant the link.
+  for (const args of [[], ['--refold']]) {
+    const dir = freshTmp();
+    try {
+      const target = path.join(dir, 'not-ours.json');
+      writeFileSync(target, '{"keep":"me"}');
+      symlinkSync(target, path.join(dir, 'round1-auditor.regression.json'));
+      const files = twoLanes(dir);
+      for (const [name, payload] of Object.entries(files)) {
+        writeFileSync(path.join(dir, name), JSON.stringify(payload));
+      }
+      const r = run(['--payload', ...Object.keys(files).map((n) => path.join(dir, n)),
+                     '--outdir', dir, ...args]);
+      assert.equal(r.status, 2, `${JSON.stringify(args)}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /is not a regular file/);
+      assert.equal(readFileSync(target, 'utf-8'), '{"keep":"me"}',
+        'the link target must not be written through');
+      assert.throws(() => readFileSync(path.join(dir, 'round1-steward.regression.json')),
+        'the lane beside the unwritable path is not published either');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('a pass payload cannot pre-stamp the provenance this bridge applies', () => {
   // `provenance` is what makes the report say a fix commit introduced a
   // finding, and it is the bridge's stamp. A payload that writes it is claiming
@@ -536,8 +569,14 @@ test('the printed sentence does not accuse a documentation fix of crossing a bou
     assert.equal(r.status, 0, r.stderr);
     assert.doesNotMatch(r.stdout, /crosses a trust boundary/);
     assert.match(r.stdout, /holds lines no signal could read/);
-    // And the Steward is not demoted past the Adversary on a docs-only fix.
-    assert.match(r.stdout, /^regression lane for HEAD: auditor$/m);
+    // The Adversary leads, and on a docs-only fix that is a real cost paid on
+    // purpose: the same trigger fires when a bounded-span signal has been
+    // padded out of reach, so the alternative is letting an author choose a
+    // non-Adversary reviewer by making one line long. The SENTENCE above is
+    // what this test is really about, and it is unchanged — the fix that
+    // stopped the gate claiming a boundary was crossed was right; only the
+    // routing inference inside it was backwards.
+    assert.match(r.stdout, /^regression lane for HEAD: adversary$/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

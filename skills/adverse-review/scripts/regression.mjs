@@ -54,7 +54,7 @@
 // no way out but deleting the file.
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
@@ -276,8 +276,17 @@ function readPayload(src) {
 // second, because it is a path this bridge cannot WRITE either — `--refold`
 // promises to overwrite the file and a directory does not take an overwrite. So
 // it is separated here and refused unconditionally below.
+// `lstatSync`, not `statSync`, and the difference is a write primitive. `statSync`
+// follows symlinks, so a symlink whose target is a regular file answers
+// `isFile()` true and the fold writes THROUGH it to a path the run directory
+// does not own. That write became reachable in the same commit that put the
+// unreadable arm behind `--refold`: before it, a planted symlink exited 2 with
+// the target intact; after it, `--refold` overwrote the target and exited 0
+// reporting success. `lstatSync` describes the link itself, which is not a
+// regular file, so it takes the unwritable arm below and is refused with or
+// without the flag. It also cannot raise ELOOP, since it never resolves a chain.
 function priorFold(dest) {
-  const stat = statSync(dest, { throwIfNoEntry: false });
+  const stat = lstatSync(dest, { throwIfNoEntry: false });
   if (!stat) return { commits: new Set() };
   if (!stat.isFile()) return { commits: new Set(), unwritable: dest };
   try {

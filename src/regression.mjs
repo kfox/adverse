@@ -91,8 +91,20 @@ const LENS = Object.freeze({
   [SCOPE_TRIGGER.boundary]: Object.freeze({
     order: 'boundary', clause: 'the fix diff crosses a trust boundary',
   }),
+  // `boundary`, not `routine`, and the reasoning that first put `routine` here
+  // had it exactly backwards. An unreadable line does establish only that the
+  // gate could not read it — but the way a line becomes unreadable is that
+  // something padded it past a bounded span, and several CONTENT_SIGNALS are
+  // bounded spans between two literals (`/\bSELECT\b.{0,200}?\bFROM\b/is`).
+  // So this trigger is precisely the signal-DEFEATED case, which makes it the
+  // Adversary's highest-value input rather than its lowest. Measured: a line
+  // with 710 characters of column list between SELECT and FROM, wrapping
+  // `req.params.id` into a raw query, selected `adversary` before the trigger
+  // existed and `auditor` after — while `assessScope` still said `run` both
+  // times, so `planReview` was unaffected and only this one-lane choice moved.
+  // The clause stays as it is: the sentence was never the part that was wrong.
   [SCOPE_TRIGGER.unreadable]: Object.freeze({
-    order: 'routine', clause: 'the fix diff holds lines no signal could read',
+    order: 'boundary', clause: 'the fix diff holds lines no signal could read',
   }),
   [SCOPE_TRIGGER.noFileList]: Object.freeze({
     order: 'boundary', clause: 'the fix diff could not be assessed for a trust boundary',

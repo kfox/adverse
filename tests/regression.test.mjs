@@ -250,26 +250,53 @@ test('a length-only trigger does not claim a boundary was crossed', () => {
   assert.match(short.reason, /crosses no trust boundary/);
 });
 
-test('a length-only trigger keeps the routine order, so the Steward is not demoted to last', () => {
-  // The decision the finding turns on. A documentation-only fix commit is the
-  // archetype of the middle category src/regression.mjs places the Steward
-  // ahead of the Adversary to catch, and the backstop fires on 39 lines of
-  // this repository's own README — so routing on it moved the Steward from
-  // second to last on exactly the commits it was second for.
+test('a length-only trigger leads with the Adversary, because that is the evasion case', () => {
+  // This test replaces one that asserted the opposite, and the reasoning it
+  // carried is worth recording because it was careful and wrong. It argued
+  // that an unreadable line establishes only that the gate could not read it,
+  // so leading with the Adversary acts on an absence of knowledge, and that a
+  // docs-only fix is the archetype of the middle category the Steward is
+  // placed ahead of the Adversary to catch.
+  //
+  // Both halves are true. What they miss is HOW a line becomes unreadable:
+  // several CONTENT_SIGNALS are bounded spans between two literals, so padding
+  // the span defeats the pattern and trips the length backstop in one move.
+  // That makes this trigger the signal-defeated case, and routing it to the
+  // routine order let an author pick a non-Adversary reviewer by making one
+  // line long. Measured on the real bridge: 710 characters of column list
+  // between SELECT and FROM, wrapping `req.params.id` into a raw query,
+  // selected `adversary` before the trigger existed and `auditor` after.
   const chosen = chooseRegressionLane(
     { closedBy: ['pragmatist'], files: ['README.md'], diff: diffOf(PROSE) });
-  assert.equal(chosen.persona, 'auditor');
+  assert.equal(chosen.persona, 'adversary');
 
-  // Second, not last: exclude the auditor and the Steward is next, which is
-  // what `boundary` order would not do (it would hand this to the adversary).
+  // The evasion itself, which is the case the order exists for. The signal is
+  // genuinely defeated — `assessScope` reports no boundary — and the lane must
+  // still be the Adversary.
+  const cols = Array.from({ length: 40 }, (_, i) => `column_number_${i}`).join(', ');
+  const evading = `q("SELECT ${cols} FROM accounts WHERE id=" + req.params.id)`;
+  assert.ok(evading.length > 200, `fixture is ${evading.length} chars`);
+  const evaded = chooseRegressionLane(
+    { closedBy: ['pragmatist'], files: ['api.js'], diff: diffOf(evading) });
+  assert.equal(evaded.persona, 'adversary');
+  assert.match(evaded.reason, /holds lines no signal could read/);
+
+  // The control: shorten the span and the signal matches, so the same lane is
+  // reached by the boundary trigger instead. Both routes lead to the Adversary,
+  // which is the property that makes padding useless.
+  const readable = 'q("SELECT a FROM accounts WHERE id=" + req.params.id)';
+  assert.ok(readable.length < 200);
+  const seen = chooseRegressionLane(
+    { closedBy: ['pragmatist'], files: ['api.js'], diff: diffOf(readable) });
+  assert.equal(seen.persona, 'adversary');
+  assert.match(seen.reason, /crosses a trust boundary/);
+
+  // The cost, stated rather than hidden: on a docs-only fix the Steward is now
+  // third instead of second. Exclude the Adversary and it is next, so it is
+  // demoted and not dropped.
   const excluded = chooseRegressionLane(
-    { closedBy: ['auditor'], files: ['README.md'], diff: diffOf(PROSE) });
-  assert.equal(excluded.persona, 'steward');
-
-  // Not excluded, only third. Whichever order runs, the Adversary is still in it.
-  const emptied = chooseRegressionLane(
-    { closedBy: ['auditor', 'steward'], files: ['README.md'], diff: diffOf(PROSE) });
-  assert.equal(emptied.persona, 'adversary');
+    { closedBy: ['adversary'], files: ['README.md'], diff: diffOf(PROSE) });
+  assert.equal(excluded.persona, 'auditor');
 });
 
 test('a real signal on the same long-lined diff still leads with the Adversary', () => {
