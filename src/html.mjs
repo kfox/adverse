@@ -3,6 +3,9 @@
 // Vanilla HTML + scoped CSS + a few lines of JS — no framework, no build step.
 
 import { ADVISORY_KINDS, PROVENANCE, assertCoversStatuses } from './taxonomy.mjs';
+// Not wording — identity. Which half of a split lane made a ruling is a fact
+// about the run, and this renderer printed the lane's persona for both halves.
+import { rulingVoice } from './synthesis.mjs';
 
 // The dashboard's wording for a finding the regression pass found, kept here
 // rather than shared with the Markdown renderer for the same reason each
@@ -230,7 +233,7 @@ function renderRootCause(rc) {
   }).join('\n');
   const rulings = rc.rulings.map((r) =>
     `<blockquote class="${r.ruling === 'one' ? 'validate' : 'challenge'}">`
-    + `<strong>${esc(r.persona)} rules ${esc(r.ruling)}:</strong> ${esc(r.reason)}</blockquote>`,
+    + `<strong>${esc(rulingVoice(r))} rules ${esc(r.ruling)}:</strong> ${esc(r.reason)}</blockquote>`,
   ).join('\n');
   return `<details class="card" open>
     <summary>

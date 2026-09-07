@@ -273,6 +273,33 @@ function reportedBy(finding, persona, agent) {
     || finding.reporterAgents.includes(persona);
 }
 
+// The same question for a GROUP ruling: is the reviewer that ruled the only
+// reporter of every citation, i.e. a reviewer confirming that its own findings
+// are one thing? Asked through `reportedBy` so the two answers cannot drift —
+// keying this one on the persona alone made a split lane's two halves
+// independent for a validate edge and one reviewer for a group ruling, and
+// `auditor-b`'s ruling on `auditor-a`'s citations was discarded as
+// self-ruling. An unresolved citation has no `reporterAgents` to consult, so
+// its claimed reporter answers for the agents too: that reads as self-ruling,
+// which costs a voice rather than minting one.
+function ruledOnOwnCitations(ruling, citations) {
+  return citations.every((c) => {
+    const reporters = c.reporters ?? [c.reporter];
+    const reporterAgents = c.reporterAgents ?? reporters;
+    return reporters.length === 1
+      && reportedBy({ reporters, reporterAgents }, ruling.persona, ruling.agent);
+  });
+}
+
+// Who a group ruling speaks as: the half of a split lane that declared itself,
+// the lane otherwise. Exported because both renderers have to answer it the
+// same way — each printed `r.persona`, so a split lane's two rulings arrived as
+// two indistinguishable `auditor` blocks claiming two reviewers where there was
+// one lane.
+export function rulingVoice(ruling) {
+  return ruling.agent ?? ruling.persona;
+}
+
 // One entry per PERSONA, whatever agent produced it. A split lane's two halves
 // can both rule on the same finding now, and `validators.length` is what turns
 // a finding into `consensus` while the group `voices` count decides whether a
@@ -375,7 +402,18 @@ function buildRootCauses(groups, round2, findByTitle) {
     for (const r of cross?.groups ?? []) {
       if (!r || typeof r !== 'object' || !GROUP_RULINGS.has(r.ruling)) continue;
       if (!rulingsById.has(r.id)) rulingsById.set(r.id, []);
-      rulingsById.get(r.id).push({ persona, ruling: r.ruling, reason: (coerceStr(r.reason) ?? '').trim() });
+      // The agent rides along: `mergeSplitCrossReviews` stamps it onto every
+      // unioned `groups` entry for exactly this reader, and dropping it here
+      // cost two things at once — the report could not say which half ruled,
+      // and `selfRuled` could not tell a sibling's ruling from the lane's own.
+      // Null means "the lane itself", which is what `rulingAgent` fails
+      // closed to.
+      rulingsById.get(r.id).push({
+        persona,
+        agent: rulingAgent(persona, cross, r),
+        ruling: r.ruling,
+        reason: (coerceStr(r.reason) ?? '').trim(),
+      });
     }
   }
 
@@ -400,6 +438,10 @@ function buildRootCauses(groups, round2, findByTitle) {
         // own `reporters` is what synthesis actually resolved. Where they
         // disagree, the group was reporting the unverified one.
         reporters: f?.reporters ?? null,
+        // Which AGENTS reported it, at the granularity a split lane needs: the
+        // group ruling below asks whether the half that ruled is the one that
+        // reported, and `reporters` answers only for the lane.
+        reporterAgents: f?.reporterAgents ?? null,
       };
     });
 
@@ -416,18 +458,22 @@ function buildRootCauses(groups, round2, findByTitle) {
     // but it should not silently vouch for one either.
     const reporters = [...new Set(citations.flatMap((c) => c.reporters ?? [c.reporter]))];
 
-    // A ruling from a persona that is the only reporter of every citation is a
-    // persona confirming that its own findings are one thing. `validate` and
-    // `challenge` already skip a persona's edge on a finding it reported
-    // itself; a group ruling had no such guard.
-    const selfRuled = rulings
-      .filter((r) => citations.every((c) => {
-        const rs = c.reporters ?? [c.reporter];
-        return rs.length === 1 && rs[0] === r.persona;
-      }))
-      .map((r) => r.persona);
+    // A ruling from the reviewer that is the only reporter of every citation is
+    // that reviewer confirming that its own findings are one thing. `validate`
+    // and `challenge` already skip such an edge; a group ruling had no such
+    // guard.
+    //
+    // Excluded by identity, not by name: two rulings can share a persona (one
+    // per half of a split lane), and excluding by name threw away the half that
+    // had not reported anything along with the half that had. `voices` still
+    // counts PERSONAS, so two halves agreeing remain one voice and cannot reach
+    // MIN_CONFIRMING_VOICES between them.
+    const selfRulings = rulings.filter((r) => ruledOnOwnCitations(r, citations));
+    // Deduped and named per agent: `['auditor','auditor']` printed one lane
+    // twice, as if a second reviewer had ruled.
+    const selfRuled = [...new Set(selfRulings.map(rulingVoice))];
     const voices = new Set(
-      rulings.filter((r) => !selfRuled.includes(r.persona)).map((r) => r.persona));
+      rulings.filter((r) => !selfRulings.includes(r)).map((r) => r.persona));
 
     // A confirmed group is ONE fix and ONE disposition covering N citations,
     // so confirming it is the consequential direction and needs the same
@@ -713,8 +759,12 @@ function renderRootCauses(rootCauses) {
         : 'not confirmed';
       lines.push('');
       lines.push(`> ⚖️ **Not confirmed:** ${short}.`
+        // "nobody else reported" rather than "it is the only reporter of":
+        // `selfRuled` can legitimately name two halves of one lane, and the
+        // singular subject then read as two reviewers agreeing.
         + (c.selfRuled.length
-          ? ` ${c.selfRuled.join(', ')} ruled on a group it is the only reporter of, which is not a voice.`
+          ? ` ${c.selfRuled.join(', ')} ruled on a group nobody else reported,`
+            + ' which is not a voice.'
           : ''));
     }
     lines.push('');
@@ -736,7 +786,7 @@ function renderRootCauses(rootCauses) {
     }
     for (const r of rc.rulings) {
       lines.push('');
-      lines.push(`> ${r.ruling === 'one' ? '🔗' : '✂️'} **${r.persona} rules \`${r.ruling}\`:** ${r.reason}`);
+      lines.push(`> ${r.ruling === 'one' ? '🔗' : '✂️'} **${rulingVoice(r)} rules \`${r.ruling}\`:** ${r.reason}`);
     }
     lines.push('');
   }

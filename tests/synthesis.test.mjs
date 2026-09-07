@@ -910,6 +910,115 @@ test('split and contested need no quorum — both dissolve the group', () => {
     'contested');
 });
 
+// --- a split lane's two halves: two rulings, one reviewer --------------------
+//
+// `mergeSplitCrossReviews` unions both halves' `groups` and stamps every entry
+// with the half that wrote the file. Everything below is about what synthesis
+// does with that stamp — which rulings are voices, and which reviewer the
+// report names. Dropping it made one lane two reviewers in the text, and made
+// a split lane one reviewer for a group ruling while `reportedBy` was already
+// treating its halves as two for a validate edge on the same finding.
+
+// A group of one citation, reported by the auditor lane and nobody else.
+const soleCitation = () => ({
+  round1: {
+    auditor: splitLane([f('the guard is unreachable', 'critical', 'a.py', 10)]),
+    steward: review('steward', [f('unrelated', 'warning', 'z.py', 1)]),
+  },
+  groups: [{
+    id: 'G1', title: 'the guard is unreachable', severity: 'critical', kinds: ['defect'],
+    files: ['a.py'], reporters: ['auditor'], members: ['F1'], via: ['cluster'],
+    oversized: false, anchor: 'F1',
+    citations: [{ id: 'F1', reporter: 'auditor', kind: 'defect', severity: 'critical',
+                  file: 'a.py', line: 10, title: 'the guard is unreachable' }],
+  }],
+});
+
+// One half's round-2 payload, in the shape it writes its own file. Merged
+// through the real export below, so these tests read the agent ids combine.mjs
+// stamps rather than ids the fixture wrote by hand.
+const halfCross = (agent, groups) =>
+  ({ persona: 'auditor', agent, validate: [], challenge: [], added: [], groups });
+
+const one = (reason) => [{ id: 'G1', ruling: 'one', reason }];
+
+test('the other half of a split lane is a voice on a group it did not report', () => {
+  const { round1, groups } = soleCitation();
+  const stewardVoice = ruling('steward', 'G1', 'one', 'steward says one');
+
+  // `auditor-b` read different files, and its ruling on `auditor-a`'s citation
+  // is as independent as any third lane's — which is what `reportedBy` already
+  // says about its validate edge on that same finding.
+  const sibling = synthesize(round1, {
+    auditor: mergeSplitCrossReviews(halfCross('auditor-a', []),
+                                    halfCross('auditor-b', one('b read it, agree'))),
+    steward: stewardVoice,
+  }, { rootCauseGroups: groups }).rootCauses[0];
+  assert.equal(sibling.status, 'confirmed');
+  assert.deepEqual(sibling.confirmation, { voices: 2, required: 2, selfRuled: [] });
+
+  // The discriminating case: the only difference is which half ruled, and the
+  // half that reported the citation still buys nothing.
+  const own = synthesize(round1, {
+    auditor: mergeSplitCrossReviews(halfCross('auditor-a', one('a says one')),
+                                    halfCross('auditor-b', [])),
+    steward: stewardVoice,
+  }, { rootCauseGroups: groups }).rootCauses[0];
+  assert.equal(own.status, 'proposed');
+  assert.deepEqual(own.confirmation, { voices: 1, required: 2, selfRuled: ['auditor-a'] });
+});
+
+test('a lane that rules from both halves is named once and still is not a voice', () => {
+  const { round1, groups } = soleCitation();
+
+  // Neither half declares an id — an orchestrator that predates them, which is
+  // the shape that rendered "auditor, auditor ruled on a group".
+  const unnamed = mergeSplitCrossReviews(
+    { persona: 'auditor', validate: [], challenge: [], added: [], groups: one('a says one') },
+    { persona: 'auditor', validate: [], challenge: [], added: [], groups: one('b says one') });
+  const syn = synthesize(round1, { auditor: unnamed }, { rootCauseGroups: groups });
+  assert.deepEqual(syn.rootCauses[0].confirmation,
+    { voices: 0, required: 2, selfRuled: ['auditor'] });
+  assert.equal(syn.rootCauses[0].status, 'proposed');
+  const md = renderMarkdown(syn);
+  assert.match(md, /auditor ruled on a group nobody else reported/);
+  assert.doesNotMatch(md, /auditor, auditor/, 'one lane cannot be named twice');
+
+  // Two halves that BOTH reported it are two names and still no voice: the
+  // dedupe must not collapse `auditor-a` and `auditor-b` into one reviewer
+  // either, which is the mistake in the other direction.
+  const bothReported = {
+    auditor: splitLane([f('the guard is unreachable', 'critical', 'a.py', 10)],
+                       [f('the guard is unreachable', 'critical', 'a.py', 10)]),
+    steward: review('steward', [f('unrelated', 'warning', 'z.py', 1)]),
+  };
+  const rc = synthesize(bothReported, {
+    auditor: mergeSplitCrossReviews(halfCross('auditor-a', one('a says one')),
+                                    halfCross('auditor-b', one('b says one'))),
+  }, { rootCauseGroups: groups }).rootCauses[0];
+  assert.deepEqual(rc.confirmation,
+    { voices: 0, required: 2, selfRuled: ['auditor-a', 'auditor-b'] });
+});
+
+test('both renderers name the half of a split lane that ruled', () => {
+  const { round1, groups } = soleCitation();
+  const syn = synthesize(round1, {
+    auditor: mergeSplitCrossReviews(halfCross('auditor-a', one('a says one')),
+                                    halfCross('auditor-b', one('b says one'))),
+  }, { rootCauseGroups: groups });
+  const md = renderMarkdown(syn);
+  assert.match(md, /\*\*auditor-a rules `one`:\*\* a says one/);
+  assert.match(md, /\*\*auditor-b rules `one`:\*\* b says one/);
+  const html = renderHtml(syn);
+  assert.match(html, /<strong>auditor-a rules one:<\/strong> a says one/);
+  assert.match(html, /<strong>auditor-b rules one:<\/strong> b says one/);
+
+  // A ruling that named no half is the LANE's, and still renders as the lane.
+  const lane = synthesize(round1, { steward: ruling('steward', 'G1', 'one', 'steward says one') },
+    { rootCauseGroups: groups });
+  assert.match(renderMarkdown(lane), /\*\*steward rules `one`:\*\* steward says one/);
+});
+
 // --- provenance: which pass found it ------------------------------------------
 //
 // "The fix introduced this" and "round 2 noticed this" are different facts, and
