@@ -13,8 +13,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  SETTLING_SCORE, annotate, checkBinding, convergenceStatus, emptyLedger, isSettled,
-  loadLedger, matchFinding, normalizeTitle, recordDecisions, saveLedger, scoreMatch,
+  DISPOSITIONS, SETTLING_SCORE, annotate, checkBinding, convergenceStatus, emptyLedger,
+  isSettled, loadLedger, matchFinding, normalizeTitle, recordDecisions, saveLedger,
+  scoreMatch, summarizeDispositions,
 } from '../src/ledger.mjs';
 
 const finding = (over = {}) => ({
@@ -139,10 +140,55 @@ test('matchFinding returns null when the ledger is empty', () => {
 
 // --- the fixed/declined asymmetry -------------------------------------------
 
-test('isSettled: declined and deferred settle, fixed does not', () => {
+test('isSettled: declined and deferred settle, fixed and noted do not', () => {
   assert.equal(isSettled('declined'), true);
   assert.equal(isSettled('deferred'), true);
   assert.equal(isSettled('fixed'), false);
+  // `noted` is what src/decisions.mjs mints for an item a fix agent named and
+  // did not fix. It has to be a disposition the ledger accepts and it must not
+  // settle: it was `deferred`, and a footnote copying a blocking critical's
+  // title — which `fix.txt` tells the agent to do verbatim — closed that
+  // critical with no code change and no warning.
+  assert.equal(isSettled('noted'), false);
+  assert.ok(DISPOSITIONS.includes('noted'), 'recordDecisions would refuse a noted entry');
+});
+
+test('a noted entry annotates the finding and settles nothing', () => {
+  const noted = entry({ disposition: 'noted', id: 'NF-fix-drain-1', severity: null,
+    reason: 'out of scope for this batch; the budget belongs to the planner' });
+  const [f] = annotate([finding()], ledgerWith(noted));
+
+  assert.equal(f.adjudicated.matchScore, SETTLING_SCORE, 'the titles are identical');
+  assert.equal(f.adjudicated.settled, false);
+  // The reason has to reach the briefing — a channel that annotates nothing is
+  // the dropped handoff the whole thing was built to stop.
+  assert.match(f.adjudicated.reason, /the budget belongs to the planner/);
+  assert.match(f.adjudicated.note, /NOTED this and left it undecided/);
+  assert.match(f.adjudicated.note, /still open/);
+  // The note ladder used to fall off the end of a settled/tooWeak ternary into
+  // two branches that both presume `fixed`, so a footnote was announced as a
+  // failed fix — a manufactured REGRESSED on the loop's loudest signal.
+  assert.doesNotMatch(f.adjudicated.note, /FIXED/);
+  assert.doesNotMatch(f.adjudicated.note, /the fix did not work/);
+
+  const status = convergenceStatus({ findings: [finding()] }, ledgerWith(noted));
+  assert.equal(status.done, false);
+  assert.equal(status.open.length, 1);
+  assert.equal(status.regressed.length, 0, 'a noted entry is not a fix that failed');
+});
+
+test('summarizeDispositions counts every disposition and says which settle', () => {
+  // Spelled out rather than derived from DISPOSITIONS: a test that builds its
+  // expectation from the same constant the code reads agrees with itself
+  // whatever that constant says.
+  assert.equal(
+    summarizeDispositions([
+      { disposition: 'fixed' }, { disposition: 'noted' }, { disposition: 'noted' },
+    ]),
+    'fixed: 1 · declined: 0 (settles) · deferred: 0 (settles) · noted: 2');
+  // A disposition the ledger would refuse is still counted, because the silent
+  // failure is a summary whose parts do not add up to the total beside it.
+  assert.match(summarizeDispositions([{ disposition: 'wishful' }]), /unrecognized: 1$/);
 });
 
 test('a declined finding is annotated settled and told not to re-open', () => {
@@ -814,6 +860,32 @@ test('a contract decision cannot settle a finding about a different counterpart'
   // The same counterpart still settles.
   const decided = entry({ ...stale, counterpart: 'docs/security.md' });
   assert.equal(scoreMatch(decided, real).score, 3);
+});
+
+test('two counterpart-less contract records match; a one-sided counterpart does not', () => {
+  // EQUALITY, not presence — the same repair the `file` guard above it already
+  // carries, one field over. `!entry.counterpart` also rejected the case where
+  // NEITHER side names a counterpart, and `validateFinding` requires none on a
+  // `contract` finding, so `null` is legitimate input on both sides. Measured:
+  // a `declined` decision with byte-identical title, kind, file and line and
+  // both counterparts null matched nothing, and a run holding one such blocking
+  // finding sat at `done: false, "1 still open"` forever.
+  const title = 'the doctrine promises a regression pass nobody runs';
+  const bare = entry({ title, kind: 'contract', file: 'SKILL.md', line: 41,
+    counterpart: null, severity: 'critical', disposition: 'declined' });
+  const raised = finding({ title, kind: 'contract', file: 'SKILL.md', line: 41,
+    counterpart: null });
+
+  assert.equal(scoreMatch(bare, raised).score, 3);
+  assert.equal(convergenceStatus({ findings: [raised] }, ledgerWith(bare)).done, true);
+
+  // Both one-sided arms still refuse, or the guard has simply been deleted.
+  assert.equal(scoreMatch(bare, { ...raised, counterpart: 'README.md' }), null);
+  assert.equal(scoreMatch(entry({ ...bare, counterpart: 'README.md' }), raised), null);
+  assert.equal(
+    convergenceStatus({ findings: [{ ...raised, counterpart: 'README.md' }] },
+      ledgerWith(bare)).done,
+    false, 'a counterpart the decision never saw must not be settled by it');
 });
 
 test('a decision on a file-less finding still settles it', () => {

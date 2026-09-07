@@ -440,12 +440,12 @@ test('fix: only a `fixed` entry owes a mutation table', () => {
 
 test('fix: a named_not_fixed item with an empty detail is refused', () => {
   assert.match(validateFix(goodFix({
-    named_not_fixed: [{ title: 'preflight is not budgeted', kind: 'behavioral', file: 'a.py', line: 4, detail: '', suggestion: null }],
+    named_not_fixed: [{ title: 'preflight is not budgeted', kind: 'behavioral', file: 'a.py', line: 4, counterpart: null, detail: '', suggestion: null }],
   })), /named_not_fixed\[0\]\.detail is empty/);
 });
 
 test('fix: a named_not_fixed item must carry a kind — scoreMatch gates on it before anything else', () => {
-  const item = { title: 'preflight is not budgeted', file: 'a.py', line: 4, detail: 'noticed while fixing F3', suggestion: null };
+  const item = { title: 'preflight is not budgeted', file: 'a.py', line: 4, counterpart: null, detail: 'noticed while fixing F3', suggestion: null };
   assert.match(validateFix(goodFix({ named_not_fixed: [item] })),
     /named_not_fixed\[0\] missing key "kind"/);
   assert.match(validateFix(goodFix({ named_not_fixed: [{ ...item, kind: null }] })),
@@ -453,11 +453,26 @@ test('fix: a named_not_fixed item must carry a kind — scoreMatch gates on it b
   assert.equal(validateFix(goodFix({ named_not_fixed: [{ ...item, kind: 'behavioral' }] })), null);
 });
 
+test('fix: a named_not_fixed item must carry a counterpart key, even a null one', () => {
+  // `scoreMatch`'s contract guard sits above the title branch, so an item folded
+  // without a counterpart matches no contract finding ever again — and
+  // `contract` is the likeliest kind for a list of things noticed and left
+  // alone. Omitting the key reads identically to `null` at the fold, so the key
+  // is required here where the payload that omitted it is still in hand.
+  const item = { title: 'SKILL.md promises a pass nobody runs', kind: 'contract',
+    file: 'SKILL.md', line: 41, detail: 'noticed while fixing F3', suggestion: null };
+  assert.match(validateFix(goodFix({ named_not_fixed: [item] })),
+    /named_not_fixed\[0\] missing key "counterpart"/);
+  assert.equal(
+    validateFix(goodFix({ named_not_fixed: [{ ...item, counterpart: 'src/regression.mjs' }] })),
+    null);
+});
+
 test('fix: a top-level `deferred` array is refused, not ignored', () => {
   // Unknown keys are tolerated everywhere else in this file, and that is right.
-  // Not here: the ledger has three dispositions, this payload names two, and
-  // silently dropping the third loses exactly the items an agent postponed —
-  // which is the failure `named_not_fixed` was built to close.
+  // Not here: this payload names two of the ledger's dispositions, and
+  // silently dropping one of the others loses exactly the items an agent
+  // postponed — the failure `named_not_fixed` was built to close.
   const err = validateFix(goodFix({ deferred: [goodDecision()] }));
   assert.match(err, /`deferred` is not a fix payload's to assert/);
   assert.match(err, /named_not_fixed/);
@@ -520,7 +535,11 @@ test('fix prompt says declining is a complete outcome, and reserves `deferred`',
   const { FIX_INSTRUCTIONS } = PROMPTS;
   assert.match(FIX_INSTRUCTIONS, /Declining a finding, with reasoning, is a complete and legitimate outcome/);
   assert.match(FIX_INSTRUCTIONS, /decisions recorded\*, not \*findings fixed/);
-  assert.match(FIX_INSTRUCTIONS, /`deferred` is the third\s+disposition the ledger accepts and it is not yours/);
+  assert.match(FIX_INSTRUCTIONS, /`deferred` is another\s+disposition the ledger accepts and it is not yours/);
+  // The channel an agent is sent to instead has to be described as closing
+  // nothing, or the prompt is telling it that a footnote adjudicates.
+  assert.match(FIX_INSTRUCTIONS, /recorded `noted` — a disposition that settles nothing/);
+  assert.match(FIX_INSTRUCTIONS, /`named_not_fixed` closes nothing/);
 });
 
 // --- regression pass ----------------------------------------------------------

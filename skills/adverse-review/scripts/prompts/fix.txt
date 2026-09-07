@@ -226,6 +226,7 @@ misremembered.
     { "title": "<short noun phrase>",
       "kind": "defect" | "behavioral" | "contract" | "design",
       "file": "<path or null>", "line": <integer or null>,
+      "counterpart": "<path this code contradicts (kind=contract), else null>",
       "detail": "<what you noticed and why you did not fix it>",
       "suggestion": "<what you would do about it, or null>" }
   ]
@@ -269,13 +270,19 @@ them from the briefing rather than retyping them.
   this fix added no test — reviewable, and sometimes true. A mutation entry
   naming no victim is not evidence and is refused.
 - **`fixed` and `declined` are the only dispositions you may assert.** They are
-  claims about work you did and evidence you hold. `deferred` is the third
+  claims about work you did and evidence you hold. `deferred` is another
   disposition the ledger accepts and it is not yours: deferring is a decision
   about a future iteration of a loop you cannot see, and the orchestrator makes
-  it. An item you are leaving for later goes in `named_not_fixed`, where it
-  becomes a `deferred` decision carrying your reasoning. A payload with a
-  top-level `deferred` key is refused rather than ignored, because ignoring it
-  would drop exactly the items that section exists to keep.
+  it. An item you are leaving for later goes in `named_not_fixed`, where it is
+  recorded `noted` — a disposition that settles nothing and carries your
+  reasoning into the next iteration's briefing, so the finding stays open and
+  nobody re-derives what you already worked out. A payload with a top-level
+  `deferred` key is refused rather than ignored, because ignoring it would drop
+  exactly the items that section exists to keep.
+- **`named_not_fixed` closes nothing, so use it freely and do not use it
+  instead of `declined`.** If you reproduced a finding and are deliberately
+  leaving it, that is a `declined` decision with your reasoning and it settles
+  the question. If you merely noticed something, name it here.
 - Every `reason` and every `detail` must say something. An unexplained decision
   cannot be reviewed later and is indistinguishable from an oversight; the
   ledger refuses one outright.

@@ -719,6 +719,7 @@ misremembered.
     { "title": "<short noun phrase>",
       "kind": "defect" | "behavioral" | "contract" | "design",
       "file": "<path or null>", "line": <integer or null>,
+      "counterpart": "<path this code contradicts (kind=contract), else null>",
       "detail": "<what you noticed and why you did not fix it>",
       "suggestion": "<what you would do about it, or null>" }
   ]
@@ -742,13 +743,19 @@ them from the briefing rather than retyping them.
   this fix added no test — reviewable, and sometimes true. A mutation entry
   naming no victim is not evidence and is refused.
 - **\`fixed\` and \`declined\` are the only dispositions you may assert.** They are
-  claims about work you did and evidence you hold. \`deferred\` is the third
+  claims about work you did and evidence you hold. \`deferred\` is another
   disposition the ledger accepts and it is not yours: deferring is a decision
   about a future iteration of a loop you cannot see, and the orchestrator makes
-  it. An item you are leaving for later goes in \`named_not_fixed\`, where it
-  becomes a \`deferred\` decision carrying your reasoning. A payload with a
-  top-level \`deferred\` key is refused rather than ignored, because ignoring it
-  would drop exactly the items that section exists to keep.
+  it. An item you are leaving for later goes in \`named_not_fixed\`, where it is
+  recorded \`noted\` — a disposition that settles nothing and carries your
+  reasoning into the next iteration's briefing, so the finding stays open and
+  nobody re-derives what you already worked out. A payload with a top-level
+  \`deferred\` key is refused rather than ignored, because ignoring it would drop
+  exactly the items that section exists to keep.
+- **\`named_not_fixed\` closes nothing, so use it freely and do not use it
+  instead of \`declined\`.** If you reproduced a finding and are deliberately
+  leaving it, that is a \`declined\` decision with your reasoning and it settles
+  the question. If you merely noticed something, name it here.
 - Every \`reason\` and every \`detail\` must say something. An unexplained decision
   cannot be reviewed later and is indistinguishable from an oversight; the
   ledger refuses one outright.
@@ -1126,7 +1133,15 @@ const AGENT_LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const DECISION_KEYS =
   ['id', 'title', 'kind', 'severity', 'confidence', 'file', 'line', 'counterpart', 'reason'];
 
-const NAMED_KEYS = ['title', 'kind', 'file', 'line', 'detail', 'suggestion'];
+// Same reasoning as DECISION_KEYS, and `counterpart` is on it for the same
+// reason it is there: `scoreMatch`'s contract guard sits ABOVE the title
+// branch, so a `contract` item folded with a hardcoded `counterpart: null`
+// matched nothing ever again — and `contract` is the likeliest kind for a list
+// of things noticed and left alone. No `severity` and no `confidence`: nobody
+// triaged these, and inventing either would be the payload asserting a
+// judgment it did not make.
+const NAMED_KEYS =
+  ['title', 'kind', 'file', 'line', 'counterpart', 'detail', 'suggestion'];
 
 function requireText(obj, key, label) {
   if (typeof obj[key] !== 'string') {
@@ -1203,8 +1218,8 @@ export function validateFix(obj) {
   const missing = required.filter((k) => !(k in obj));
   if (missing.length) return `Missing required keys: ${JSON.stringify(missing)}.`;
 
-  // The ledger has three dispositions and this payload names two, so the
-  // plausible mistake is an agent writing the third as a top-level array.
+  // This payload names two of the ledger's dispositions, so the plausible
+  // mistake is an agent writing one of the others as a top-level array.
   // Unknown keys are ignored everywhere else here and that tolerance is right —
   // but ignoring THIS one drops the items an agent chose to postpone, silently,
   // which is verbatim the failure `named_not_fixed` exists to close. Refused
@@ -1212,7 +1227,7 @@ export function validateFix(obj) {
   if ('deferred' in obj) {
     return '`deferred` is not a fix payload\'s to assert — deferring is a decision about a '
       + 'future iteration the orchestrator makes. Put those items in `named_not_fixed`, '
-      + 'where each becomes a `deferred` decision carrying your own reasoning.';
+      + 'where each is recorded `noted`, carrying your own reasoning and settling nothing.';
   }
 
   if (typeof obj.agent !== 'string' || !AGENT_LABEL.test(obj.agent)) {

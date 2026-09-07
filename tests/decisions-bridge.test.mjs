@@ -37,7 +37,7 @@ const goodFix = {
   declined: [],
   named_not_fixed: [{
     title: 'preflight_emu is not budgeted', kind: 'behavioral',
-    file: 'src/budget.py', line: 41,
+    file: 'src/budget.py', line: 41, counterpart: null,
     detail: 'noticed while reproducing F3; the preflight run is not counted anywhere',
     suggestion: null,
   }],
@@ -59,7 +59,7 @@ test('folds a fix payload into a decisions.json converge --record can read', () 
 
     const doc = JSON.parse(readFileSync(out, 'utf-8'));
     assert.equal(doc.decisions.length, 2);
-    assert.deepEqual(doc.decisions.map((d) => d.disposition), ['fixed', 'deferred']);
+    assert.deepEqual(doc.decisions.map((d) => d.disposition), ['fixed', 'noted']);
     assert.equal(doc.decisions[1].id, 'NF-fix-auth-guard-1');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -78,7 +78,37 @@ test('the named-not-fixed items are printed, not just written', () => {
     assert.match(r.stdout, /preflight_emu is not budgeted/);
     assert.match(r.stdout, /src\/budget\.py:41/);
     assert.match(r.stdout, /the preflight run is not counted anywhere/);
-    assert.match(r.stdout, /fixed: 1 · declined: 0 · deferred: 1/);
+    assert.match(r.stdout, /fixed: 1 · declined: 0 \(settles\) · deferred: 0 \(settles\) · noted: 1/);
+    // Recorded `noted`, which settles nothing — the whole point of the
+    // channel. A footnote that closed a blocking finding was F2.
+    assert.match(r.stdout, /recorded noted, which settles\s+nothing/);
+    assert.doesNotMatch(r.stdout, /SETTLES A QUESTION/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the decisions that settle a question are named as settling', () => {
+  // F2's remedy: the bridge has to say which of these lines closes a question,
+  // because `--record` is what tells the next iteration not to re-open it. The
+  // summary was a hand-typed `fixed · declined · deferred` that named none of
+  // it, and a footnote silently closed a blocking critical.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-a.json', {
+      ...goodFix,
+      declined: [{ ...goodFix.fixed[0], id: 'F4', title: 'the retry loop is unbounded',
+        reason: 'reproduced it; the caller already caps the attempt count' }],
+    });
+    const r = run(['--fix', src, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /declined: 1 \(settles\)/);
+    assert.match(r.stdout, /SETTLES A QUESTION/);
+    assert.match(r.stdout, /\[F4\] the retry loop is unbounded.*\[declined\]/);
+    // The fix and the footnote settle nothing, so neither may appear there.
+    const block = r.stdout.split('SETTLES A QUESTION')[1].split('NAMED, NOT FIXED')[0];
+    assert.doesNotMatch(block, /preflight_emu is not budgeted/);
+    assert.doesNotMatch(block, /the guard is unreachable/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -106,7 +136,7 @@ test('several payloads fold in one call, each keeping its own batch label', () =
     assert.equal(r.status, 0, r.stderr);
     const doc = JSON.parse(readFileSync(out, 'utf-8'));
     assert.equal(doc.decisions.length, 4);
-    assert.deepEqual(doc.decisions.filter((d) => d.disposition === 'deferred').map((d) => d.id),
+    assert.deepEqual(doc.decisions.filter((d) => d.disposition === 'noted').map((d) => d.id),
       ['NF-fix-auth-guard-1', 'NF-fix-budget-1']);
     assert.deepEqual(doc.decisions.map((d) => d.reporters[0]),
       ['fix-auth-guard', 'fix-auth-guard', 'fix-budget', 'fix-budget']);

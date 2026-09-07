@@ -18,10 +18,20 @@
 //                        the single most valuable thing a re-review can tell
 //                        you. It is surfaced louder than a new finding, never
 //                        suppressed, and it still holds the loop open.
+//   noted                NOT settled. Something was written down that nobody
+//                        adjudicated — a fix agent's own footnote, folded by
+//                        src/decisions.mjs so the handoff cannot drop it. It
+//                        annotates the next briefing with that reasoning and
+//                        decides nothing, because the agent that wrote it was
+//                        explicitly told deferring is not its call.
 //
 // Suppressing `fixed` would be the natural-looking optimization and it would
 // quietly convert this from a convergence loop into a machine for declaring
-// victory.
+// victory. Letting `noted` settle was the same mistake wearing a footnote: a
+// fix agent copying a blocking critical's title verbatim into
+// `named_not_fixed` — which its own prompt tells it to do — closed that
+// critical with no code change and no warning, and `convergenceStatus`
+// reported "converged: no blocking finding is unsettled".
 //
 // Identity across iterations is kind-routed, because a line number is not an
 // identity once a fix has shifted the file. Positions are re-projected by
@@ -74,11 +84,35 @@ export function clipReason(text) {
   return flat.length > MAX_REASON_CHARS ? `${flat.slice(0, MAX_REASON_CHARS)}… [clipped]` : flat;
 }
 
-export const DISPOSITIONS = Object.freeze(['fixed', 'declined', 'deferred']);
+export const DISPOSITIONS = Object.freeze(['fixed', 'declined', 'deferred', 'noted']);
 const SETTLED = new Set(['declined', 'deferred']);
 
 export function isSettled(disposition) {
   return SETTLED.has(disposition);
+}
+
+// One rendering of "what this batch decided", for every bridge that prints it.
+//
+// Both bridges hand-typed `fixed · declined · deferred` and both went stale the
+// moment a fourth disposition existed: `noted` entries were written to the
+// ledger and counted nowhere, so the summary an operator reads before recording
+// said the batch decided fewer things than it did. Derived from DISPOSITIONS so
+// a fifth cannot go missing the same way, and each count says whether that
+// disposition CLOSES a question — which is the line an operator has to be able
+// to find before a footnote closes a critical.
+export function summarizeDispositions(decisions) {
+  const known = new Set(DISPOSITIONS);
+  const parts = DISPOSITIONS.map((d) => {
+    const n = decisions.filter((x) => x.disposition === d).length;
+    return `${d}: ${n}${isSettled(d) ? ' (settles)' : ''}`;
+  });
+  // `recordDecisions` refuses an unknown disposition and `foldFixPayloads`
+  // mints none, so this is unreachable from either bridge today. It is counted
+  // rather than dropped because the alternative failure is silent: a total that
+  // does not add up to the decision count printed one line above it.
+  const unrecognized = decisions.filter((x) => !known.has(x.disposition)).length;
+  if (unrecognized) parts.push(`unrecognized: ${unrecognized}`);
+  return parts.join(' · ');
 }
 
 // Trim BEFORE stripping trailing punctuation: a title with trailing whitespace
@@ -237,8 +271,18 @@ export function scoreMatch(entry, finding, traced = null) {
   // precisely because the same shape recurs against a DIFFERENT counterpart,
   // and a stale-README decline was settling a cross-validated critical about a
   // security doc 388 lines away.
+  //
+  // EQUALITY, not presence, for the same reason spelled out for `file` twelve
+  // lines up — the identical hole, one field over. `!entry.counterpart` also
+  // rejected the case where NEITHER side names one, and `validateFinding`
+  // requires no counterpart on a `contract` finding (triage only annotates it),
+  // so `counterpart: null` is legitimate input on both sides. Measured: a
+  // `declined` contract decision with byte-identical title, kind, file and line
+  // and both counterparts null gave `matchFinding` null and left
+  // `convergenceStatus` at `done: false, "1 still open"` forever, however
+  // honestly the finding had been declined.
   if (entry.kind === 'contract'
-      && (!entry.counterpart || entry.counterpart !== finding.counterpart)) return null;
+      && (entry.counterpart ?? null) !== (finding.counterpart ?? null)) return null;
 
   // Title equality is checked HERE, below the identity guards, not above them.
   // It used to return first, so a decision recorded in one file settled an
@@ -257,7 +301,7 @@ export function scoreMatch(entry, finding, traced = null) {
     // entry settled every contract finding in a file, and the loop reported
     // itself converged. It annotates; only an anchor that lines up settles.
     if (entryLine === null || findingLine === null) {
-      return { score: 1, weakBecause: 'no-line', why: `same code/counterpart pair (${entryFile} vs ${entry.counterpart}), but no line on one side` };
+      return { score: 1, weakBecause: 'no-line', why: `same code/counterpart pair (${entryFile} vs ${entry.counterpart ?? 'no counterpart'}), but no line on one side` };
     }
     const cdrift = Math.abs(entryLine - findingLine);
     if (cdrift > MATCH_WINDOW_LINES) return null;
@@ -402,11 +446,58 @@ function groupNote(group, disposition, { sameReport = false } = {}) {
 }
 
 
+// The one sentence a reviewer is told to read about a match.
+//
+// Extracted from `annotate` because the ladder now has five rungs and the last
+// two used to be reached by falling off the end of the settled/tooWeak
+// ternary — which silently made them mean "the disposition is `fixed`". Adding
+// `noted` broke that assumption without touching a line: a footnote a fix agent
+// wrote was announced to the next reviewer as "recorded FIXED in an earlier
+// iteration. If it is still real, the fix did not work", about a fix nobody had
+// ever claimed. The disposition is now read rather than inferred.
+function matchNote(m, { settled, tooWeak, sameReport }) {
+  if (settled) {
+    return 'Already decided in an earlier iteration. Do not re-open it. Challenge '
+      + 'only if that decision rested on something the fix has since changed.';
+  }
+  if (tooWeak) {
+    return m.weakBecause === 'severity'
+      ? 'An earlier decision sits within a few lines of this one, but it was '
+        + 'taken on a finding of a different severity, so it is too weak to '
+        + 'settle this. Judge this finding on its merits — and consider whether '
+        + 'the earlier decision was made at the right severity.'
+      : 'An earlier decision covers this file, but it names no line, so it is '
+        + 'too weak to settle this finding. Judge the finding on its merits; '
+        + 'the earlier reason is shown only as context.';
+  }
+  // NOTED, and nothing else. A fix agent named this and did not fix it; no
+  // reviewer triaged it and no orchestrator decided it, so it settles nothing
+  // and the finding stays open. Carrying its reason here is the whole point of
+  // the channel — the measured alternative is two round-1 reviewers spending a
+  // lane-pair's attention next iteration re-deriving a conclusion that was
+  // already written down.
+  if (m.entry.disposition !== 'fixed') {
+    return 'An earlier pass NOTED this and left it undecided — a fix agent named it '
+      + 'outside its own scope. That is not an adjudication and settles nothing: '
+      + 'this finding is still open. The reasoning below is that agent\'s, shown '
+      + 'so you do not re-derive it; judge the finding on its merits.';
+  }
+  if (sameReport) {
+    return 'Recorded FIXED against THIS report, which was produced before the '
+      + 'fix. Not evidence of anything yet: the fix has not been observed. '
+      + 'Verify it (Phase 9) and re-synthesize before judging.';
+  }
+  return 'This was recorded FIXED in an earlier iteration. If it is still real, '
+    + 'the fix did not work — say exactly what the fix missed. That is more '
+    + 'important than any new finding on this pass.';
+}
+
 // Annotate findings with the decision that already covers them.
 //
 // `adjudicated.settled` is the flag that suppresses re-litigation. A finding
 // matching a `fixed` entry is annotated too, but never settled — see the note
-// at the top of this file.
+// at the top of this file. So is a `noted` one, for a different reason: nobody
+// decided it.
 // `reportDigest` identifies the report being checked. An entry recorded from
 // that same report is the SAME observation, not a new one — see `sameReport`.
 export function annotate(findings, ledger, traceFor = () => null, { reportDigest = null } = {}) {
@@ -461,25 +552,7 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
         // The group sentence is appended, not given a field of its own: this
         // is the one string a reviewer is told to read, and a second note
         // beside it is a note that gets skipped.
-        note: (settled
-          ? 'Already decided in an earlier iteration. Do not re-open it. Challenge '
-            + 'only if that decision rested on something the fix has since changed.'
-          : tooWeak
-            ? (m.weakBecause === 'severity'
-              ? 'An earlier decision sits within a few lines of this one, but it was '
-                + 'taken on a finding of a different severity, so it is too weak to '
-                + 'settle this. Judge this finding on its merits — and consider whether '
-                + 'the earlier decision was made at the right severity.'
-              : 'An earlier decision covers this file, but it names no line, so it is '
-                + 'too weak to settle this finding. Judge the finding on its merits; '
-                + 'the earlier reason is shown only as context.')
-            : sameReport
-              ? 'Recorded FIXED against THIS report, which was produced before the '
-                + 'fix. Not evidence of anything yet: the fix has not been observed. '
-                + 'Verify it (Phase 9) and re-synthesize before judging.'
-              : 'This was recorded FIXED in an earlier iteration. If it is still real, '
-                + 'the fix did not work — say exactly what the fix missed. That is more '
-                + 'important than any new finding on this pass.')
+        note: matchNote(m, { settled, tooWeak, sameReport })
           + groupNote(group, m.entry.disposition, { sameReport }),
 
       },

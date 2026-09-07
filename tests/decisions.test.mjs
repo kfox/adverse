@@ -10,8 +10,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { foldFixPayloads } from '../src/decisions.mjs';
-import { DISPOSITIONS, matchFinding, recordDecisions, emptyLedger } from '../src/ledger.mjs';
+import { NAMED_NOT_FIXED_DISPOSITION, foldFixPayloads } from '../src/decisions.mjs';
+import {
+  DISPOSITIONS, convergenceStatus, emptyLedger, isSettled, matchFinding, recordDecisions,
+} from '../src/ledger.mjs';
 
 const decision = (over = {}) => ({
   id: 'F3', title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
@@ -21,7 +23,7 @@ const decision = (over = {}) => ({
 
 const namedItem = (over = {}) => ({
   title: 'preflight_emu is not budgeted', kind: 'behavioral',
-  file: 'src/budget.py', line: 41,
+  file: 'src/budget.py', line: 41, counterpart: null,
   detail: 'noticed while reproducing F3; the preflight run is not counted anywhere',
   suggestion: null, ...over,
 });
@@ -56,7 +58,7 @@ test('a declined entry becomes a `declined` decision, not a fixed one', () => {
 test('a named-not-fixed item leaves with an id it arrived without', () => {
   const [d] = foldFixPayloads([payload({ fixed: [], named_not_fixed: [namedItem()] })]);
   assert.equal(d.id, 'NF-fix-auth-guard-1');
-  assert.equal(d.disposition, 'deferred');
+  assert.equal(d.disposition, 'noted');
   assert.equal(d.title, 'preflight_emu is not budgeted');
   assert.equal(d.reason, namedItem().detail);
   assert.deepEqual(d.reporters, ['fix-auth-guard']);
@@ -129,9 +131,68 @@ test('a recorded named-not-fixed entry matches the finding a later panel raises'
     title: 'preflight_emu is not budgeted', counterpart: null,
   };
   const hit = matchFinding(ledger, raisedNextIteration);
-  assert.ok(hit, 'the deferred entry did not match the finding it was recorded to answer');
-  assert.equal(hit.entry.disposition, 'deferred');
+  assert.ok(hit, 'the noted entry did not match the finding it was recorded to answer');
+  assert.equal(hit.entry.disposition, 'noted');
   assert.match(hit.entry.reason, /the preflight run is not counted anywhere/);
+});
+
+// The other half of the channel's contract, and the one it got wrong. An item
+// a fix agent merely NAMED must not close the question: `FIX_INSTRUCTIONS`
+// tells the agent to copy `title`, `kind`, `file` and `line` verbatim from the
+// briefing, so an identical title is this channel's designed behavior — which
+// made "only an identical title settles" a protection that was never there.
+test('a named-not-fixed footnote cannot close the blocking finding it names', () => {
+  const critical = {
+    id: 'F2', title: 'the drain loop never bounds its work budget', kind: 'behavioral',
+    severity: 'critical', confidence: 'cross-validated', file: 'src/drain.mjs', line: 88,
+    counterpart: null, blocking: true, cross_examined: true,
+  };
+  const decisions = foldFixPayloads([payload({
+    fixed: [],
+    named_not_fixed: [namedItem({
+      // Verbatim from the briefing, exactly as the fix prompt instructs.
+      title: critical.title, kind: critical.kind, file: critical.file, line: critical.line,
+    })],
+  })]);
+  assert.equal(isSettled(decisions[0].disposition), false,
+    `${decisions[0].disposition} settles, so this footnote closed a critical`);
+
+  const ledger = recordDecisions(emptyLedger(), decisions, { atCommit: 'deadbee' });
+  const status = convergenceStatus({ findings: [critical] }, ledger);
+  assert.equal(status.done, false, 'the loop converged with a critical only footnoted');
+  assert.equal(status.open.length, 1);
+  assert.equal(status.settled.length, 0);
+
+  // …and it still annotates, which is the reason the channel exists at all.
+  const [annotated] = status.open;
+  assert.equal(annotated.adjudicated.matchedId, 'NF-fix-auth-guard-1');
+  assert.match(annotated.adjudicated.reason, /the preflight run is not counted anywhere/);
+});
+
+test('a contract item carries its counterpart, so it can answer the finding', () => {
+  // `scoreMatch`'s contract guard sits ABOVE the title branch, so an entry
+  // folded with a hardcoded `counterpart: null` against a finding that names
+  // one matched nothing ever again — and `contract` is the likeliest kind for a
+  // list of things noticed and left alone.
+  const item = namedItem({
+    title: 'SKILL.md promises a pass nobody runs', kind: 'contract',
+    file: 'SKILL.md', line: 41, counterpart: 'src/regression.mjs',
+  });
+  const [d] = foldFixPayloads([payload({ fixed: [], named_not_fixed: [item] })]);
+  assert.equal(d.counterpart, 'src/regression.mjs');
+
+  const ledger = recordDecisions(emptyLedger(), [d], { atCommit: 'deadbee' });
+  const hit = matchFinding(ledger, {
+    title: item.title, kind: 'contract', severity: 'warning',
+    file: 'SKILL.md', line: 41, counterpart: 'src/regression.mjs',
+  });
+  assert.ok(hit, 'a contract item still cannot answer the finding it was recorded for');
+  assert.equal(hit.entry.disposition, NAMED_NOT_FIXED_DISPOSITION);
+  // The discriminating case: a DIFFERENT counterpart is a different claim.
+  assert.equal(matchFinding(ledger, {
+    title: item.title, kind: 'contract', severity: 'warning',
+    file: 'SKILL.md', line: 41, counterpart: 'README.md',
+  }), null);
 });
 
 test('recordDecisions accepts a folded batch whole', () => {

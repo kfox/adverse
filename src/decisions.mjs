@@ -33,14 +33,31 @@
 // and which batch noticed the item is most of what they want to know.
 const namedItemId = (agent, n) => `NF-${agent}-${n}`;
 
-// Every item a fix agent named but did not fix defaults to this. #49 says the
-// agent's own reasoning is usually the right disposition, and `isSettled`
-// counts `deferred` as settled — but SETTLING_SCORE is 3, which only an
-// identical title reaches, so a near-miss comes back annotated with this reason
-// attached rather than silently dropped. That is the safe direction: a wrong
-// settle is silent and loses a real finding, a missed settle is noisy and costs
-// one line to re-decide.
-const NAMED_NOT_FIXED_DISPOSITION = 'deferred';
+// Every item a fix agent named but did not fix is recorded with this
+// disposition, and the whole point of it is that `isSettled` says no.
+//
+// This was `deferred`, which settles, defended by the argument that
+// SETTLING_SCORE is 3 so "only an identical title reaches it". That argument
+// was false and its falsity was the finding: `FIX_INSTRUCTIONS` tells the agent
+// to copy `title`, `kind`, `file` and `line` verbatim out of the briefing,
+// because an entry written from a shorter example matches nothing — so an
+// identical title is the DESIGNED behavior of this channel, not a hurdle it has
+// to clear. Reproduced by execution: a payload with `fixed: []`, `declined: []`
+// and one `named_not_fixed` item whose identity fields were copied from an
+// assigned cross-validated critical passed `validateFix`, minted `NF-<agent>-1`
+// and left `convergenceStatus` reporting `done: true, open: 0, "converged: no
+// blocking finding is unsettled"` with the critical untouched. Mentioning a
+// blocking finding in a footnote closed it forever, with no code change and no
+// warning.
+//
+// `deferred` is also not the agent's to assert — `validateFix` refuses a
+// top-level `deferred` key on exactly those grounds — so minting one on its
+// behalf was the same claim through the back door.
+//
+// What the channel is FOR survives unchanged, and it is why this file exists at
+// all: the item reaches the next iteration's briefing with the agent's own
+// reasoning attached, so nobody re-derives it. See `annotate`'s noted branch.
+export const NAMED_NOT_FIXED_DISPOSITION = 'noted';
 
 // `recordDecisions` throws on a decision with no reason, three frames
 // downstream, in a message that names the ledger rather than the payload that
@@ -97,12 +114,23 @@ function toNamedNotFixed(item, agent, n) {
     // No severity: nobody triaged this item, and `scoreMatch` treats a missing
     // severity as equal to nothing, including another missing one. That costs a
     // positional match the stronger of two annotation scores and costs settling
-    // nothing at all, since only an identical title settles a decision.
+    // nothing at all, since a `noted` entry settles nothing by disposition.
     severity: null,
     confidence: null,
     file: item.file ?? null,
     line: item.line ?? null,
-    counterpart: null,
+    // Carried, exactly as `toDecision` twenty lines up carries it. It was
+    // hardcoded null, and `scoreMatch`'s contract guard sits above the title
+    // branch — so a `contract` item, the likeliest kind for this list, matched
+    // nothing ever again and the channel was broken for its main case.
+    //
+    // Landing this carry while the disposition still settled would have been a
+    // net loss: today's counterpart guard kills a contract item BEFORE the
+    // title branch, which is an accidental protection against the settle hole
+    // above. Verified by execution — the same folded entry scores `null` with
+    // the counterpart dropped and `{score: 3}` with it carried. So the two
+    // changes ship together or not at all.
+    counterpart: item.counterpart ?? null,
     disposition: NAMED_NOT_FIXED_DISPOSITION,
     reason: suggestion ? `${detail} Suggested: ${suggestion}` : detail,
     reporters: [agent],

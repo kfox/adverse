@@ -664,7 +664,9 @@ loop trusts most.
 
 `decisions.json` is `{"decisions": [{id, title, kind, severity, confidence,
 file, line, counterpart, citedLine, disposition, reason}]}` where `disposition`
-is `fixed`, `declined`, or `deferred`. **Carry `counterpart` on every
+is `fixed`, `declined`, `deferred`, or `noted`. Only `declined` and `deferred`
+**settle** a question; `fixed` and `noted` do not, and `decisions.mjs` marks
+which is which on its own summary line. **Carry `counterpart` on every
 `contract` decision.** That kind's claim is "X contradicts Y", so Y is half its
 identity: an entry without one matches nothing ever again, and the next pass
 re-raises the finding you just decided. **Every decision needs a reason** — the script
@@ -777,17 +779,18 @@ stops at its brief's boundary and names what it found there is behaving
 correctly — `fix.txt` tells it to — and that costs one line in a report instead
 of a fourth file in a commit three reviewers were about to read.
 
-**Count deferred items against the receiving commit's budget.** A `deferred`
-disposition is not free: it is a note that has to be written, placed, and
+**Count postponed items against the receiving commit's budget.** A `deferred`
+or `noted` entry is not free: it is a note that has to be written, placed, and
 carried into the next iteration's briefing. A commit taking on six of them
-alongside its fixes is doing more work than its finding count suggests.
+alongside its fixes is doing more work than its finding count suggests — and a
+`noted` one is still open, so it is work that comes back.
 
 **Budget one docs-and-comments absorber commit per batch, placed after the fix
 commits.** Boundary-respecting agents shed orphans — comment- and doc-level
 items belonging to no remaining commit in the batch — and the `named_not_fixed`
-channel records each one `deferred`, which settles the ledger without ever doing
-the work. Riding them into an unrelated commit instead breaks the boundary rule
-that produced them. So: one absorber per batch, not one per commit, and not
+channel records each one `noted`, which settles nothing, so an unabsorbed orphan
+comes back every iteration until someone decides it. Riding them into an
+unrelated commit instead breaks the boundary rule that produced them. So: one absorber per batch, not one per commit, and not
 optional. Usually you write it yourself rather than spawning for it — the
 orphans are individually trivial and you are already holding the batch context
 someone else would have to be briefed on.
@@ -923,9 +926,14 @@ heading that said "out of scope, named not fixed"; nothing was recorded, and the
 next iteration two independent round-1 reviewers spent a lane-pair's attention
 re-deriving it. So the payload carries a `named_not_fixed` list, `decisions.mjs`
 mints an id for each entry (`NF-<batch>-<n>`, which cannot collide with triage's
-`F<n>`) and records it `deferred` with the agent's own reasoning. Read the
-block it prints before you record — a channel you forward without reading is
-the same footnote in a new place.
+`F<n>`) and records it `noted` with the agent's own reasoning. `noted` settles
+nothing, deliberately: an untriaged footnote annotates the next briefing and
+adjudicates no finding. It used to be recorded `deferred`, which settles — so a
+fix agent copying a blocking critical's title into `named_not_fixed`, which
+`fix.txt` tells it to do verbatim, closed that critical with no code change and
+no warning. Read the block it prints before you record — a channel you forward
+without reading is the same footnote in a new place, and **an item that is
+`noted` still needs a decision from you.**
 
 **Every fix commit gets a regression pass** (Phase 9), run by a lane that did
 not report the findings it closes. `fix.txt` tells the agent so, and names the
@@ -1150,7 +1158,8 @@ for. Before reaching for one:
   gate that proves nothing.
 - **Decline more.** The loop's exit condition is *decisions recorded*, not
   *findings fixed* — `declined` and `deferred` both settle a finding, and both
-  keep the ledger from raising it again. A real-but-low-consequence finding
+  keep the ledger from raising it again. `noted` does neither; naming a finding
+  in `named_not_fixed` is not a way to close it. A real-but-low-consequence finding
   fixed hastily is net negative: it is unreviewed code written by whoever was
   most convinced the finding was real. A campaign that fixes everything is
   choosing maximum churn, and every orchestrator defaults to fixing because

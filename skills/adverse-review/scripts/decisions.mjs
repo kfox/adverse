@@ -18,6 +18,13 @@
 // reports and preparing a commit — and a channel that only writes them to a
 // file the orchestrator forwards without reading is the same footnote in a new
 // place.
+//
+// The settling block beside it is echoed for the opposite reason: those lines
+// are the ones with a consequence. `--record` tells the next iteration not to
+// re-open a settled question, so the operator forwarding this file has to be
+// able to see which entries do that. The counts used to be a hand-typed
+// `fixed · declined · deferred` that named none of it and went stale the first
+// time a disposition was added.
 
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
@@ -25,8 +32,8 @@ import { parseArgs } from 'node:util';
 import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { foldFixPayloads } = await importFromSrc('decisions.mjs');
-const { clipReason } = await importFromSrc('ledger.mjs');
+const { NAMED_NOT_FIXED_DISPOSITION, foldFixPayloads } = await importFromSrc('decisions.mjs');
+const { clipReason, isSettled, summarizeDispositions } = await importFromSrc('ledger.mjs');
 const { validateFix } = await importFromSrc('prompts.mjs');
 
 // Positionals are fix payloads, so `--fix run/fix-*.json` works — the same
@@ -78,19 +85,38 @@ writeFileSync(values.out, JSON.stringify({ decisions }, null, 2), 'utf-8');
 // like the tool speaking.
 const oneLine = (v) => clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
 
-const by = (d) => decisions.filter((x) => x.disposition === d).length;
+const where = (d) => (d.file
+  ? ` (${oneLine(d.file)}${d.line === null || d.line === undefined ? '' : `:${oneLine(d.line)}`})`
+  : '');
+const bullet = (d) => `    - [${oneLine(d.id)}] ${oneLine(d.title)}${where(d)}`;
+
+// The counts come from `summarizeDispositions` rather than a hand-typed
+// `fixed · declined · deferred`, which is the line that went stale here the
+// moment a fourth disposition existed. It also marks which dispositions SETTLE,
+// because an operator reading this output has to be able to see which lines
+// close a question before forwarding them to `converge.mjs --record`.
 let out = `${decisions.length} decision(s) from ${payloads.length} fix payload(s)`
   + ` -> ${values.out}\n`
-  + `  fixed: ${by('fixed')} · declined: ${by('declined')} · deferred: ${by('deferred')}\n`;
+  + `  ${summarizeDispositions(decisions)}\n`;
 
-const named = decisions.filter((d) => d.disposition === 'deferred');
+// Named as settling, and listed, because that is the whole of what --record
+// does that cannot be undone: a settling entry tells the next iteration not to
+// re-open the question. This block exists so the answer to "what did I just
+// close?" is on screen rather than in the JSON.
+const settling = decisions.filter((d) => isSettled(d.disposition));
+if (settling.length) {
+  out += `  SETTLES A QUESTION — the next iteration is told not to re-open these`
+       + ` (${settling.length}):\n`
+       + settling.map((d) => `${bullet(d)} [${oneLine(d.disposition)}]`).join('\n') + '\n';
+}
+
+const named = decisions.filter((d) => d.disposition === NAMED_NOT_FIXED_DISPOSITION);
 if (named.length) {
-  out += `  NAMED, NOT FIXED — recorded deferred, each with the agent's own reasoning`
-       + ` (${named.length}):\n`
-       + named.map((d) => `    - [${oneLine(d.id)}] ${oneLine(d.title)}`
-         + (d.file ? ` (${oneLine(d.file)}${d.line === null || d.line === undefined ? '' : `:${oneLine(d.line)}`})` : '')
-         + `\n        ${oneLine(d.reason)}`).join('\n') + '\n'
-       + '    These are findings with no ID. Read them before you record: an item\n'
-       + '    left unrecorded costs a full review round of the next iteration.\n';
+  out += `  NAMED, NOT FIXED — recorded ${NAMED_NOT_FIXED_DISPOSITION}, which settles`
+       + ` nothing, each with the agent's own reasoning (${named.length}):\n`
+       + named.map((d) => `${bullet(d)}\n        ${oneLine(d.reason)}`).join('\n') + '\n'
+       + '    These are findings with no ID, and nothing here closes one. Read them\n'
+       + '    before you record: an item left unrecorded costs a full review round\n'
+       + '    of the next iteration, and one recorded still needs deciding.\n';
 }
 process.stdout.write(out);
