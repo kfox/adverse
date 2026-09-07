@@ -224,6 +224,9 @@ mentioned reads exactly like a lane that looked and found nothing.
 
 `collect.mjs` still exists and still works — it is what the standalone CLI
 needs, and it is the fallback if spawned reviewers cannot reach the filesystem.
+In this flow, skip it: a 250KB blob costs every reviewer the same tokens
+whether or not they needed the file, and it truncates exactly the large files
+most worth reading.
 
 **Give each reviewer its own checkout.** Reviewers run concurrently and some of
 them mutate the tree to test a claim; without isolation one lane reads another
@@ -254,9 +257,6 @@ backwards, and both have cost a whole iteration:
 
 Confirm one worktree can run the repo's gate before spawning — a detached
 worktree may lack installed dependencies.
-In this flow, skip it: a 250KB blob costs every reviewer the same tokens
-whether or not they needed the file, and it truncates exactly the large files
-most worth reading.
 
 ## Phase 2 — round 1: independent reviews
 

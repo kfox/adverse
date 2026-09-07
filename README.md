@@ -297,6 +297,7 @@ src/                          # Shared core, used by both CLI and Skill
   ledger.mjs                  # Adjudication log + the convergence stop condition
   decisions.mjs               # Fold fix-agent payloads into ledger decisions
   scope.mjs                   # Does this change have a trust boundary in it?
+  regression.mjs              # Which lane asks what else a fix commit changed
   scaling.mjs                 # How much review does this change deserve? + reading a plan back
   roster.mjs                  # Who counts as a reviewer: personas, split lanes, silent lanes
   html.mjs                    # Self-contained HTML dashboard renderer
@@ -323,9 +324,10 @@ skills/adverse-review/
     decisions.mjs             # Skill bridge: fold fix payloads into decisions.json
     dump-prompts.mjs          # Regenerate prompt files from src/ (a test enforces it)
     prompts/                  # Generated — edit src/, then re-run dump-prompts.mjs
-  agents/                     # Generated — subagent definitions, one per persona
       auditor.txt, adversary.txt, steward.txt, pragmatist.txt
       round1.txt, round2.txt, verify.txt, fix.txt, regression.txt
+  agents/                     # Generated — subagent definitions, one per persona
+      auditor.md, adversary.md, steward.md, pragmatist.md
 
 tests/
   *.test.mjs                  # node --test, no Jest/Mocha
