@@ -54,12 +54,13 @@
 // no way out but deleting the file.
 
 import { execFileSync } from 'node:child_process';
-import { lstatSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
+const { closeQuietly, openRegularFileSync } = await importFromSrc('fsSafe.mjs');
 const { chooseRegressionLane, unresolvedLanes } = await importFromSrc('regression.mjs');
 const { validateRegression } = await importFromSrc('prompts.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
@@ -276,24 +277,28 @@ function readPayload(src) {
 // second, because it is a path this bridge cannot WRITE either — `--refold`
 // promises to overwrite the file and a directory does not take an overwrite. So
 // it is separated here and refused unconditionally below.
-// `lstatSync`, not `statSync`, and the difference is a write primitive. `statSync`
-// follows symlinks, so a symlink whose target is a regular file answers
-// `isFile()` true and the fold writes THROUGH it to a path the run directory
-// does not own. That write became reachable in the same commit that put the
-// unreadable arm behind `--refold`: before it, a planted symlink exited 2 with
-// the target intact; after it, `--refold` overwrote the target and exited 0
-// reporting success. `lstatSync` describes the link itself, which is not a
-// regular file, so it takes the unwritable arm below and is refused with or
-// without the flag. It also cannot raise ELOOP, since it never resolves a chain.
+// One O_NOFOLLOW open classifies the path AND is the handle the read uses, so
+// there is no window for a symlink planted between a check and the read — a
+// symlink (ELOOP) or non-regular file takes the unwritable arm, refused with
+// or without `--refold`, because the fold's own overwrite cannot land on it
+// either (the write queue opens with O_NOFOLLOW too).
 function priorFold(dest) {
-  const stat = lstatSync(dest, { throwIfNoEntry: false });
-  if (!stat) return { commits: new Set() };
-  if (!stat.isFile()) return { commits: new Set(), unwritable: dest };
+  let fd;
   try {
-    const prior = JSON.parse(readFileSync(dest, 'utf-8'));
+    fd = openRegularFileSync(dest);
+  } catch (e) {
+    if (e.code === 'ENOENT') return { commits: new Set() };
+    if (e.code === 'ELOOP') return { commits: new Set(), unwritable: dest };
+    return { commits: new Set(), unreadable: `${dest} (${e.message.trim()})` };
+  }
+  if (fd === null) return { commits: new Set(), unwritable: dest };
+  try {
+    const prior = JSON.parse(readFileSync(fd, 'utf-8'));
     return { commits: new Set((prior?.passes ?? []).map((pass) => pass?.commit)) };
   } catch (e) {
     return { commits: new Set(), unreadable: `${dest} (${e.message.trim()})` };
+  } finally {
+    closeQuietly(fd);
   }
 }
 
