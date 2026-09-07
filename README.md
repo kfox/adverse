@@ -215,7 +215,7 @@ The **Steward** is this fork's addition, and it exists because code-versus-claim
 
 Every step that is not a review is **deterministic Node code**, not another LLM call. A model in any of those positions can hallucinate consensus, and consensus is the product. Counting validate / challenge edges is enough.
 
-Per review: the CLI runs 8 invocations (4 round-1 + 4 round-2); `--single-round` halves it. The Skill runs 7 for the full shape, and its Phase 1 plan (`plan.mjs`) scales that in both directions: a small boundary-free diff runs 2 round-1 calls (Auditor + Steward) and, when round 1 reports nothing blocking, no round 2 — a floor of 2 — while a large diff splits the Auditor and Adversary lanes across two agents each, up to 9. The Pragmatist always skips round 2 (nothing advisory can block, so cross-validating it buys nothing). Wall time is roughly twice the slowest single invocation, since personas run in parallel within each round.
+Per review: the CLI runs 8 invocations (4 round-1 + 4 round-2); `--single-round` halves it. The Skill runs 7 for the full shape, and its Phase 1 plan (`plan.mjs`) scales that in both directions: a small boundary-free diff whose every changed line fits the scope gate's widest bounded span runs 2 round-1 calls (Auditor + Steward) and, when round 1 reports nothing blocking, no round 2 — a floor of 2, and reachable only under that span condition, because a changed line longer than 200 characters is unreadable-therefore-evidence and runs the Adversary (34 lines of this README are past that, including this one) — while a large diff splits the Auditor and Adversary lanes across two agents each and runs round 2 per agent rather than per persona, up to 11. The Pragmatist always skips round 2 (nothing advisory can block, so cross-validating it buys nothing). Wall time is roughly twice the slowest single invocation, since personas run in parallel within each round.
 
 ## What this fork adds
 
@@ -259,6 +259,7 @@ Review → fix → verify → repeat, stopping when **no blocking finding is lef
 **An adjudication ledger** ([`src/ledger.mjs`](src/ledger.mjs)) — a decision log, not a suppression list, and the asymmetry is the whole design:
 
 - `declined` / `deferred` **settle** a question. A later pass is told the decision and its reason and told not to re-open it. This is what makes the loop terminate rather than circle.
+- `noted` settles **nothing**. It is the disposition for an item a fix agent named but did not fix — a footnote the handoff would otherwise drop. It carries that agent's reasoning into the next briefing so nobody re-derives it, and adjudicates no finding: nobody triaged it, and the agent that wrote it was told deferring is not its call. Recording it `deferred` instead let a fix agent close a blocking critical by copying its title into a footnote, which is exactly what the fix prompt tells the agent to do.
 - `fixed` settles **nothing**. A finding recorded fixed that comes back means the fix did not work — the most valuable thing a re-review can report. It is surfaced louder than a new finding and still holds the loop open. Suppressing it is the natural-looking optimization that would quietly turn this into a machine for declaring victory.
 
 **A stop condition** ([`converge.mjs`](skills/adverse-review/scripts/converge.mjs)) — arithmetic on data the panel already produced, capped at 3 iterations — 5 when round 1 reported a critical finding of a blocking kind (`plan.mjs --escalate`). The cap exits `3`, not `0`: a capped run has open findings and has to say so, or the loop's promise is a lie told by an exit code.
@@ -286,7 +287,7 @@ One test is load-bearing rather than incidental: [`tests/prompts.test.mjs`](test
 src/                          # Shared core, used by both CLI and Skill
   personas.mjs                # Four persona system prompts + the lane partition
   taxonomy.mjs                # The kind axis + severity rank, shared with no prompt prose
-  prompts.mjs                 # Round-1/2/verify prompts, validators
+  prompts.mjs                 # Round-1/2/verify/fix/regression prompts, validators
   parse.mjs                   # JSON extraction across every wrapper shape
   collect.mjs                 # Directory walk + git-diff source collection
   runner.mjs                  # Subprocess agent invocation + parallel orchestration
@@ -295,7 +296,9 @@ src/                          # Shared core, used by both CLI and Skill
   triage.mjs                  # Claim/kind checks, clustering, root-cause grouping
   briefing.mjs                # Assembles those into the round-2 prompt
   ledger.mjs                  # Adjudication log + the convergence stop condition
+  decisions.mjs               # Fold fix-agent payloads into ledger decisions
   scope.mjs                   # Does this change have a trust boundary in it?
+  regression.mjs              # Which lane asks what else a fix commit changed
   scaling.mjs                 # How much review does this change deserve? + reading a plan back
   roster.mjs                  # Who counts as a reviewer: personas, split lanes, silent lanes
   html.mjs                    # Self-contained HTML dashboard renderer
@@ -312,17 +315,20 @@ skills/adverse-review/
     collect.mjs               # Skill bridge: source collection
     combine.mjs               # Skill bridge: combine per-persona JSON
     triage.mjs                # Skill bridge: claim/kind checks, grouping, briefing
-    validate.mjs              # Skill bridge: schema-check a reviewer-written round1/round2/verify payload
+    validate.mjs              # Skill bridge: schema-check an agent-written round1/round2/verify/fix/regression payload
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
     plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
     verify.mjs                # Skill bridge: validate a verify payload, reshape for triage
+    regression.mjs            # Skill bridge: pick the lane for a fix commit's regression pass, fold what it found
+    decisions.mjs             # Skill bridge: fold fix payloads into decisions.json
     dump-prompts.mjs          # Regenerate prompt files from src/ (a test enforces it)
     prompts/                  # Generated — edit src/, then re-run dump-prompts.mjs
-  agents/                     # Generated — subagent definitions, one per persona
       auditor.txt, adversary.txt, steward.txt, pragmatist.txt
-      round1.txt, round2.txt, verify.txt
+      round1.txt, round2.txt, verify.txt, fix.txt, regression.txt
+  agents/                     # Generated — subagent definitions, one per persona
+      auditor.md, adversary.md, steward.md, pragmatist.md
 
 tests/
   *.test.mjs                  # node --test, no Jest/Mocha
@@ -336,7 +342,7 @@ tests/
 - **Source size cap.** Default 250 KB total / 30 KB per file. Trips on very large repos in non-diff mode. Use `--diff` for review-on-PR workflows where the change set is what matters.
 - **Subprocess agent contract.** The CLI assumes the agent reads prompt from stdin and writes the response to stdout, exiting cleanly. Most coding agents support this; some need a flag (`-p` for Claude Code, `exec` for Codex CLI). When in doubt, run the agent manually with a stdin prompt first to confirm the shape.
 - **Not a fix-applier — mostly.** The CLI produces a report and stops; hand it to your coding agent if you want fixes applied. The Skill's convergence loop *does* apply fixes, but only when the user asks for that shape, and it records a reason for every finding it declines as well as every one it fixes.
-- **The review plan is a budget policy, not a judgment.** The scope gate decides whether the Adversary lane has anything to look at by pattern-matching changed paths plus added and removed lines; the scaling policy sizes the rest — lanes, agents per lane, rounds, and the iteration cap — from the diff and from what round 1 found. Neither can know that an innocuous-looking helper is called from an auth path, so both are biased toward more review (pins force the full panel on paths a repo names), and a skipped lane is always named in the report — an unmentioned one reads exactly like a lane that looked and found nothing.
+- **The review plan is a budget policy, not a judgment.** The scope gate decides whether the Adversary lane has anything to look at by pattern-matching changed paths plus added and removed lines — and by length, with no pattern involved: several of its patterns read a bounded span (200 characters) to stay linear on bytes a PR author picks, so any changed line longer than that span is treated as unreadable-therefore-evidence and runs the lane. That is reported as its own reason, never as a trust-boundary signal; the scaling policy sizes the rest — lanes, agents per lane, rounds, and the iteration cap — from the diff and from what round 1 found. Neither can know that an innocuous-looking helper is called from an auth path, so both are biased toward more review (pins force the full panel on paths a repo names), and a skipped lane is always named in the report — an unmentioned one reads exactly like a lane that looked and found nothing.
 - **`design` findings never gate.** That is deliberate, but it means the loop can converge with real design feedback outstanding. It is reported as a backlog; someone still has to read it.
 
 ## License and credit

@@ -173,6 +173,12 @@ test('--at records anchors at the reviewed tree, so tracing is not the identity'
 
   const rec = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
   assert.equal(rec.status, 0, rec.stderr);
+  // The write's own summary has to count every disposition and say which of
+  // them just closed a question — this was a hand-typed
+  // `fixed · declined · deferred` here and in decisions.mjs, and both stopped
+  // counting everything the moment a fourth disposition existed.
+  assert.match(rec.stdout,
+    /fixed: 0 · declined: 1 \(settles\) · deferred: 0 \(settles\) · noted: 0/);
   const saved = JSON.parse(readFileSync(ledger, 'utf-8'));
   assert.equal(saved.entries[0].atCommit, reviewed,
     'the anchor belongs to the tree the panel read, not the tree after the fix');

@@ -21,7 +21,7 @@ import { importFromSrc } from './package-root.mjs';
 
 const {
   checkBinding, clipReason, convergenceStatus, emptyLedger, loadLedger, recordDecisions,
-  saveLedger,
+  saveLedger, summarizeDispositions,
 } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 
@@ -122,10 +122,13 @@ if (values.record) {
   // used rather than computing (ledger.iterations ?? []).length + 1 a second
   // time — the two copies had already drifted once.
   const iteration = next.iterations.at(-1).n;
-  const by = (d) => decisions.filter((x) => x.disposition === d).length;
+  // Derived from DISPOSITIONS, not retyped: this was a hand-typed
+  // `fixed · declined · deferred` in two bridges, and both stopped counting
+  // everything the moment a fourth disposition existed. It also marks which
+  // dispositions settle, since that is what this write just did to the loop.
   process.stdout.write(
     `iteration ${iteration}: recorded ${decisions.length} decision(s) -> ${values.ledger}\n`
-    + `  fixed: ${by('fixed')} · declined: ${by('declined')} · deferred: ${by('deferred')}\n`);
+    + `  ${summarizeDispositions(decisions)}\n`);
   process.exit(0);
 }
 

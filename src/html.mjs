@@ -2,7 +2,23 @@
 // works as an email/chat attachment, in CI artifacts, or pasted into a wiki.
 // Vanilla HTML + scoped CSS + a few lines of JS — no framework, no build step.
 
-import { ADVISORY_KINDS, assertCoversStatuses } from './taxonomy.mjs';
+import { ADVISORY_KINDS, PROVENANCE, assertCoversStatuses } from './taxonomy.mjs';
+// Not wording — identity. Which half of a split lane made a ruling is a fact
+// about the run, and this renderer printed the lane's persona for both halves.
+import { rulingVoice } from './synthesis.mjs';
+
+// The dashboard's wording for a finding the regression pass found, kept here
+// rather than shared with the Markdown renderer for the same reason each
+// renderer keeps its own root-cause labels: the wording belongs to the medium.
+// What must not differ is the CLAIM, and this one did. It read "introduced by a
+// fix commit", which asserts causation the payload does not carry: a regression
+// entry is classified `intended-inert`, `intended-undocumented` or `unintended`,
+// and only the last of those was introduced in the sense a reader takes from
+// that sentence. The Markdown renderer's copy said "found by the regression
+// pass", which is what the provenance field actually means, so this one now
+// says the same thing in fewer words.
+// No `esc`: it is this file's own literal, not a reviewer's string.
+const REGRESSION_NOTE = 'found by a fix commit\'s regression pass';
 
 // Null prototype: same reasoning as SEVERITY_MARKER in src/synthesis.mjs. A
 // group severity of "constructor" defeated the `?? SEVERITY_BADGE.info`
@@ -223,7 +239,7 @@ function renderRootCause(rc) {
   }).join('\n');
   const rulings = rc.rulings.map((r) =>
     `<blockquote class="${r.ruling === 'one' ? 'validate' : 'challenge'}">`
-    + `<strong>${esc(r.persona)} rules ${esc(r.ruling)}:</strong> ${esc(r.reason)}</blockquote>`,
+    + `<strong>${esc(rulingVoice(r))} rules ${esc(r.ruling)}:</strong> ${esc(r.reason)}</blockquote>`,
   ).join('\n');
   return `<details class="card" open>
     <summary>
@@ -257,7 +273,7 @@ function renderCard(f) {
       ${loc ? `<span class="loc">${esc(loc)}</span>` : ''}
     </summary>
     <div class="body">
-      <p class="reporters">Reported by: ${esc(f.reporters.join(', '))} · confidence: ${esc(f.confidence)}${f.counterpart ? ` · contradicts ${esc(f.counterpart)}` : ''}</p>
+      <p class="reporters">Reported by: ${esc(f.reporters.join(', '))} · confidence: ${esc(f.confidence)}${f.provenance === PROVENANCE.regression ? ` · ${REGRESSION_NOTE}` : ''}${f.counterpart ? ` · contradicts ${esc(f.counterpart)}` : ''}</p>
       <div class="detail">${esc(f.detail).replaceAll('\n', '<br>')}</div>
       ${f.fix ? `<div class="fix"><strong>Fix:</strong> ${esc(f.fix)}</div>` : ''}
       ${validates}

@@ -54,8 +54,7 @@
 // flow only; the standalone CLI's `--personas` flag remains an explicit,
 // unscaled choice (see kfox/adverse#12).
 
-import { DEFAULT_PERSONAS, PERSONAS } from './personas.mjs';
-import { ADVISORY_KINDS } from './taxonomy.mjs';
+import { DEFAULT_PERSONAS, PERSONAS, advisoryOnlyLane } from './personas.mjs';
 import { assessScope } from './scope.mjs';
 import { isBlocking } from './synthesis.mjs';
 
@@ -85,10 +84,24 @@ export const ESCALATED_MAX_ITERATIONS = 5;
 const PER_FILE_LANES = new Set(['auditor', 'adversary']);
 const GATED_LANES = new Set(['adversary']);
 
-// A lane is size-skippable only when nothing it reports can block. Computed
-// from the registry so the invariant survives a persona being re-aimed.
-function sizeSkippable(name) {
-  return PERSONAS[name].kinds.every((kind) => ADVISORY_KINDS.has(kind));
+// A lane is size-skippable only when nothing it reports can block — which is
+// `advisoryOnlyLane`'s question, not a second one, so it is that function's
+// answer rather than a third copy of its body. The copy this replaced had
+// already drifted from it: written inline as `kinds.every(...)` with no
+// `kinds.length` guard, it answered TRUE for a persona registered with
+// `kinds: []`, where `advisoryOnlyLane` deliberately answers false. `[].every`
+// is vacuously true, and `coerceKind` treats an unclassified kind as blocking,
+// so a lane whose findings CAN block would have been dropped from the plan
+// entirely on a small diff.
+//
+// `personas` is injectable for the reason `advisoryOnlyLane`'s own comment
+// gives: the Pragmatist is the only advisory-only lane in the real registry, so
+// a test over that registry agrees with a hard-coded `persona !== 'pragmatist'`
+// and cannot tell the two implementations apart. `planReview` passes nothing
+// and reads `DEFAULT_PERSONAS`, so the divergence was unreachable through the
+// public API and is pinned here instead.
+export function sizeSkippable(name, { personas = PERSONAS } = {}) {
+  return advisoryOnlyLane(name, { personas });
 }
 
 // Parse `git diff --numstat` output. A `-` in either column is a file git

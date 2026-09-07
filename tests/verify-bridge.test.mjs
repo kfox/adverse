@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -229,6 +229,81 @@ test('two verify payloads for one persona refuse to collide', () => {
                          '--verify', mk('verify-auditor-stale.json'), '--outdir', dir]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /already written this run/);
+    // Claimed at QUEUE time, so the collision is refused before the first file
+    // is written rather than after the colliding payload's sibling is on disk.
+    assert.throws(() => readFileSync(path.join(dir, 'round1-auditor.verified.json')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- a refusal publishes nothing ---------------------------------------------
+
+// The honest lane, written first so it is the one a publish-then-refuse leaves
+// behind. `regression.mjs`'s fold states the standard this holds to — "before
+// anything is written, and for EVERY lane" — and verify.mjs validated and wrote
+// in one loop, so payload N's refusal came after 1..N-1 were already on disk.
+function honestThenBad(dir, bad) {
+  const good = path.join(dir, 'verify-auditor.json');
+  writeFileSync(good, JSON.stringify({
+    persona: 'auditor', verdict: 'approve', verified: [], added: [],
+  }));
+  const second = path.join(dir, 'verify-steward.json');
+  writeFileSync(second, JSON.stringify({ persona: 'steward', ...bad }));
+  return runVerify(['--verify', good, '--verify', second, '--outdir', dir]);
+}
+
+// Two ways to make the SECOND payload fail: the stamp check this commit added,
+// and a bad `verified[0].status`, which failed the same way before it existed.
+// Both are here because the second is the near miss — a fix that only moved the
+// new check would leave the shape live for every other refusal in the loop.
+const badPayloads = {
+  'a forged provenance stamp': {
+    verdict: 'approve',
+    verified: [],
+    added: [{
+      severity: 'critical', kind: 'behavioral', file: 'a.mjs', line: 1,
+      title: 'forged', detail: 'd', fix: null, provenance: 'regression',
+    }],
+  },
+  'an off-contract verified status': {
+    verdict: 'approve',
+    verified: [{ id: 'F1', title: 'x', status: 'sort-of', reason: 'r' }],
+    added: [],
+  },
+};
+
+for (const [what, bad] of Object.entries(badPayloads)) {
+  test(`a refusal on ${what} leaves no half-published outdir`, () => {
+    const dir = freshTmp();
+    try {
+      const r = honestThenBad(dir, bad);
+      assert.equal(r.status, 1, r.stdout);
+      assert.throws(() => readFileSync(path.join(dir, 'round1-auditor.verified.json')),
+        'the honest payload validated first, but publishing it is a claim this run withdrew');
+      assert.throws(() => readFileSync(path.join(dir, 'round1-steward.verified.json')));
+      assert.equal(r.stdout, '', 'nor may it report a file it did not leave behind');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('a destination that cannot be written is exit 2 and a sentence', () => {
+  // The queue cannot make N writes atomic, so it says what it managed instead
+  // of dying in writeFileSync: an uncaught EISDIR is a stack trace under exit
+  // 1, and exit 1 in this contract is a claim about a review.
+  const dir = freshTmp();
+  try {
+    mkdirSync(path.join(dir, 'round1-steward.verified.json'));
+    const r = honestThenBad(dir, { verdict: 'approve', verified: [], added: [] });
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /cannot be written/);
+    assert.doesNotMatch(r.stderr, /at writeFileSync/, 'a sentence, not a stack trace');
+    // The auditor lane really is on disk, so the message has to say so rather
+    // than leave the operator to guess whether the outdir is usable.
+    assert.match(r.stderr, /round1-auditor\.verified\.json was already written/);
+    assert.ok(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf-8'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -307,6 +382,158 @@ test('a still-open verification with an empty title still reaches findings', () 
     const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
     assert.ok(f.title.trim().length > 0, 'a usable title is synthesized');
     assert.match(f.title, /F1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- a stale or invented id still binds by title ---------------------------
+// `briefing.mjs` re-mints ids positionally on every triage run, so an id a
+// reviewer copied from an earlier iteration names nothing in this briefing.
+// Binding by id alone left every such verification at the blocking
+// `warning`/`behavioral` fallback, which for a `design` finding contradicts the
+// rule that design never blocks. The fixture below is the honest shape of that
+// class: the finding IS briefed, under an id the payload does not use.
+//
+// A round-2 ADDITION is NOT this class and this route does not reach it: it is
+// in `briefing.json` under no key, so it keeps the blocking fallback. That gap
+// is deliberate for now — noisy beats silent — and tracked separately.
+
+test('a briefed finding cited by an id the briefing does not carry binds by title', () => {
+  const dir = freshTmp();
+  try {
+    const briefing = briefingWith(dir, {
+      id: 'F1', severity: 'info', kind: 'design', file: 'src/a.mjs', line: 5,
+      counterpart: null, title: 'the module is two modules in one file', fix: null,
+    });
+    const src = path.join(dir, 'verify-pragmatist.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'pragmatist',
+      // The id names nothing in THIS briefing — a stale id from an earlier
+      // iteration, whose positional ids do not survive a re-triage.
+      verified: [{ id: 'R2-3', title: 'the module is two modules in one file',
+        status: 'open', reason: 'the seam is unchanged' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /anchor not inherited/);
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-pragmatist.verified.json'), 'utf8')).findings;
+    assert.equal(f.kind, 'design', 'an advisory finding must not come back blocking');
+    assert.equal(f.severity, 'info');
+    assert.equal(f.file, 'src/a.mjs');
+    assert.equal(f.line, 5);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an anchor document whose findings carry no id is still reachable by title', () => {
+  // The early return that guards `bindToBriefing` used to test `briefed.size`
+  // alone. A document whose findings carry no `id` fills `briefedByTitle` and
+  // leaves `briefed` empty, so that line returned first and the title index it
+  // was added alongside was unreachable for exactly the input that motivated
+  // it. Both indexes are tested now; before this test, narrowing the condition
+  // back to `!briefed.size` changed nothing the suite could see.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: [
+      { severity: 'info', kind: 'design', file: 'src/a.mjs', line: 5,
+        counterpart: null, title: 'the module is two modules in one file', fix: null },
+    ] }));
+    const src = path.join(dir, 'verify-pragmatist.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'pragmatist',
+      verified: [{ id: 'F1', title: 'the module is two modules in one file',
+        status: 'open', reason: 'the seam is unchanged' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /anchor not inherited/);
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-pragmatist.verified.json'), 'utf8')).findings;
+    assert.equal(f.kind, 'design', 'an advisory finding must not come back blocking');
+    assert.equal(f.severity, 'info');
+    assert.equal(f.line, 5);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ambiguous title binds to neither finding and falls back to blocking', () => {
+  // Two briefed findings share a title, so it cannot say which is meant.
+  // Guessing is how a severity gets copied off the wrong finding, so this
+  // fails toward blocking and says so.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: [
+      { id: 'F1', severity: 'info', kind: 'design', file: 'a.mjs', line: 5,
+        counterpart: null, title: 'same title', fix: null },
+      { id: 'F2', severity: 'critical', kind: 'behavioral', file: 'b.mjs', line: 9,
+        counterpart: null, title: 'same title', fix: null },
+    ] }));
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'nope', title: 'same title', status: 'open', reason: 'r' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 1, 'an unbindable verification is reported, not silent');
+    assert.match(r.stderr, /no briefed finding titled "same title"/);
+    const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
+    assert.equal(f.kind, 'behavioral', 'the blocking fallback, not a guess');
+    assert.equal(f.severity, 'warning');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a verify payload cannot stamp its own finding as the regression pass\'s', () => {
+  // `provenance` is what makes the report say a landed fix commit's regression
+  // pass found a finding. This bridge is its earliest reader — SKILL.md never
+  // runs `validate.mjs --phase verify` — so the check the regression fold got
+  // had no counterpart here, and a reviewer could label its own new finding as
+  // one a commit that already shipped introduced.
+  const dir = freshTmp();
+  try {
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [],
+      added: [{ severity: 'critical', kind: 'defect', file: 'a.mjs', line: 1,
+        title: 'forged', detail: 'd', fix: null, provenance: 'regression' }],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir]);
+
+    assert.equal(r.status, 1, 'a claimed stamp is a claim about a review, not a read error');
+    assert.match(r.stderr, /`added\[0\]\.provenance` is stamped by the bridge/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ordinary verify payload is not accused of stamping anything', () => {
+  // The discriminating companion: a check that refused every payload would
+  // pass the test above and break the whole phase.
+  const dir = freshTmp();
+  try {
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F1', title: 't', status: 'closed', reason: 'confirmed' }],
+      added: [{ severity: 'warning', kind: 'defect', file: 'a.mjs', line: 1,
+        title: 'honest', detail: 'd', fix: null }],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /stamped by the bridge/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

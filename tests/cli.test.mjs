@@ -291,7 +291,7 @@ test('synthesize --briefing carries the root causes into every output', () => {
       '--html-out', path.join(out, 'report.html'),
     ]);
     assert.ok(r.status === 0 || r.status === 1, r.stderr);
-    assert.match(readFileSync(path.join(out, 'report.md'), 'utf-8'), /\*\*\[G1\]\*\* the guard is a bypass/);
+    assert.match(readFileSync(path.join(out, 'report.md'), 'utf-8'), /\*\*\[`G1`\]\*\* the guard is a bypass/);
     assert.match(readFileSync(path.join(out, 'report.html'), 'utf-8'), /Root causes — 1 confirmed of 1 proposed/);
     const json = JSON.parse(readFileSync(path.join(out, 'report.json'), 'utf-8'));
     assert.equal(json.root_causes[0].status, 'confirmed');

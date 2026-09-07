@@ -20,13 +20,12 @@
 // The real fix belongs upstream in src/synthesis.mjs — join on ID, or on
 // file/line proximity — at which point this script becomes dead weight.
 
-import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { makeWriteGuard, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
+const { DEFAULT_PERSONAS, laneAgentOf } = await importFromSrc('personas.mjs');
 
 
 // Positionals are round-2 files, so `--round2 run/round2-*.json` works. Same
@@ -54,7 +53,10 @@ const groupIds = new Set((briefing.groups ?? []).map((g) => g.id));
 
 let repaired = 0, unresolved = 0, checked = 0;
 
-const claimDest = makeWriteGuard('repair');
+// Nothing reaches disk until every payload has been read and judged — see
+// bridge-io.mjs. This loop refuses a payload on four separate grounds, and each
+// of them used to publish every earlier payload's repaired file first.
+const writes = makeWriteQueue('repair');
 
 for (const src of values.round2) {
 
@@ -108,15 +110,27 @@ for (const src of values.round2) {
     }
   }
 
-  // `payload.persona` names the file this writes — validated at the top of the
-  // loop, before it reached stderr. A repeated one would silently replace the
-  // lane that wrote first, which is the cheapest way to counterfeit the
-  // distinct-persona count synthesis treats as consensus.
-  const dest = claimDest(`${values.outdir}/round2-${payload.persona}.repaired.json`, src);
-  writeFileSync(dest, JSON.stringify(payload, null, 2), 'utf-8');
-
-  process.stdout.write(`repaired ${src} -> ${dest}\n`);
+  // The AGENT names the file this writes, not the lane. A split lane sends two
+  // round-2 payloads under one persona now (kfox/adverse#50), and keying the
+  // destination on the persona collapsed them onto one path — where the write
+  // guard, doing its job, refused the second half as a spoof and took the
+  // whole phase down with it. `laneAgentOf` is what makes this safe to
+  // interpolate: the id is model-written and it is about to be a filename, so
+  // an id that is not this lane's persona plus a letter suffix is a path, and
+  // falls back to the persona rather than being trusted. One shared answer
+  // rather than a fifth hand-spelled ternary — this was the copy that
+  // interpolated its result into a path, and the rule had drifted between the
+  // copies twice before it was consolidated.
+  //
+  // The guard itself stays live and still matters: a repeated agent id would
+  // silently replace the half that wrote first, which is the cheapest way to
+  // counterfeit the distinct-reviewer count synthesis treats as consensus.
+  const agent = laneAgentOf(payload.persona, payload.agent);
+  writes.queue(`${values.outdir}/round2-${agent}.repaired.json`, src,
+    JSON.stringify(payload, null, 2));
 }
+
+writes.flush('repaired');
 
 process.stdout.write(`${checked} edges checked, ${repaired} titles repaired, ${unresolved} unresolved\n`);
 if (unresolved) process.exitCode = 1;

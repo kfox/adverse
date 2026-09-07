@@ -195,10 +195,24 @@ test('a lane the plan did NOT split still trips the duplicate guard', () => {
   assert.match(messages(checkRoster(two, { lanes })), /duplicate persona 'steward'/);
 });
 
-test('round 2 has no split lanes, so the plan\'s split half does not apply', () => {
+// This test used to assert the opposite — that round 2 had no split lanes —
+// which was true while a merged cross-review lost the second half's rulings to
+// the persona-keyed self-validation guard. A split lane now runs one round-2
+// agent per round-1 agent (kfox/adverse#50), so both halves owe a payload in
+// both rounds.
+test('a split lane owes two payloads in round 2 as well as round 1', () => {
   const lanes = lanesOf({ persona: 'auditor', run: true, agents: 2 });
-  assert.deepEqual([...mergeRoster(lanes, [], { round: 2 })], []);
+  assert.deepEqual([...mergeRoster(lanes, [], { round: 2 })], ['auditor']);
   assert.deepEqual([...mergeRoster(lanes, [], { round: 1 })], ['auditor']);
+});
+
+// A hand-written plan can split the Pragmatist; nothing stops it. Round 2 must
+// not then demand two payloads from a lane the design deliberately never
+// spawns in round 2 — that refuses a run for behaving correctly.
+test('a split lane that does not cross-review owes nothing in round 2', () => {
+  const lanes = lanesOf({ persona: 'pragmatist', run: true, agents: 2 });
+  assert.deepEqual([...mergeRoster(lanes, [], { round: 2 })], []);
+  assert.deepEqual([...mergeRoster(lanes, [], { round: 1 })], ['pragmatist']);
 });
 
 // --- the lane that ran and said nothing --------------------------------------

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Skill bridge: validate a reviewer-written round-1/round-2/verify payload.
+// Skill bridge: validate an agent-written round-1/round-2/verify/fix/regression
+// payload.
 //
 // Phases 2, 4, and 9 used to have the orchestrating model retype or reassemble
 // each subagent's JSON reply on the way to disk. That hand was a defect
@@ -11,26 +12,93 @@
 //
 // The persona comes from the filename, not a repeated --persona flag — the
 // whole point is that the orchestrator stops handling the payload, so it
-// should not have to also retype which persona goes with which path. A
-// split-lane file (round1-auditor-a.json) validates as its shared persona;
-// the -a/-b suffix is a filesystem artifact, not part of the identity
-// `persona` is checked against.
+// should not have to also retype which persona goes with which path.
+//
+// The filename carries TWO identities and both are read here. The PERSONA is
+// the lane: round1-auditor-a.json validates as `auditor`, the name its two
+// halves share so that the synthesizer counts one voice for the lane. The
+// full basename is the AGENT — `auditor-a`, the half that actually wrote this
+// file — and that is the string round 2's self-validation guard keys on
+// (src/personas.mjs's isLaneAgent, src/synthesis.mjs's reportedBy).
+//
+// This header used to call the -a/-b suffix "a filesystem artifact, not part
+// of the identity", and the code acted on it: `.replace(/-[ab]$/, '')` threw
+// the suffix away before anything could hold the payload against it.
+// round1-auditor-a.json declaring `"agent": "auditor-b"` validated clean, and
+// half A's own round-2 payload then ruled on half A's finding as if it were
+// its sibling's: solo -> consensus, openBlocking false -> true, for two
+// characters. The orchestrator names these files when it spawns the agents, so
+// binding the payload's claim to the name it landed under closes that: a
+// payload can no longer disagree with its own path.
+//
+// What the name is NOT is unforgeable, and this header used to say it was. The
+// authority holds only for an agent that writes the one path it was given.
+// Every reviewer subagent has a Write tool and a shared $ADVERSE_RUN, so one
+// that writes a path it was not given supplies its own evidence. Measured, one
+// author, three files:
+//
+//   round1-auditor-a.json + round1-auditor-b.json + round2-auditor-b.json
+//       -> "confidence: consensus", "Open blocking: 1"
+//   round1-auditor-a.json + round1-steward.json (same finding title)
+//       -> "Reported by: auditor, steward · confidence: cross-validated"
+//
+// Both validated clean here, and both are the signal the design trusts most:
+// agreement between agents. Nothing in this repo can close it — the check
+// would have to know which agent wrote a file, and a filesystem does not say.
+// It closes one level up, in the harness, by giving each subagent a directory
+// it alone can write. Until then this bridge catches the CARELESS half and
+// says so, and that is the whole of its claim: it holds a payload against its
+// filename, not against its author.
 
 import { parseArgs } from 'node:util';
 
 import { readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { validatePhase1, validatePhase2, validateVerify } = await importFromSrc('prompts.mjs');
+const { validateFix, validatePhase1, validatePhase2, validateRegression, validateVerify } =
+  await importFromSrc('prompts.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
+const { stampedFieldClaim } = await importFromSrc('synthesis.mjs');
 
-// Null prototype, the same defence combine.mjs already applies to its
+// Null prototype, the same defense combine.mjs already applies to its
 // persona-keyed map. A plain object answers `__proto__` and `constructor` with
 // something truthy, so `--phase __proto__` satisfied the membership guard
 // below and then crashed — violating this bridge's own contract that exit 2
 // means "could not read an input" and never a stack trace.
-const VALIDATORS = Object.assign(Object.create(null),
-  { round1: validatePhase1, round2: validatePhase2, verify: validateVerify });
+//
+// `byPersona` is not a convenience flag. Three of these four phases are written
+// by a lane, and this bridge's whole design is that the persona comes from the
+// filename rather than a flag the orchestrator has to retype. A FIX payload has
+// no persona: a fix agent is a batch of repair work, not a lane, and its
+// identity is the `agent` label inside the file. Left to the filename rule,
+// `fix-sid-bounds.json` would imply the persona `sid-bounds` and every fix
+// payload would be refused as an unknown lane — so the table records which
+// phases are lane-scoped instead of letting the naming convention decide by
+// accident.
+//
+// Both identities ride to every lane-scoped validator as `(payload, persona,
+// { agent })`. round1 and round2 bind the `agent` id (src/prompts.mjs's
+// validateAgent); verify and regression carry no such field — their bridges
+// rebuild the payload with explicit keys and drop anything else — so the
+// option is inert there rather than needing a second flag per row.
+const VALIDATORS = Object.assign(Object.create(null), {
+  round1: { validate: validatePhase1, byPersona: true },
+  round2: { validate: validatePhase2, byPersona: true },
+  verify: { validate: validateVerify, byPersona: true },
+  fix:    { validate: validateFix,    byPersona: false },
+  // Lane-scoped like the first three: the regression pass is run BY a lane
+  // (src/regression.mjs picks which), so `regression-adversary.json` names the
+  // persona its payload has to agree with — the check that catches a pass filed
+  // under the lane that reported the finding it was run to keep away from.
+  //
+  // `passNumbered` is the second axis this one phase needs. The pass is per FIX
+  // COMMIT and an iteration lands several, so one lane routinely writes more
+  // than one payload — which regression.mjs's `foldPayloads` unions into a
+  // single lane file on purpose. Following SKILL.md's old
+  // `regression-<persona>.json` literally, all N passes went to one path and
+  // N-1 were lost before the glob ever ran.
+  regression: { validate: validateRegression, byPersona: true, passNumbered: true },
+});
 
 const { values, positionals } = parseArgs({
   options: { phase: { type: 'string' } },
@@ -38,22 +106,71 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
 });
 
-const validate = values.phase && VALIDATORS[values.phase];
-if (!validate || !positionals.length) {
-  usage('Usage: validate.mjs --phase round1|round2|verify <file.json> [file2.json …]\n'
+const phase = values.phase && VALIDATORS[values.phase];
+if (!phase || !positionals.length) {
+  usage('Usage: validate.mjs --phase round1|round2|verify|fix|regression'
+    + ' <file.json> [file2.json …]\n'
     + `  --phase must be one of: ${Object.keys(VALIDATORS).join('|')}`);
 }
 
-function personaFromPath(file) {
-  const base = file.replace(/^.*\//, '').replace(/\.json$/, '');
-  return base.replace(new RegExp(`^${values.phase}-`), '').replace(/-[ab]$/, '');
+// The lane and the half, read off one name. `agent` is null when the basename
+// names no half — the unsplit lane, where the persona is the only id the
+// payload may claim.
+//
+// One letter, not `[ab]`: `agentNames` suffixes a, b, c … up to
+// MAX_SPLIT_AGENTS, so the old pattern read `auditor-c` as a persona named
+// `auditor-c` and refused it as an unknown lane — the full alphabet
+// `agentNames` can emit has to round-trip through here. It does NOT follow that
+// a three-way split works end to end: `checkCount` in src/roster.mjs still
+// expects exactly 2 payloads for a merged lane, so three honest halves pass
+// this bridge and die at combine.mjs with a message about a stale file. That is
+// a closed failure, not a wrong answer, but do not read this pattern as the
+// capability. `values.phase` is a validated key of VALIDATORS above,
+// never arbitrary text, before it becomes part of a pattern.
+// A pass number: DIGITS, and it must never be letters.
+//
+// `regression-auditor-c.json` is already a well-formed SPLIT HALF id under the
+// rule above, and `reportedBy` in src/synthesis.mjs keys round 2's
+// independence signal on exactly that distinction — so numbering passes with
+// letters would let a pass masquerade as a half and re-open the critical the
+// half-binding rule closed. Digits cannot collide with a suffix `agentNames`
+// emits, which is `String.fromCharCode(97 + i)` and nothing else, so the pass
+// axis and the lane axis stay separate by construction rather than by
+// convention. `regression-auditor-a-1.json` composes: half a, pass 1.
+const PASS_NUMBER = /-\d+$/;
+
+function identityFromPath(file) {
+  let base = file.replace(/^.*\//, '').replace(/\.json$/, '')
+    .replace(new RegExp(`^${values.phase}-`), '');
+  // Stripped only for the phase that HAS passes. Doing it unconditionally
+  // would loosen the round1/round2 derivation that binds a half to the file it
+  // was written to — the strongest identity this bridge has, and, per the
+  // header, only as strong as an agent writing the path it was given.
+  if (phase.passNumbered) base = base.replace(PASS_NUMBER, '');
+  const half = /^(.+)-[a-z]$/.exec(base);
+  return half ? { persona: half[1], agent: base } : { persona: base, agent: null };
 }
 
 const KNOWN_PERSONAS = new Set(DEFAULT_PERSONAS);
 
 let failed = 0;
 for (const file of positionals) {
-  const persona = personaFromPath(file);
+  if (!phase.byPersona) {
+    const payload = readJson(file, 'validate');
+    const err = stampedFieldClaim(payload) ?? phase.validate(payload);
+    if (err) {
+      failed += 1;
+      process.stderr.write(`${file}: ${err}\n`);
+    } else {
+      // The label is the payload's own `agent`, which validateFix constrains to
+      // a token — this line is read by the orchestrator, and a newline in an
+      // off-disk string is how a payload gets to look like the tool speaking.
+      process.stdout.write(`${file}: ok (${payload.agent})\n`);
+    }
+    continue;
+  }
+
+  const { persona, agent } = identityFromPath(file);
   // `validatePhase1` only checks that the payload's `persona` equals the one
   // its FILENAME implies, so `round1-referee.json` claiming to be `referee`
   // agreed with itself and validated clean — this bridge blessing a lane that
@@ -64,12 +181,23 @@ for (const file of positionals) {
       + `${DEFAULT_PERSONAS.join(', ')}\n`);
     continue;
   }
-  const err = validate(readJson(file, 'validate'), persona);
+  // Checked for every phase in the table, before the phase's own schema and
+  // regardless of who is expected to write the file: `provenance` is stamped by
+  // the bridge that writes a regression pass to disk, and a payload that writes
+  // it for itself buys the report's loudest label for a pass that never ran
+  // (src/synthesis.mjs, `stampedFieldClaim`). A reviewer's own round-1 finding
+  // carrying `"provenance": "regression"` used to validate `ok (auditor)` and
+  // render as "found by the regression pass on a fix commit that landed".
+  const payload = readJson(file, 'validate');
+  const err = stampedFieldClaim(payload) ?? phase.validate(payload, persona, { agent });
   if (err) {
     failed += 1;
     process.stderr.write(`${file}: ${err}\n`);
   } else {
-    process.stdout.write(`${file}: ok (${persona})\n`);
+    // The identity that was PROVEN, which for a split half is the half — the
+    // orchestrator reads this line, and `ok (auditor)` on a file named
+    // round1-auditor-a.json says less than it looks like it says.
+    process.stdout.write(`${file}: ok (${agent ?? persona})\n`);
   }
 }
 

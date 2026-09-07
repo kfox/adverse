@@ -94,6 +94,17 @@ Two rules follow from that table and both are load-bearing:
   the one signal the whole design trusts most, and it is the easiest to
   counterfeit.
 
+One more thing about that table, because it is the only roster in this file:
+**the agent driving the panel is not a fifth lane.** It reports no findings and
+nothing it does can block; its questions are how the repair should be divided,
+what each agent has to be told, and what may run at the same time. Those are
+decisions, not observations, so the rules governing them sit at the phase where
+each one is made — Phases 7, 9 and 11 — and not here. A rule read at the top of
+a long file is not read at the moment it applies, which is the failure this
+arrangement is built against: a doctrine that was written down and then not
+followed by the same person who wrote it, because the remembered habit and the
+filed correction feel equally like knowledge.
+
 ## Phase 0 — scope, run directory, and the repo's own gate
 
 **Pick scope.**
@@ -213,6 +224,9 @@ mentioned reads exactly like a lane that looked and found nothing.
 
 `collect.mjs` still exists and still works — it is what the standalone CLI
 needs, and it is the fallback if spawned reviewers cannot reach the filesystem.
+In this flow, skip it: a 250KB blob costs every reviewer the same tokens
+whether or not they needed the file, and it truncates exactly the large files
+most worth reading.
 
 **Give each reviewer its own checkout.** Reviewers run concurrently and some of
 them mutate the tree to test a claim; without isolation one lane reads another
@@ -243,9 +257,6 @@ backwards, and both have cost a whole iteration:
 
 Confirm one worktree can run the repo's gate before spawning — a detached
 worktree may lack installed dependencies.
-In this flow, skip it: a 250KB blob costs every reviewer the same tokens
-whether or not they needed the file, and it truncates exactly the large files
-most worth reading.
 
 ## Phase 2 — round 1: independent reviews
 
@@ -275,7 +286,10 @@ one per persona — two for a lane the plan split. Each gets:
     reply with the JSON in chat.
 - **Model**: `opus` unless the user asked otherwise. If the user picks a smaller
   model, pass it to every persona — mixing models across personas defeats the
-  single-model design.
+  single-model design. That rule is about the panel, whose whole method is one
+  model wearing four lenses. The roles outside it — a fix agent, the absorber
+  commit, the regression pass — are not lanes and are tiered per role instead;
+  Phase 7 says on what basis.
 
 The Steward needs one thing the others don't: point it at where this repo keeps
 its rules and its architecture notes (`CLAUDE.md`, `CONTRIBUTING.md`,
@@ -292,12 +306,49 @@ one member of a split lane fails, the lane is **degraded** unless that
 member's half is re-run — half the files got no reviewer, and an undeclared
 gap reads exactly like a clean review.
 
+**Tell each half its agent id, and tell it to put that id in `agent`** —
+`"persona": "auditor"`, `"agent": "auditor-a"`. The shared persona name is what
+stops two halves inflating one finding into agreement between two reviewers;
+the agent id beside it is what lets Phase 4 tell one half's findings from the
+other's, so that a half's judgment on its sibling's work counts as the
+independent review it is. Both are needed and neither substitutes for the
+other. Omit `agent` on any lane that was not split.
+
+The id is checked against the **filename**: `validate.mjs` refuses
+`round1-auditor-a.json` unless its `agent` is exactly `auditor-a`, refuses an
+unlabeled half, and refuses a half id in a file whose name names no half. What
+that buys is that a payload cannot disagree with its own path — it is **not**
+an unforgeable identity, and this section used to say it was. The authority
+holds only for an agent that writes the one path it was given, and every
+reviewer has a Write tool and a shared `$ADVERSE_RUN`. One author writing three
+files still renders `confidence: consensus`.
+
+What is missing to close it is **enforcement, not layout.** The bridges do not
+require one shared directory — they take the paths you hand them, so
+`combine.mjs --round1 "$ADVERSE_RUN"/*/round1-*.json` works with each agent
+writing into `$ADVERSE_RUN/<agent>/` of its own, and `validate.mjs` still binds
+each payload to its basename. Only the flat globs written in Phase 2 and Phase 5
+assume siblings.
+
+So give each agent its own subdirectory when the harness can make that
+subdirectory the only place it may write, and widen those globs by one segment.
+Absent that enforcement the layout buys nothing — an agent free to write
+anywhere can write into a sibling's directory as easily as into a sibling's
+filename — which is why this is a harness capability and not a Phase 0 step you
+can simply adopt. Until you have it, treat these guards as what they are: they
+stop a payload contradicting its own path, and they do not authenticate its
+author. `combine.mjs --plan`
+refuses a lane whose two halves claim one id or an id the plan never spawned.
+A half declaring its sibling's id would rule on its own finding as if it were
+the other half's — two characters, and consensus is counterfeit.
+
 Each subagent's JSON object, written to its own path rather than returned in
 chat, has this shape:
 
 ```json
 {
   "persona": "<auditor|adversary|steward|pragmatist>",
+  "agent": "<persona>-a | <persona>-b — split lanes only, else omit",
   "verdict": "approve|conditional|reject",
   "summary": "<one sentence>",
   "findings": [
@@ -442,13 +493,32 @@ Two dials move, both deterministic:
 
 If `$ROUNDS` is 1, phases 4–5 collapse the same way the "faster review" path
 does — but the skip rides into the report via `--round2-skipped`. Otherwise:
-for each persona that produced a valid round-1 review **except the
-Pragmatist**, spawn a subagent with the same persona system prompt and:
+for each **round-1 agent** that produced a valid review **except the
+Pragmatist's**, spawn a subagent with the same persona system prompt and:
 
 1. `${SKILL_DIR}/scripts/prompts/round2.txt`
 2. `$ADVERSE_RUN/briefing.json`
 3. the repo path and `$BASE`
-4. the path to write its own JSON object to: `$ADVERSE_RUN/round2-<persona>.json`
+4. the path to write its own JSON object to: `$ADVERSE_RUN/round2-<agent>.json`
+
+**Per agent, not per persona — a split lane spawns two.** `auditor-a` and
+`auditor-b` each get their own round-2 call and each declares its own id in
+`agent`, exactly as in round 1. That id is what makes the second call worth
+making: every briefing finding carries `reporterAgent`, so `-b` can see which
+entries under its persona are its sibling's rather than its own, and the
+synthesizer counts `-b`'s ruling on an `-a` finding as the independent
+cross-review it is. Left as one round-2 agent per persona, the orchestrator
+either hands one agent both halves — where it reads its sibling's work as its
+own prior work and passes it through unexamined — or spawns two that both claim
+the whole lane, whose rulings the self-validation guard then discards.
+
+The cost is **one extra round-2 call per split lane, on large diffs only**;
+lanes only ever split when a diff is large enough to exhaust one reviewer's
+attention (Phase 1), and only the Auditor and the Adversary split at all. What
+it buys is a validator that read different files from the reporter and reached
+its conclusions without seeing them — the same independence a cross-lane edge
+has, on the half of the diff no other lane was assigned. Do not economize by
+sending one agent both halves: that spends the tokens and produces nothing.
 
 **The Pragmatist skips round 2.** Its findings are advisory: cross-validation
 exists to decide what blocks, and nothing it reports can. Its round-1 output
@@ -471,8 +541,11 @@ single disposition only when **two independent personas** both call it `one` —
 the same cross-validation the report's confidence labels require, for the same
 reason: a confirmed group is one decision covering N findings, and one
 unopposed voice deciding that is exactly the consensus-of-one this design
-refuses everywhere else. A ruling from the persona that is the sole reporter of
-every citation is not a voice.
+refuses everywhere else. A ruling from the **reviewer** that is the sole
+reporter of every citation is not a voice — and for a split lane that reviewer
+is the half that reported, not the lane: the other half's ruling on its
+sibling's citations counts, exactly as its `validate` edge does. Two halves
+agreeing are still one voice, because the quorum counts personas.
 
 Everything short of that stays a candidate and its citations are decided one at
 a time: unruled, contested, oversized, or agreed by only one lane. `split`
@@ -505,6 +578,12 @@ node ${SKILL_DIR}/scripts/repair.mjs \
     --outdir "$ADVERSE_RUN"
 ```
 
+Pass every round-2 file, including both halves of a split lane
+(`round2-auditor-a.json`, `round2-auditor-b.json`) — `--round2
+"$ADVERSE_RUN"/round2-*.json` expands to exactly that. Each is repaired to
+`round2-<agent>.repaired.json`, keyed on the agent so two halves land in two
+files rather than one refusing to overwrite the other.
+
 It exits non-zero when an edge names an ID not in the briefing — a reviewer
 invented a finding number and that edge is about to vanish. Read the stderr
 lines; do not ignore the exit code.
@@ -523,11 +602,12 @@ node ${SKILL_DIR}/scripts/combine.mjs --round1 "$ADVERSE_RUN"/round1-*.json \
 node ${SKILL_DIR}/scripts/combine.mjs --round2 "$ADVERSE_RUN"/round2-*.repaired.json \
     --plan "$ADVERSE_RUN/plan.json" \
     --out "$ADVERSE_RUN"/round2.json
-    # --plan on round 2 is the ROSTER half only — round 2 spawns one agent per
-    # persona, so there is nothing to merge, and --merge-personas is still
-    # refused here. What it buys is the gate: a payload from a lane the plan
-    # recorded `run: false` is a stale file or a spoof, and this is the one
-    # place that can tell.
+    # --plan carries both halves here too, same as round 1. The ROSTER half is
+    # the gate: a payload from a lane the plan recorded `run: false` is a stale
+    # file or a spoof, and this is the one place that can tell. The SPLIT half
+    # unions a split lane's two round-2 payloads — validate, challenge, groups
+    # and added, each entry stamped with the agent that made it — and demands
+    # both: one half missing is a lane that cross-reviewed half the diff.
 ```
 
 
@@ -607,12 +687,25 @@ loop trusts most.
 
 `decisions.json` is `{"decisions": [{id, title, kind, severity, confidence,
 file, line, counterpart, citedLine, disposition, reason}]}` where `disposition`
-is `fixed`, `declined`, or `deferred`. **Carry `counterpart` on every
+is `fixed`, `declined`, `deferred`, or `noted`. Only `declined` and `deferred`
+**settle** a question; `fixed` and `noted` do not, and `decisions.mjs` marks
+which is which on its own summary line. **Carry `counterpart` on every
 `contract` decision.** That kind's claim is "X contradicts Y", so Y is half its
-identity: an entry without one matches nothing ever again, and the next pass
-re-raises the finding you just decided. **Every decision needs a reason** — the script
-refuses one without it, because an unexplained decision cannot be reviewed later
-and is indistinguishable from an oversight.
+identity and the ledger matches on it: an entry carrying no counterpart matches
+only a finding that carries none either. Triage does not *require* one — it
+annotates a counterpart-less `contract` finding as under-anchored and carries it
+anyway — so whether the next pass's finding names a Y is up to the reviewer who
+writes it. Record yours and the match is decided on identity; omit it and you are
+betting the next reviewer omits it too. Do not read that as "an entry
+without one matches nothing ever again", which is what this line used to say:
+two counterpart-less records with the same title DO match and settle. Both arms
+are pinned by `tests/ledger.test.mjs`, "two counterpart-less contract records
+match; a one-sided counterpart does not" — that test is the mechanism, this
+paragraph is a reading of it.
+
+**Every decision needs a reason** — the script refuses one without it, because
+an unexplained decision cannot be reviewed later and is indistinguishable from
+an oversight.
 
 **Work the confirmed root causes first, one decision each.** A group the report
 calls `confirmed` is one fix and one disposition covering N citations. Write it
@@ -667,6 +760,228 @@ pre-fix lines, which makes `from` and `to` the same commit: the trace becomes
 the identity and the whole re-projection layer silently does nothing — the
 no-op it was built to replace. The script warns on stderr when `--at` is
 missing; do not ignore that line.
+
+### Fixing with agents, when the batch outgrows your own hands
+
+Everything above assumes you make the fixes. That holds for a handful of
+findings and stops holding the moment an iteration returns more than one
+context window can carry — at which point repair splits across several agents,
+and the brief each one gets is improvised prose, different every time. **A
+reviewer's improvised brief costs a finding; a fix agent's costs a commit.** So
+the brief is generated, exactly like the reviewers' are.
+
+**Sequence the fix commits by blast radius, not by review unit.** The findings
+arrive grouped by who was looking; that boundary is an artifact of the panel's
+own partition, and the findings worth having are the ones that cross it.
+Ordering repair by review unit forces every cross-cutting fix to be split across
+commits or assigned to one of them arbitrarily. Order by how far the change
+reaches instead — the shared type-level change, then its call sites, then the
+prose — which also leaves each commit independently reviewable; the review
+ordering does not.
+
+**A class is an indivisible unit of fix work. Partition between classes freely;
+never within one.** The worked example is three findings in three files with no
+overlap: an unthrottled per-frame warning, a second unthrottled per-message
+warning, and a reader bound that counts messages rather than the work each
+message buys. A decomposer optimizing for partitionability splits them three
+ways without hesitation. They are one lever — a byte on the wire buying
+unbounded work inside a bounded reader — and three agents produce three one-shot
+flags, leave the lever, and the next site anyone adds reintroduces the bug under
+a new name.
+
+Class closure is also where the fix phase out-finds the panel, and that is the
+argument against fragmenting it. The sibling sweep this section closes with —
+one agent, one working reproduction, a second reserved I/O window four reviewers
+across two rounds had missed — needs the whole neighborhood in a single agent's
+view. It is the first thing a finer partition loses and the last thing you would
+want to lose.
+
+**A class outranks the commit boundaries you drew for good reasons.** When a
+class spans them, the commit that owns the class gets every file the class
+reaches, and the *other* concerns in those files stay with their own commits.
+Blast radius is measured in behavior, not in files. Below that line, prefer
+batches touching **disjoint files**: two agents editing one file is a conflict
+you resolve by reading the same code twice.
+
+**Unbounded work is a task, not a rider.** "Fix the clock bug, then determine
+which existing budget tests were passing for the wrong reason" is one bounded
+clause and one with no stopping point; attached to the bounded work, the second
+ran about ninety minutes past it before anyone interrupted. An audit, a sweep,
+or a "check whether this is true everywhere" gets its own agent and its own
+commit, or gets scoped down to a question that has an answer. A fix agent that
+stops at its brief's boundary and names what it found there is behaving
+correctly — `fix.txt` tells it to — and that costs one line in a report instead
+of a fourth file in a commit three reviewers were about to read.
+
+**Count postponed items against the receiving commit's budget.** A `deferred`
+or `noted` entry is not free: it is a note that has to be written, placed, and
+carried into the next iteration's briefing. A commit taking on six of them
+alongside its fixes is doing more work than its finding count suggests — and a
+`noted` one is still open, so it is work that comes back.
+
+**Budget one docs-and-comments absorber commit per batch, placed after the fix
+commits.** Boundary-respecting agents shed orphans — comment- and doc-level
+items belonging to no remaining commit in the batch — and the `named_not_fixed`
+channel records each one `noted`, which settles nothing, so an unabsorbed orphan
+comes back every iteration until someone decides it. Riding them into an
+unrelated commit instead breaks the boundary rule that produced them. So: one absorber per batch, not one per commit, and not
+optional. Usually you write it yourself rather than spawning for it — the
+orphans are individually trivial and you are already holding the batch context
+someone else would have to be briefed on.
+
+None of this reads as "always decompose". Findings that are one type-level
+change seen from several call sites are one commit, because the intermediate
+commits do not compile. And an ordering dependency between two fixes is real —
+a budget test cannot be trusted until the clock it reads matches the clock the
+code reads — so it is a sequence, not a parallel opportunity.
+
+**Independent batches run concurrently, and the edge test is a file or a
+class.** Draw a dependency edge between two fix nodes iff they share a file
+**or** share a class; nodes with no edge between them can run at the same time,
+each in its own `git worktree` — the same isolation Phase 1 already gives
+reviewers, for the same reason. What serializes the fix phase otherwise is
+mechanical, not logical: commits land on one branch in one checkout, and a
+pre-commit hook that stashes unstaged changes fails spuriously while a second
+agent is editing. Two commits in one batch shared no file and no class and ran
+in sequence anyway, on that alone. `git worktree add --detach` off a checkout an
+agent is actively editing was measured not to disturb it — its modified files
+stayed modified and its index untouched — so the git half of this is safe. The
+environment half, below, is not.
+
+**Replay in topological order and re-run the gate on the composed result.**
+Per-worktree green does not compose. Cherry-pick each worktree's commit onto the
+branch in dependency order, then run the repo's own gate (Phase 0) over what
+that produced: N worktrees means N gate runs plus one, and a conflict on replay
+needs resolving. This buys wall-clock, not tokens — say which one you bought,
+because the setup cost is visible and the saving is not.
+
+**A worktree isolates the source tree. It does not isolate the build or
+dependency environment, and that is where the shared mutable state usually
+lives.** Phase 1 asks only that one worktree can run the gate, which is enough
+for reviewers because reviewers read; a fix agent builds. This has already cost
+a run: a worktree with no virtualenv of its own, a parent shell with the main
+checkout's environment activated, and a `uv sync` invoked transitively by a
+`make` target re-pointed the *shared* editable install at the worktree path. For
+about two minutes every import in the main checkout resolved to a tree without
+the concurrent agent's edits — no error, no warning, and the symptom is worse
+than a crash, because that agent sees an unexplained failure and may "fix"
+something that was never broken. So, before any agent runs in a worktree:
+
+- provision that worktree's own environment, and unset an inherited
+  `VIRTUAL_ENV` or whatever the toolchain's equivalent is — an activated parent
+  environment is what makes the hijack reachable at all;
+- **verify the parent still resolves to itself afterward.** One cheap command
+  from the parent checkout — `uv run python -c "import pkg; print(pkg.__file__)"`
+  for that toolchain — and the only thing that would have caught this;
+- treat any test result a concurrent agent produced during a provisioning window
+  as void, and say so to that agent rather than leaving it to reason from
+  phantom failures.
+
+The shape is not Python-specific: a shared target directory, a module cache, a
+daemon with a project-keyed workspace, or any linked install does the same.
+
+**Parallelism is not free, so it is not automatic.** Setup and replay cost the
+same whether the concurrent work is long or short. For a four-line change the
+worktree, its environment, and the topological replay cost more than waiting for
+the running agent to finish. Rough rule: parallelize a fix node when it is
+itself agent-sized. Orphans and the absorber commit are below that line and
+should just wait.
+
+Spawn one subagent per batch (`general-purpose`; there is no fix persona — a
+fix agent is a batch of repair work, not a lane) with:
+
+1. `${SKILL_DIR}/scripts/prompts/fix.txt`
+2. **the repository's own constraint block** — see below
+3. this batch's briefing entries, verbatim, with their `id`, `kind`, `severity`,
+   `confidence`, `file`, `line` and `counterpart`
+4. the path to write its own JSON object to: `$ADVERSE_RUN/fix-<batch>.json`
+
+**The constraint block is not optional and it is not obvious.** A subagent
+inherits nothing from you: not the rule that a test run prints only pass/fail
+indicators, not the sandbox that decides which tree it may edit, not the
+spelling convention, not the shape this repository's hooks demand of a search
+command, not what the gate is called. Every one of those fails the gate when
+missed, and every one of them is invisible from inside the subagent. Assemble
+it once for the run out of `CLAUDE.md` / `CONTRIBUTING.md` / `AGENTS.md` and
+the gate command from Phase 0, and append the same block to every batch. The
+portable half — reproduce before fixing, close the class, the mutation catalog,
+what to do with something found out of scope — is already in `fix.txt` and is
+versioned with this skill, so it is not retyped per agent: each restatement is
+a place a rule gets silently dropped.
+
+**That per-agent cost is fixed, and it puts a floor under how small a batch is
+worth spawning for.** Six small agents restate the repository half six times,
+and the tokens are the cheap part: a rule lost in one of those restatements is
+lost quietly, and the batch that lost it fails the gate for a reason invisible
+from inside the agent. That is an argument against fine partitioning that has
+nothing to do with model capability, and it points the same direction the class
+rule does.
+
+**Tier is per role, not per size.** "Smaller tasks let you use a smaller model"
+bundles a premise that does not need to be true, and tier is testable at today's
+granularity with no decomposition change at all. Best candidate first: the
+regression pass (Phase 9), which is read-only, one question, bounded in output,
+the most repeated role in the loop and the least destructive if it comes back
+weak; then the docs-and-comments absorber, where nothing changes behavior and
+the gate is the whole test; then a test-only pinning commit. **Not the
+class-closure fix commit** — that is where the value is.
+
+The caveat is the crux, because a tier experiment measuring the wrong thing
+passes. On the "mechanical" test-only commit in one batch, the larger model
+re-derived three cycle constants from the assembly they model rather than
+trusting the brief, verified a reviewer-supplied arithmetic figure instead of
+asserting it, and caught a mutation-trap shape in its own new tests mid-pass —
+recognizing that a green mutation was anomalous and reaching for `fix.txt`'s
+catalog by name. That is recognition, not procedure. Whether a smaller model
+does it under load is unknown, and it is the difference between a fix and a
+plausible fix. So measure trap-recognition specifically rather than whether the
+commit landed green: a commit that lands green on a vacuous test is the failure
+this whole loop exists to prevent, and it looks identical to success.
+
+Then check what landed and fold it, the same way round 1 is checked:
+
+```bash
+node ${SKILL_DIR}/scripts/validate.mjs --phase fix "$ADVERSE_RUN"/fix-*.json
+
+node ${SKILL_DIR}/scripts/decisions.mjs --fix "$ADVERSE_RUN"/fix-*.json \
+    --out "$ADVERSE_RUN"/decisions.json
+```
+
+`decisions.mjs` folds every payload of this iteration into the `decisions.json`
+the `--record` command above reads — `fixed` and `declined` become decisions of
+those dispositions carrying the identity fields the payload already holds, so
+you never reassemble them by hand. Fold the whole iteration in one call.
+
+**An item a fix agent names but does not fix is a finding with no ID.** It is
+not in `report.json`, `--record` has nowhere to put it, and it exists only in
+the agent's final report — which you read once and then lose. The measured cost
+of losing one: an agent reported that a preflight step was not budgeted, under a
+heading that said "out of scope, named not fixed"; nothing was recorded, and the
+next iteration two independent round-1 reviewers spent a lane-pair's attention
+re-deriving it. So the payload carries a `named_not_fixed` list, `decisions.mjs`
+mints an id for each entry (`NF-<batch>-<n>`, which cannot collide with triage's
+`F<n>`) and records it `noted` with the agent's own reasoning. `noted` settles
+nothing, deliberately: an untriaged footnote annotates the next briefing and
+adjudicates no finding. It used to be recorded `deferred`, which settles — so a
+fix agent copying a blocking critical's title into `named_not_fixed`, which
+`fix.txt` tells it to do verbatim, closed that critical with no code change and
+no warning. Read the block it prints before you record — a channel you forward
+without reading is the same footnote in a new place, and **an item that is
+`noted` still needs a decision from you.**
+
+**Every fix commit gets a regression pass** (Phase 9), run by a lane that did
+not report the findings it closes. `fix.txt` tells the agent so, and names the
+four questions that pass will ask — which is what makes the agent's own "What
+else this changed" section honest. Run it per commit, while the diff is small
+and its intent is still known.
+
+**Do not re-run the panel to look for siblings of a finding you fixed.** The fix
+agent has already done it, better and cheaper: a reviewer is reasoning about a
+diff and the fix agent is holding a working reproduction. Asked for a sibling
+sweep, one found a reserved window seven times the size of the reported one,
+reachable by the same mechanism from the same two attacker-controlled bytes,
+that four reviewers across two rounds had missed. A re-run panel will spend a
+full round rediscovering the parent.
 
 ## Phase 8 — check for convergence
 
@@ -731,6 +1046,151 @@ was real — precisely the frame of mind that ships a hasty patch. A verificatio
 pass that only ever confirms closures would launder new defects into the tree
 one iteration at a time.
 
+### The regression pass — one per fix commit, by a lane that did not report it
+
+Verification asks the reporter whether its finding is closed. Nobody is asking
+what else the fix changed, and the reporter is the worst available lens for it:
+it is the agent most invested in the finding being closed. The `added` channel
+exists to catch exactly that and is being asked of the one reviewer least
+motivated to find anything there.
+
+The cost of leaving it unasked, measured: one campaign's first iteration fixed
+25 findings and its second found 40 — at least one of them *created by* the
+first. New warning paths added by a fix became fresh per-message work inside a
+bounded drain loop, so the bound stopped bounding. The fix was correct in
+isolation and wrong in context, which is the characteristic shape and the one
+nobody catches by reading a diff for correctness.
+
+So: **one read-only pass per fix commit, run once, on complete work, by a lane
+that did not report any of the findings that commit closed.** Not oversight of a
+fix agent while it works — a half-applied change is indistinguishable from a
+bug, it pays for a second full-context agent holding the same lens, and by the
+time it objects the edits exist.
+
+Which lane is not yours to choose. You just fixed the code; picking your own
+reviewer is the one selection an interested party must not make:
+
+```bash
+node ${SKILL_DIR}/scripts/regression.mjs --repo . --commit <fix-sha> \
+    --closed-by <persona> [--closed-by <persona> …]
+```
+
+`--closed-by` is every persona that reported a finding this commit closed,
+spelled the way the registry spells it — lowercase, or a split lane's half like
+`auditor-a`. A name this review could not have written is refused at exit 2,
+not ignored — and that is a wider rule than "resolves to no lane". Both of
+these are refused: `--closed-by Auditor` differs by one capital letter,
+excluded nobody, and handed the pass to the lane that reported the finding
+under a line asserting it had reported none of them; `--closed-by auditor-ab`
+*does* name the auditor lane but is not a half the splitter emits, and one
+tightening of that suffix pattern silently moved it from excluding the auditor
+to excluding nobody. If the bridge would have to guess at a name, retype it.
+
+**The flag is required, and omitting it is the same failure spelled shorter.**
+With no `--closed-by` at all the run used to exit 0 having excluded nobody,
+under that same line — a clean artifact claiming a disinterest nothing checked.
+If the commit really closes no reported finding, say so with
+`--closed-by-none`: the pass then runs with nothing excluded and its `reason`
+attributes that to you rather than asserting it. The two cannot be combined.
+
+The answer is the Adversary when the fix diff crosses a trust boundary and the
+Auditor otherwise (`assessScope`, the same signal that gates the Adversary in
+Phase 1), skipping any lane that reported into the commit — and never the
+Pragmatist, whose findings are advisory and so cannot hold a regression. When
+every eligible lane reported into the commit it says `CONFLICTED` and picks one
+anyway: skipping is the silent direction, and a skipped pass reads exactly like
+a clean one. Print that line into your Phase 7 notes when it fires.
+
+Spawn one subagent, with that persona's system prompt and:
+
+1. `${SKILL_DIR}/scripts/prompts/regression.txt`
+2. **the repository's own constraint block** — the same one the fix agents got
+3. the fix commit's diff: `git show <fix-sha>`, and what it was written to close
+4. the path to write its own JSON object to:
+   `$ADVERSE_RUN/regression-<persona>-<pass number>.json`
+
+**The pass number is a digit, and it is not optional when a lane runs more than
+one pass.** This phase is per fix commit and a lane routinely reads several in
+one iteration, so `regression-<persona>.json` for all of them means N−1 passes
+overwrite each other and vanish before the glob below ever runs. Number them
+from 1 in the order you spawn them: `regression-auditor-1.json`,
+`regression-auditor-2.json`.
+
+Numbering restarts each iteration, and the loop reuses `$ADVERSE_RUN`, so
+iteration 2 overwrites `-1` and *leaves iteration 1's `-2` and `-3` for its own
+glob to pick up* — the Phase 0 "never reuse a fixed run directory" rule, one
+directory deeper. The fold refuses that rather than trusting you to remember
+it: a pass file naming a commit this outdir already folded is exit 2, naming
+the file and the commit. Delete the leftovers, fold into a fresh `--outdir`, or
+pass `--refold` when re-reading the same commit is what you meant.
+
+A `round1-<persona>.regression.json` the fold cannot parse is exit 2 for the
+same reason — it cannot tell which passes it would re-sign — and the same three
+remedies apply, `--refold` included: the flag skips the prior folds rather than
+overruling them, so it clears this refusal as well as the stale one. That
+matters because the path is derived from a persona name, so any agent, or a
+fold killed mid-write, can leave a byte there; while `--refold` did not clear
+it, one such byte wedged every lane of the fold and only deleting the file got
+past it.
+
+Two of the three remedies apply when that path is not a regular file at all.
+`--refold` escapes by overwriting the file, and a directory does not take an
+overwrite, so the fold says so and exits 2 with or without the flag: remove the
+path, or fold into a fresh `--outdir`.
+
+Digits, never letters. `regression-auditor-c.json` is a well-formed *split-lane
+half* id everywhere else in this skill, and round 2's independence signal keys
+on that distinction — a pass numbered `-c` would be counted as a third half of
+the auditor lane. A lane that is itself split writes both:
+`regression-auditor-a-1.json` is half a's first pass.
+
+One agent per fix commit, and it is cheap precisely because the fix diff is
+small and the intent is known — the two properties that make a full re-review
+expensive are both absent. It **supplements** verification rather than replacing
+it: they answer different questions and only one of them is about closure.
+
+This is also the **first role to try on a smaller model** (#53). It is
+read-only, single-question, bounded in output, and the most repeated role in the
+loop, so a weak result costs an observation rather than a commit. Measure the
+right thing if you try it: not "did the commit land green", but whether the pass
+still recognizes an anomaly nobody handed it — the recognition, not the
+procedure, is what the role is for.
+
+Then fold every pass of the iteration in one call, and feed the result to triage
+beside the verifications:
+
+```bash
+node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/regression-*.json
+
+node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/regression-*.json \
+    --outdir "$ADVERSE_RUN"
+```
+
+`--phase regression` reads the persona off the basename with the pass number
+stripped, so `regression-auditor-1.json` and `regression-auditor-2.json` both
+validate as the `auditor` lane, and a payload declaring a different `persona`
+than its filename is refused. That stripping is only done for this phase: a
+`-1` on a round-1 or round-2 file still implies a persona named `auditor-1` and
+is refused as an unknown lane, because there the basename is the only thing
+holding a payload to the path it was written to. **Letters after the persona are halves, digits are passes** —
+`regression-auditor-c.json` validates as half `c`, not as pass three.
+
+The reshape stamps each finding `provenance: "regression"`, and both renderers
+print it: "a landed fix commit's regression pass found this" is a different fact
+from "round 2 noticed this", and an operator reading a ranked list cannot act on
+the first without knowing which it is. The findings themselves feed `added` like
+any other new finding — a regression against a commit that already landed *is*
+that shape.
+
+The stamp does **not** say the fix introduced anything, and neither renderer
+claims it does. A regression entry is classified `intended-inert`,
+`intended-undocumented` or `unintended`, and only the last was introduced in the
+sense a reader takes from that word — so `provenance` records which pass found
+the finding and nothing about causation. The classification is where causation
+lives.
+
+### Loop
+
 Feed `verified` + `added` back through triage → synthesize → Phase 7, with the
 ledger attached, and loop:
 
@@ -740,9 +1200,20 @@ node ${SKILL_DIR}/scripts/verify.mjs --verify "$ADVERSE_RUN"/verify-*.json \
 
 node ${SKILL_DIR}/scripts/triage.mjs \
     --round1 "$ADVERSE_RUN"/round1-*.verified.json \
+    --round1 "$ADVERSE_RUN"/round1-*.regression.json \
     --repo . --base "$BASE" --gate "$GATE" --ledger "$LEDGER" \
     --out "$ADVERSE_RUN"/briefing.json
 ```
+
+Drop the second `--round1` line when no regression pass ran. If a lane both
+verified its own findings and ran a regression pass on someone else's fix
+commit, it arrives twice — add `--merge-personas <persona>`, which unions the
+findings and keeps the worse verdict, exactly as it does for a split lane.
+
+`regression.mjs --payload` refuses to fold a lane whose `round1-<persona>.regression.json`
+already names commits these passes do not, because that file is an earlier
+iteration's and re-folding it re-signs stale passes as this iteration's
+evidence. Pass `--refold` when re-reading the same passes is what you meant.
 
 `verify.mjs` validates each payload against the schema before anything trusts
 it — the same discipline every other leg of this flow already has — then
@@ -758,12 +1229,34 @@ reopened finding keeps the severity, kind and anchor it was first reported
 with. Without it each one falls back to a blocking `warning`/`behavioral`:
 noisy rather than silent, and recoverable by passing the flag.
 
+The bridge binds by id and then by title, and the second route is not a
+convenience. `briefing.mjs` re-mints finding ids **positionally on every triage
+run**, so an id a reviewer copied out of an earlier iteration's briefing names
+nothing here — or, worse, names a different finding. Binding by id alone put
+every such verification at the blocking fallback, which for a `design` finding
+contradicts the rule that design never blocks and made the loop unable to
+converge on advisory work.
+
+One case neither route reaches: a finding a round-2 reviewer **added**. It is
+in `briefing.json` under no key at all — triage's only finding input is
+`--round1` — so its verification keeps the blocking `warning`/`behavioral`
+fallback with a null anchor. That is noisy rather than silent, which is the
+direction to fail in, but it is a gap and not a covered case: an advisory
+round-2 addition verified `open` will hold the loop open until someone records
+a decision on it. A title that matches two briefed findings binds to neither: it cannot say
+which is meant, and guessing is how a severity gets copied off the wrong
+finding, so that case falls back to blocking and says so.
+
 The full `verified` array also rides along on the reshaped file, so you can
 read every disposition — closed and moot included — while deciding what to
 record in Phase 7. It is not carried into `report.json`: the dispositions that
 have to reach the arithmetic are the open ones, and those are findings now.
 Its exit codes follow the same contract as every other bridge:
 2 means it never read a payload, 1 means it read one that failed the schema.
+Either way it publishes nothing: every payload is read and validated before the
+first `round1-<persona>.verified.json` is written, so a refusal on the last
+payload does not leave the earlier ones on disk for the next glob to read as a
+complete set. `repair.mjs` and `regression.mjs --payload` hold to the same rule.
 
 
 Findings the ledger records as settled will not be re-litigated; anything
@@ -775,6 +1268,33 @@ that fix was supposed to cover.
 Finding and group IDs are **per-run**, re-derived by each triage pass. The
 ledger does not depend on them: a recorded group carries its own title and
 citation titles, which is what the next iteration matches and renders.
+
+### Four cheaper answers than another panel
+
+A maintainer running this loop across several repositories re-ran the full panel
+after every fix batch and reported that fixing a batch "resulted in many
+regressions and new bugs (including criticals) every single time", which then
+needed another full review — "not a cheap or speedy proposition." The re-panel
+is the single largest expense in the loop and it is not what this skill asks
+for. Before reaching for one:
+
+- **Phase 9 exists.** Verification plus the regression pass above answers both
+  questions a re-panel would, against a small diff with the intent known. A full
+  re-panel after a fix batch is not the prescribed path.
+- **Smaller fix commits.** Regression risk scales worse than linearly with diff
+  size, and the pass above is cheap enough to run on every commit only because
+  each commit is small.
+- **Fix in dependency order.** A test cannot be trusted until what it reads is
+  correct, so a test-only commit that lands before the code it pins is a green
+  gate that proves nothing.
+- **Decline more.** The loop's exit condition is *decisions recorded*, not
+  *findings fixed* — `declined` and `deferred` both settle a finding, and both
+  keep the ledger from raising it again. `noted` does neither; naming a finding
+  in `named_not_fixed` is not a way to close it. A real-but-low-consequence finding
+  fixed hastily is net negative: it is unreviewed code written by whoever was
+  most convinced the finding was real. A campaign that fixes everything is
+  choosing maximum churn, and every orchestrator defaults to fixing because
+  nothing else tells it otherwise.
 
 ## Phase 10 — hand over
 
@@ -814,13 +1334,21 @@ surfaces that reading cannot:
 - **A blind spot the panel did not cover** — most valuably one a human found
   that four lanes missed. That is a gap in the lanes, not in the change.
 
+A fourth shape belongs to you rather than to the panel: **a decision you had to
+derive because nothing told you how.** How to divide the batch, what a fix agent
+had to be told, which nodes could run at once, which role could drop a tier —
+if you worked one of those out mid-run, the next orchestrator will work it out
+again. Write it into the phase where the decision gets made, not into a section
+about orchestration: doctrine filed near a decision is doctrine that gets
+skipped at it.
+
 Where each lesson goes:
 
 | The lesson is about | Write it to |
 |---|---|
 | how a reviewer should look | the persona's prompt in `src/personas.mjs`, or `VERIFY_INSTRUCTIONS` in `src/prompts.mjs` if it is about checking a fix |
 | how this repository works | its `CLAUDE.md` / `AGENTS.md` / architecture notes |
-| how the loop itself should run | this file |
+| how the loop itself should run | this file — in the phase that makes the decision, never as an appendix |
 | how *you* should work, across projects | your own persistent instructions or memory, if the harness gives you one |
 
 Then say what you wrote and why, in one or two sentences. Do not pad this: a
@@ -842,10 +1370,10 @@ ledger, rather than only in conversation state.
 | 1 — file list & plan | Once `plan.json` is written | The plan is a file now, not a fact anyone has to remember. |
 | 2 — round 1 | **Never** until every persona's file passes `validate.mjs` | An unsaved or unvalidated reviewer payload is exactly the state a mid-phase compaction loses — a subagent still working has nothing durable yet. |
 | 3 — triage | Once `briefing.json` is written | Triage's whole output is a file; Phase 4 reads it, not the conversation. |
-| 4 — round 2 | **Never** until every `round2-<persona>.json` passes `validate.mjs`, and never between triage and synthesize | Same unsaved-payload risk as Phase 2, plus `$ROUNDS`/`$CAP`/`$R2_REASON` exist only as shell variables until Phase 6 writes the report that carries them forward. |
+| 4 — round 2 | **Never** until every `round2-<agent>.json` passes `validate.mjs` — both halves of a split lane, not one file per persona, and never between triage and synthesize | Same unsaved-payload risk as Phase 2, plus `$ROUNDS`/`$CAP`/`$R2_REASON` exist only as shell variables until Phase 6 writes the report that carries them forward. |
 | 5 — repair, combine | Once `round1.json` and `round2.json` are written | The repaired and combined files are the only state Phase 6 needs. |
 | 6 — synthesize | Once `report.json` / `report.md` are written | This is the artifact the whole triage → synthesize span exists to produce. |
-| 7 — decide, record | **Never mid-fix-batch.** Safe once decisions are `--record`ed to the ledger *and* the fix commit lands with the gate re-run green | Before that, "which findings are fixed" and "what the diff contains" exist only as edits in flight — exactly the state Phases 8–9 depend on. |
+| 7 — decide, record | **Never mid-fix-batch.** Safe once decisions are `--record`ed to the ledger *and* every fix commit is on the branch with the gate re-run green over all of them together | Before that, "which findings are fixed" and "what the diff contains" exist only as edits in flight — exactly the state Phases 8–9 depend on. A worktree's own green is not the composed one, so a batch that ran concurrently is not checkpointable until the replay is done. |
 | 8 — check convergence | Anytime after it runs | Its exit code is derived entirely from the ledger and `report.json`, both already durable. |
 | 9 — verify | **Never** until every `verify-<persona>.json` passes validation | Same unsaved-reviewer-payload rule as Phases 2 and 4. |
 | 10 — hand over | Anytime | Everything is in the ledger, the branch, and (if opened) the PR. |
@@ -867,7 +1395,7 @@ Everywhere else, disk already holds what the loop needs next.
 | `triage.mjs` reports `REGRESSED` | Lead with it. A fix that did not take is more important than any new finding. |
 | `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge or ruling and continue. |
 | `triage.mjs` reports an `OVERSIZED` candidate root cause | The edges chained further than one root cause plausibly reaches. It will not collapse whatever round 2 says; tell round 2 to name the smaller root causes inside it. |
-| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
+| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`/`decisions`/`regression`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
 | `converge.mjs` exits 3 | The cap, not success. Say plainly what is still open. |
 | Ledger version mismatch | Do not delete it. Tell the user which version it is; the schema changed under them. |
 | `node` not on PATH | Tell the user to install Node 22+. Do not improvise a fallback. |
@@ -879,8 +1407,12 @@ Everywhere else, disk already holds what the loop needs next.
   Phase 1 plan scales that in both directions: a small boundary-free diff runs
   2 round-1 calls (Auditor + Steward) and, when round 1 reports nothing of a
   blocking kind, no round 2 — a floor of **2**. A large diff splits the
-  per-file lanes into two agents each, up to 6 + 3 = **9**. Each loop
-  iteration adds ~3 cheap verification calls, not another 7.
+  per-file lanes into two agents each, and round 2 is per AGENT rather than per
+  persona — both halves rule, which is the point of splitting — so it is
+  6 + 5 = **11**, not 6 + 3: four round-2 calls from the two split lanes plus
+  the Steward, the Pragmatist never cross-reviewing. Each loop iteration adds
+  ~3 cheap verification calls, not another 7, plus one regression pass per fix
+  commit.
 - **Every deterministic step is deterministic on purpose.** Triage, repair,
   tracing, synthesis, and the stop condition are Node code because a model in
   any of those positions can hallucinate consensus, and consensus is the

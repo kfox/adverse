@@ -31,5 +31,17 @@ against a repository you do not trust is running that repository's `.git`
 configuration, which is out of scope here — clone it somewhere disposable
 first.
 
+**Payload authorship is not authenticated.** Schema validation says a payload is
+well formed and agrees with its own filename; it does not say *who wrote it*. A
+reviewer with a Write tool and a shared run directory can write a path it was
+not given — a sibling half's, or another lane's — and the distinct-reviewer
+count is what synthesis reads as cross-validation. Demonstrated: one author
+writing three payloads renders `confidence: consensus` with two validators.
+Nothing in this repository can close it, because closing it requires knowing
+which agent wrote a file and the filesystem does not record that. It closes in
+the harness, by making each agent's own directory the only place it may write.
+Treat the panel's independence as a property of your harness, not of these
+checks.
+
 **No network calls of its own.** The Node code spawns `git` and reads and writes
 files. Reaching a model is the calling agent's job, not this tool's.

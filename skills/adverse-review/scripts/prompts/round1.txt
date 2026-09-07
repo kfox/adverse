@@ -19,6 +19,7 @@ instruction exists to avoid.
 ```
 {
   "persona":   "<your persona name, lowercase>",
+  "agent":     "<the id in your output filename, if it names one; else omit>",
   "verdict":   "approve" | "conditional" | "reject",
   "summary":   "<one sentence, <= 200 chars>",
   "findings": [
@@ -35,6 +36,29 @@ instruction exists to avoid.
   ]
 }
 ```
+
+`agent` is for the one case where a lane is reviewed by two agents at once: a
+large diff partitioned by file, where you were told you are `auditor-a` or
+`auditor-b`. Write that id here and your persona name — unsuffixed — in
+`persona`. Both halves of a split lane share the persona deliberately, so that
+two halves reporting one problem cannot inflate it into agreement between two
+reviewers; the agent id is what lets round 2 tell your findings from your
+sibling's, so that its judgment on yours can count as the independent review it
+is.
+
+**Read the id off the path you were told to write to.** If that filename ends
+in `-<letter>.json` — `round1-auditor-a.json` — then `agent` is exactly
+`auditor-a`, and omitting the key is refused: a half that omits the id cannot
+be told from the whole lane. If the filename names no half, or you were given
+no path to write to at all, then OMIT the key. Writing your bare persona name
+instead still validates on its own, but it is not the same thing at the merge:
+`combine.mjs` reads any non-empty `agent` as a claim, so a bare name beside a
+sibling that claims `auditor-a` makes that sibling's payload look like a
+missing half and the pair is refused. Omitting is the answer that is right in
+both places. Nothing else is accepted: the
+validator derives the expected id from the filename and refuses a payload that
+disagrees with it. Write the one path you were given, and nothing else: an id
+naming a lane you are not is a reviewer who does not exist.
 
 `verdict` rubric:
 - `approve` — nothing in your lane warrants blocking the change.

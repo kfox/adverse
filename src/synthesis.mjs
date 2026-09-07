@@ -33,7 +33,8 @@
 // are both credible enough (cross-validated or consensus) and consequential
 // enough (not advisory, not `info`) to hold a change open.
 
-import { ADVISORY_KINDS, GROUP_RULINGS, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
+import { isLaneAgent } from './personas.mjs';
+import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
          assertCoversStatuses } from './taxonomy.mjs';
 
 // Verdict → score mapping. The natural symmetric choice: approve and reject
@@ -70,16 +71,231 @@ export function worseVerdict(a, b) {
 // The summary cell cap below is derived from this bound for the same reason.
 const MERGED_SUMMARY_PART_MAX = 200;
 const SUMMARY_CELL_MAX = 2 * MERGED_SUMMARY_PART_MAX + ' · '.length;
+
+// ---------- Agent identity ---------------------------------------------------
+//
+// A lane split across two agents writes ONE persona name from both halves, on
+// purpose: `reporters` dedupes on persona, so two halves finding the same thing
+// cannot inflate it to `cross-validated`. That property is untouched here.
+// What the persona name cannot do is tell `auditor-a` from `auditor-b`, and
+// round 2's self-validation guard needs exactly that — `-b` read different
+// files and its judgment on `-a`'s findings is as independent as any other
+// lane's, but the guard used to discard it as the lane rubber-stamping itself.
+//
+// Three questions, one rule underneath: an id counts only if it names its own
+// lane (src/personas.mjs, `isLaneAgent`). Everything else resolves toward the
+// persona, which is the behavior that predates this field.
+
+// The id an entry claims, or null when it claims none the lane will vouch for.
+// An entry stamped by a split-lane merge answers for itself; otherwise the
+// payload answers for all of its entries.
+function claimedAgent(persona, payload, entry) {
+  const claimed = coerceStr(entry?.agent) ?? coerceStr(payload?.agent);
+  return isLaneAgent(persona, claimed) ? claimed : null;
+}
+
+// Who REPORTED an entry. The bare persona is a legitimate answer here — an
+// unsplit lane reports as itself — so nothing is refused, only defaulted.
+function entryAgent(persona, payload, entry) {
+  return claimedAgent(persona, payload, entry) ?? persona;
+}
+
+// Which HALF of a lane is making a round-2 ruling, or null for "the lane
+// itself". Null is the fail-closed default, and it is the answer in three
+// cases: the payload named no agent, it named one that does not belong to this
+// lane, or it named the bare persona. The first is an orchestrator that
+// predates agent ids, and it must keep getting today's persona-level behavior
+// — otherwise doing nothing would silently start counting a lane's ruling on
+// its own finding as independent, which is the one direction this change must
+// not fail. The third is a payload claiming to BE the whole lane: a claim to
+// contain both halves, so it can be neither of them.
+function rulingAgent(persona, payload, entry) {
+  const agent = claimedAgent(persona, payload, entry);
+  return agent === persona ? null : agent;
+}
+
+// ---------- Provenance ------------------------------------------------------
+//
+// "The fix introduced this" and "round 2 noticed this" are different facts, and
+// an operator reading a ranked list cannot act on the first without knowing
+// which it is. Both arrive as `added` findings — a regression found against a
+// commit that already landed IS the `added` shape, and giving it a parallel
+// channel would mean every consumer of `findings` had to learn about a second
+// one — so the distinction rides on the finding instead.
+//
+// Read from the ENTRY first and the payload second, the same order
+// `claimedAgent` uses and for the same reason: a split-lane merge unions two
+// payloads' entry lists under one payload header, so an identity that lives
+// only on the header is one the merge cannot carry.
+function provenanceOf(payload, entry) {
+  return entry?.provenance === PROVENANCE.regression
+    || payload?.provenance === PROVENANCE.regression
+    ? PROVENANCE.regression : PROVENANCE.review;
+}
+
+// The other half of that rule: WHO may write the field it reads.
+//
+// `provenanceOf` trusts the file, and the file is written by a bridge —
+// skills/adverse-review/scripts/regression.mjs stamps `regression` on the
+// findings a Phase 9 pass produced, after validating the pass's own payload.
+// Nothing checked that, so any reviewer could put the key on an ordinary
+// round-1, round-2 or verify finding and buy the report's loudest label.
+// Measured before this guard, on a plain `round1-auditor.json` whose finding
+// carried `"provenance": "regression"`:
+//
+//   validate.mjs --phase round1 round1-auditor.json   ->  ok (auditor), exit 0
+//   the rendered report              ->  _Reported by: auditor · confidence:
+//                                        solo · found by the regression pass on
+//                                        a fix commit that landed_
+//
+// No pass ran, no commit was named, and that sentence is the one that points a
+// human at a revert. So the field is INADMISSIBLE from an agent — refused, not
+// stripped, because a reviewer that wrote it either misread the schema or was
+// reaching for a label it has not earned, and each is worth a sentence back.
+// What a bridge stamps, it stamps after this check.
+//
+// Every list of objects on the payload is swept, not a named few: `findings`,
+// `added`, `verified`, `validate`, `challenge` and whatever a later phase adds
+// all reach a reader eventually, and a whitelist would have to be edited by
+// whoever adds the next one. Depth one is enough because that is the depth at
+// which `provenanceOf` reads.
+const BRIDGE_STAMPED_FIELD = 'provenance';
+
+// `key` is PAYLOAD-CHOSEN and both callers print this claim straight to stderr,
+// so an ordinary key is named as-is and anything else is quoted. A key spelled
+// `findings\n/x/round1-adversary.json: ok (adversary)\nfindings` made
+// `validate.mjs --phase round1` emit forged `ok (<persona>)` lines for lanes
+// whose files do not exist — the hazard validate.mjs already names for the
+// `agent` label, twenty-six lines above the call site this went through.
+//
+// Quoting only the odd ones on purpose: the message's job is to NAME the field,
+// and the tests pin that (`findings[1].provenance`). Quoting unconditionally
+// made every honest message read `"findings"[1].provenance`.
+//
+// Bounded as well as quoted, because the sink is not only a terminal: SKILL.md
+// tells the orchestrator to append this bridge's stderr line to the retry
+// prompt it sends the agent. Measured before the bound: a 2.16 MB key produced
+// a single 2,160,328-byte stderr message in 0.05 s. `MAX_REASON_CHARS` in
+// src/ledger.mjs bounds ledger text for exactly this reason; the length here is
+// its own constant rather than an import, since a field NAME needs far less
+// room than a sentence and one number serving two purposes is how the next one
+// drifts.
+const PLAIN_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+const MAX_KEY_CHARS = 80;
+const nameKey = (key) => {
+  const clipped = key.length > MAX_KEY_CHARS
+    ? `${key.slice(0, MAX_KEY_CHARS)}… [clipped]` : key;
+  return PLAIN_KEY.test(clipped) ? clipped : JSON.stringify(clipped);
+};
+
+function payloadStampSite(payload) {
+  if (BRIDGE_STAMPED_FIELD in payload) return BRIDGE_STAMPED_FIELD;
+  for (const [key, list] of Object.entries(payload)) {
+    if (!Array.isArray(list)) continue;
+    const at = list.findIndex((e) => e && typeof e === 'object' && BRIDGE_STAMPED_FIELD in e);
+    if (at !== -1) return `${nameKey(key)}[${at}].${BRIDGE_STAMPED_FIELD}`;
+  }
+  return null;
+}
+
+export function stampedFieldClaim(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const site = payloadStampSite(payload);
+  if (!site) return null;
+  return `\`${site}\` is stamped by the bridge that writes a regression pass to disk,`
+    + " not claimed by a payload: it is what makes the report say a fix commit's"
+    + ' regression pass found a finding. Remove the key.';
+}
+
+// What the report says beside a finding the regression pass found. Spelled out
+// rather than printing the bare word: `regression` next to `confidence: solo`
+// reads as another confidence label, and the fact that matters to a reader
+// deciding what to do is that a commit which already landed introduced it.
+const REGRESSION_NOTE = 'found by the regression pass on a fix commit that landed';
+
+// The agent a whole payload was written by, read off the payload's own
+// persona because a bridge merging two files has no key to consult.
+function payloadAgent(payload) {
+  const persona = coerceStr(payload?.persona);
+  return claimedAgent(persona, payload, null) ?? persona;
+}
+
+// Stamp each half's entries with the agent that produced them, before the two
+// lists become one list under one persona name. This has to be a JSON field
+// and not a closure: combine.mjs writes the merged object to round1.json and
+// synthesis reads it back out of the file, so an identity that lives anywhere
+// but in the payload is an identity the second half of the pipeline cannot
+// see. Unconditional, overwriting whatever the reporter put there — the stamp
+// is what the round-2 guard keys on, and a payload that names its sibling on
+// its own finding would hand its sibling's ruling an independent vote.
+function stampAgent(payload, key) {
+  const agent = payloadAgent(payload);
+  const entries = Array.isArray(payload?.[key]) ? payload[key] : [];
+  return entries.map((e) => (e && typeof e === 'object' && !Array.isArray(e)
+    ? { ...e, agent }
+    : e));
+}
+
+// The merged object describes a LANE, so every field on its header has to be
+// true of the whole lane. The header is BUILT from the fields that are, rather
+// than inherited from half A with subtractions, because the subtracting form
+// was wrong within one commit of being written: it deleted `agent` — half A's
+// id left there labels half B's verdict, summary and findings with half A's
+// name — and then `provenance` arrived on a payload header, rode the `{ ...a }`
+// spread onto the merged lane, and `provenanceOf`'s payload fallback stamped
+// half B's ordinary findings "found by the regression pass on a fix commit that
+// landed", which is the one label that points a human at a revert.
+//
+// Two more per-half fields were already riding along by then: `verified`
+// (verify.mjs) and `passes` (regression.mjs), each a record of what ONE half
+// checked, presented on the merged header as the lane's. They are dropped here
+// with the rest, and nothing is lost that is not still on disk: the
+// `round1-<persona>.verified.json` and `.regression.json` halves combine.mjs
+// read keep those lists beside their own persona, correctly attributed.
+//
+// A denylist has to be edited every time a payload grows a field, and a field
+// nobody remembered fails toward a lie about the other half. This way it fails
+// toward a missing line.
+const LANE_HEADER_KEYS = ['persona'];
+
+function mergedLane(a) {
+  const lane = {};
+  for (const key of LANE_HEADER_KEYS) {
+    if (a?.[key] !== undefined) lane[key] = a[key];
+  }
+  return lane;
+}
+
 export function mergeSplitReviews(a, b) {
   const part = (s) => String(s ?? '').slice(0, MERGED_SUMMARY_PART_MAX);
   return {
-    ...a,
+    ...mergedLane(a),
     verdict: worseVerdict(a?.verdict, b?.verdict),
     summary: [a?.summary, b?.summary].filter(Boolean).map(part).join(' · '),
-    findings: [
-      ...(Array.isArray(a?.findings) ? a.findings : []),
-      ...(Array.isArray(b?.findings) ? b.findings : []),
-    ],
+    findings: [...stampAgent(a, 'findings'), ...stampAgent(b, 'findings')],
+  };
+}
+
+// The round-2 counterpart. Merging two cross-reviews used to be refused
+// outright, and the reason was sound: both halves write one persona name, so a
+// union handed synthesis two payloads' rulings with no way to tell which agent
+// made which — and the self-validation guard, keyed on the persona, discarded
+// every one of them. Once each entry carries its own agent (above), the union
+// is the whole point: `auditor-b` read different files and its judgment on
+// `auditor-a`'s findings is as independent as any other lane's.
+//
+// `groups` is unioned for the same reason the other three lists are — a
+// dropped ruling is a candidate root cause reported as unruled — and it is
+// safe to let one persona appear twice there: `buildRootCauses` counts voices
+// with a Set, and two halves that disagree land the group on `contested`,
+// which dissolves nothing and decides every citation individually.
+export function mergeSplitCrossReviews(a, b) {
+  return {
+    ...mergedLane(a),
+    validate: [...stampAgent(a, 'validate'), ...stampAgent(b, 'validate')],
+    challenge: [...stampAgent(a, 'challenge'), ...stampAgent(b, 'challenge')],
+    groups: [...stampAgent(a, 'groups'), ...stampAgent(b, 'groups')],
+    added: [...stampAgent(a, 'added'), ...stampAgent(b, 'added')],
   };
 }
 const CONFIDENCE_RANK = { disputed: 0, 'cross-validated': 1, consensus: 2, solo: 3 };
@@ -119,6 +335,58 @@ export function isBlocking(finding) {
   return !ADVISORY_KINDS.has(finding.kind) && finding.severity !== 'info';
 }
 
+// Did the agent making a ruling already report the finding it is ruling on?
+// The lane-level answer stands unless a payload named a half of a split lane,
+// and even then a finding the whole lane reported — `reporterAgents` carrying
+// the bare persona, which is what an unsplit or unstamped round 1 produces —
+// is still that agent's own work.
+function reportedBy(finding, persona, agent) {
+  if (!finding.reporters.includes(persona)) return false;
+  if (agent === null) return true;
+  return finding.reporterAgents.includes(agent)
+    || finding.reporterAgents.includes(persona);
+}
+
+// The same question for a GROUP ruling: is the reviewer that ruled the only
+// reporter of every citation, i.e. a reviewer confirming that its own findings
+// are one thing? Asked through `reportedBy` so the two answers cannot drift —
+// keying this one on the persona alone made a split lane's two halves
+// independent for a validate edge and one reviewer for a group ruling, and
+// `auditor-b`'s ruling on `auditor-a`'s citations was discarded as
+// self-ruling. An unresolved citation has no `reporterAgents` to consult, so
+// its claimed reporter answers for the agents too: that reads as self-ruling,
+// which costs a voice rather than minting one.
+function ruledOnOwnCitations(ruling, citations) {
+  return citations.every((c) => {
+    const reporters = c.reporters ?? [c.reporter];
+    const reporterAgents = c.reporterAgents ?? reporters;
+    return reporters.length === 1
+      && reportedBy({ reporters, reporterAgents }, ruling.persona, ruling.agent);
+  });
+}
+
+// Who a group ruling speaks as: the half of a split lane that declared itself,
+// the lane otherwise. Exported because both renderers have to answer it the
+// same way — each printed `r.persona`, so a split lane's two rulings arrived as
+// two indistinguishable `auditor` blocks claiming two reviewers where there was
+// one lane.
+export function rulingVoice(ruling) {
+  return ruling.agent ?? ruling.persona;
+}
+
+// One entry per PERSONA, whatever agent produced it. A split lane's two halves
+// can both rule on the same finding now, and `validators.length` is what turns
+// a finding into `consensus` while the group `voices` count decides whether a
+// root cause collapses — two entries under one persona would be one lane
+// counted twice, which is precisely the inflation the halves' shared persona
+// name exists to prevent. First ruling wins; a sibling that agrees adds no
+// information, and one that disagrees is a lane arguing with itself, which is
+// not a second voice either way.
+function recordRuling(list, persona, reason) {
+  if (list.some((e) => e.persona === persona)) return;
+  list.push({ persona, reason });
+}
+
 // The stop condition and the report's headline number are the same question —
 // "is this both blocking and credible enough to hold the change open?" —
 // asked on either side of the report.json serialization boundary. Defined
@@ -130,7 +398,7 @@ export function isOpenBlocking(finding) {
     && (finding.confidence === 'cross-validated' || finding.confidence === 'consensus');
 }
 
-function buildFinding(persona, raw) {
+function buildFinding(persona, raw, agent = persona) {
   const title = coerceStr(raw?.title);
   const severity = raw?.severity;
   if (!title || !(severity in SEVERITY_RANK)) return null;
@@ -144,6 +412,18 @@ function buildFinding(persona, raw) {
     counterpart: coerceStr(raw?.counterpart),
     fix: coerceStr(raw?.fix),
     reporters: [persona],
+    // Which AGENTS reported it, beside which lanes did. A split lane's two
+    // halves write one persona name deliberately — `reporters` deduping on it
+    // is what stops two halves inflating a finding to `cross-validated` — so
+    // round 2 needs a second string to tell `auditor-a` from `auditor-b`.
+    // Confidence never reads this list; only the self-validation guard does.
+    reporterAgents: [agent],
+    // Which pass produced this finding — an ordinary review round, or a
+    // regression pass over a fix commit that already landed. Declared here so
+    // the field exists on every finding whether or not a run ran the pass; a
+    // shape that appears only sometimes is one every consumer has to guess
+    // about. `upsert` promotes it, so the default is the quiet one.
+    provenance: PROVENANCE.review,
     validators: [], // Array<{persona, reason}>
     challengers: [],
     confidence: 'solo',
@@ -196,7 +476,18 @@ function buildRootCauses(groups, round2, findByTitle) {
     for (const r of cross?.groups ?? []) {
       if (!r || typeof r !== 'object' || !GROUP_RULINGS.has(r.ruling)) continue;
       if (!rulingsById.has(r.id)) rulingsById.set(r.id, []);
-      rulingsById.get(r.id).push({ persona, ruling: r.ruling, reason: (coerceStr(r.reason) ?? '').trim() });
+      // The agent rides along: `mergeSplitCrossReviews` stamps it onto every
+      // unioned `groups` entry for exactly this reader, and dropping it here
+      // cost two things at once — the report could not say which half ruled,
+      // and `selfRuled` could not tell a sibling's ruling from the lane's own.
+      // Null means "the lane itself", which is what `rulingAgent` fails
+      // closed to.
+      rulingsById.get(r.id).push({
+        persona,
+        agent: rulingAgent(persona, cross, r),
+        ruling: r.ruling,
+        reason: (coerceStr(r.reason) ?? '').trim(),
+      });
     }
   }
 
@@ -221,6 +512,10 @@ function buildRootCauses(groups, round2, findByTitle) {
         // own `reporters` is what synthesis actually resolved. Where they
         // disagree, the group was reporting the unverified one.
         reporters: f?.reporters ?? null,
+        // Which AGENTS reported it, at the granularity a split lane needs: the
+        // group ruling below asks whether the half that ruled is the one that
+        // reported, and `reporters` answers only for the lane.
+        reporterAgents: f?.reporterAgents ?? null,
       };
     });
 
@@ -237,18 +532,22 @@ function buildRootCauses(groups, round2, findByTitle) {
     // but it should not silently vouch for one either.
     const reporters = [...new Set(citations.flatMap((c) => c.reporters ?? [c.reporter]))];
 
-    // A ruling from a persona that is the only reporter of every citation is a
-    // persona confirming that its own findings are one thing. `validate` and
-    // `challenge` already skip a persona's edge on a finding it reported
-    // itself; a group ruling had no such guard.
-    const selfRuled = rulings
-      .filter((r) => citations.every((c) => {
-        const rs = c.reporters ?? [c.reporter];
-        return rs.length === 1 && rs[0] === r.persona;
-      }))
-      .map((r) => r.persona);
+    // A ruling from the reviewer that is the only reporter of every citation is
+    // that reviewer confirming that its own findings are one thing. `validate`
+    // and `challenge` already skip such an edge; a group ruling had no such
+    // guard.
+    //
+    // Excluded by identity, not by name: two rulings can share a persona (one
+    // per half of a split lane), and excluding by name threw away the half that
+    // had not reported anything along with the half that had. `voices` still
+    // counts PERSONAS, so two halves agreeing remain one voice and cannot reach
+    // MIN_CONFIRMING_VOICES between them.
+    const selfRulings = rulings.filter((r) => ruledOnOwnCitations(r, citations));
+    // Deduped and named per agent: `['auditor','auditor']` printed one lane
+    // twice, as if a second reviewer had ruled.
+    const selfRuled = [...new Set(selfRulings.map(rulingVoice))];
     const voices = new Set(
-      rulings.filter((r) => !selfRuled.includes(r.persona)).map((r) => r.persona));
+      rulings.filter((r) => !selfRulings.includes(r)).map((r) => r.persona));
 
     // A confirmed group is ONE fix and ONE disposition covering N citations,
     // so confirming it is the consequential direction and needs the same
@@ -287,17 +586,30 @@ export function synthesize(round1, round2 = {},
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
-  function upsert(persona, raw) {
-    const f = buildFinding(persona, raw);
+  // Takes the whole payload rather than a pre-computed agent id: it now needs
+  // two things off the payload header, and computing one of them at each call
+  // site and the other here is how the two answers drift apart.
+  function upsert(persona, payload, raw) {
+    const f = buildFinding(persona, raw, entryAgent(persona, payload, raw));
     if (f === null) return null;
+    f.provenance = provenanceOf(payload, raw);
     const norm = normTitle(f.title);
     const primaryKey = `${norm}|${f.file ?? ''}|${f.line ?? ''}`;
     let existing = byKey.get(primaryKey) ?? byNormTitle.get(norm);
     if (existing) {
       if (!existing.reporters.includes(persona)) existing.reporters.push(persona);
+      for (const a of f.reporterAgents) {
+        if (!existing.reporterAgents.includes(a)) existing.reporterAgents.push(a);
+      }
       if (severityRank(f.severity) < severityRank(existing.severity)) {
         existing.severity = f.severity;
       }
+      // Regression provenance is sticky across a merge. A second lane noticing
+      // the same thing in the ordinary way does not make it less true that a
+      // fix commit introduced it, and losing that fact is the silent
+      // direction: the operator reads a ranked list and cannot tell the two
+      // apart. Keeping it costs one line of report text.
+      if (f.provenance === PROVENANCE.regression) existing.provenance = PROVENANCE.regression;
       if (f.detail.length > existing.detail.length) existing.detail = f.detail;
       if (!existing.fix && f.fix) existing.fix = f.fix;
       if (existing.file === null && f.file) existing.file = f.file;
@@ -321,14 +633,14 @@ export function synthesize(round1, round2 = {},
   // 1. Phase 1 findings
   for (const [persona, review] of Object.entries(round1)) {
     for (const raw of review?.findings ?? []) {
-      if (raw && typeof raw === 'object') upsert(persona, raw);
+      if (raw && typeof raw === 'object') upsert(persona, review, raw);
     }
   }
 
   // 2. Phase 2 "added" findings (treated as first-class)
   for (const [persona, cross] of Object.entries(round2)) {
     for (const raw of cross?.added ?? []) {
-      if (raw && typeof raw === 'object') upsert(persona, raw);
+      if (raw && typeof raw === 'object') upsert(persona, cross, raw);
     }
   }
 
@@ -342,16 +654,16 @@ export function synthesize(round1, round2 = {},
     for (const v of cross?.validate ?? []) {
       if (!v || typeof v !== 'object') continue;
       const f = findByTitle(v.title);
-      if (!f || f.reporters.includes(persona)) continue; // self-validation does not count
+      if (!f || reportedBy(f, persona, rulingAgent(persona, cross, v))) continue;
       const reason = (coerceStr(v.reason) ?? '').trim();
-      f.validators.push({ persona, reason });
+      recordRuling(f.validators, persona, reason);
     }
     for (const c of cross?.challenge ?? []) {
       if (!c || typeof c !== 'object') continue;
       const f = findByTitle(c.title);
-      if (!f || f.reporters.includes(persona)) continue;
+      if (!f || reportedBy(f, persona, rulingAgent(persona, cross, c))) continue;
       const reason = (coerceStr(c.reason) ?? '').trim();
-      f.challengers.push({ persona, reason });
+      recordRuling(f.challengers, persona, reason);
     }
   }
 
@@ -454,6 +766,93 @@ function consensusLabel(score, verdicts) {
 }
 
 // ---------- Markdown renderer -----------------------------------------------
+//
+// Every string below arrives in agent-written JSON, and this renderer draws one
+// line through them rather than escaping whatever the last incident named:
+//
+//   NAMES A THING -> verbatim. A persona, an agent, a verdict, a finding or
+//   group id, a `file`, a `line`, a `counterpart`, a ruling, an off-vocabulary
+//   `kind`, and the one-line `summary` the tool signs. None of these has any
+//   legitimate markup in it,
+//   and the summary is the position where the tool wraps its OWN sentence
+//   around payload data, so a construct that renders differently than it was
+//   recorded is a lie about the run. `verbatim` below is the whole rule.
+//
+//   IS PROSE -> rendered as Markdown, on purpose. A finding's `title` and
+//   `detail`, a `fix`, a validation, challenge or ruling `reason`, a skip
+//   reason, and `round2Skipped`. The prompts ask for sentences in these fields
+//   and reviewers legitimately write code spans, lists and emphasis inside
+//   them; code-spanning a six-sentence `detail` would cost the report its
+//   readability to buy nothing an operator cares about. They are TRUSTED, not
+//   overlooked: a reviewer who writes `~~` into a title gets strikethrough,
+//   which is a formatting choice inside a block that is already labeled as
+//   that reviewer's words. It is not a claim the tool is making.
+//
+// The HTML renderer (src/html.mjs) makes no such distinction — `esc` runs on
+// everything, prose included — because there the alternative is live markup in
+// a browser rather than emphasis in a text file.
+
+// A payload-supplied value rendered so GFM interprets none of it.
+//
+// Neutralization here is a CODE SPAN rather than a list of escaped characters,
+// because the list does not close. The verdict cell escaped `|`, collapsed
+// newlines, and did nothing else, so a regression payload whose `commit` was
+// `abc~~-not-really~~` reached the report through the bridge's own
+// `regression pass on ${commits}` sentence and rendered as `abc-not-really`
+// struck through: the commit an operator READS differs from the commit the
+// tool RECORDED, inside the sentence the tool signs as its own conclusion.
+// `www.host/p` in the same position rendered as a live attacker-chosen link.
+// Those are two members of a set that also holds `_`, `*`, backticks,
+// `[label](url)`, `<img …>`, `#`, and whatever GFM's next extension adds; a
+// validator that enumerates them is a fix for the two we thought of. Inside a
+// code span GFM parses none of it — the autolink extension included — so the
+// construct nobody has thought of yet is covered too.
+//
+// The fence is CommonMark's rule rather than one fixed backtick: a run one
+// longer than the longest run in the text, padded with a space when the text
+// starts or ends with a backtick (a reader strips exactly one). The locators
+// below WERE wrapped in a bare single backtick, which is a code span a `file`
+// of ``a`b`` walks straight out of.
+//
+// Newlines collapse rather than escape, because there is no spelling of a line
+// break that survives a table row, and a value spanning lines in any other
+// position is prose this function's callers have already decided it is not.
+//
+// The collapse is stated as "a whitespace run containing a newline becomes one
+// space" rather than as `/\s*[\r\n]+\s*/`, and that is a fix, not a rewording.
+// The old shape is two quantifiers over the same class with the second able to
+// fail: on a whitespace run holding no newline, `\s*` matched the whole run,
+// `[\r\n]+` failed, and the engine backtracked the run away one character at a
+// time, from every starting position. Quadratic, and the input is payload-
+// supplied — a `file` or a `summary` of 64,000 spaces took 6.5 SECONDS, 256,000
+// took 103. The same class this branch already fixed once in src/scope.mjs.
+// One greedy quantifier over one class with nothing after it to fail cannot
+// backtrack: 2,000,000 spaces now take 1.9 ms, and the output is byte-identical
+// on all thirteen cases the two forms were compared over.
+//
+// The pad also covers a leading or trailing SPACE, not only a backtick.
+// CommonMark strips one space from each end of a code span when both ends have
+// one, so ` x ` used to render as `x` — the value an operator reads differing
+// from the value recorded, which is the whole thing this function exists to
+// prevent. Padding makes both ends spaces, which guarantees the strip takes the
+// padding rather than the content.
+function verbatim(text) {
+  const flat = String(text ?? '')
+    .replace(/\s+/g, (run) => (/[\r\n]/.test(run) ? ' ' : run));
+  if (flat === '') return '';
+  const longest = (flat.match(/`+/g) ?? []).reduce((n, run) => Math.max(n, run.length), 0);
+  const fence = '`'.repeat(longest + 1);
+  const pad = /^[\s`]|[\s`]$/.test(flat) ? ' ' : '';
+  return `${fence}${pad}${flat}${pad}${fence}`;
+}
+
+// The same, for a cell of the one Markdown table this file emits. A `|` splits
+// a GFM row before any inline parser runs, code span or not, so it still needs
+// the backslash — which the table reader consumes, leaving the literal
+// character inside the span.
+function verbatimCell(text) {
+  return verbatim(String(text ?? '').replaceAll('|', '\\|'));
+}
 
 // Null prototype, like every other lookup keyed by something a payload can
 // name. A root-cause group carries a reviewer-supplied `severity` through
@@ -506,11 +905,11 @@ function renderRootCauses(rootCauses) {
   lines.push('');
   for (const rc of rootCauses) {
     const marker = SEVERITY_MARKER[rc.severity] ?? '·';
-    lines.push(`### ${marker} **[${rc.id}]** ${rc.title}`);
+    lines.push(`### ${marker} **[${verbatim(rc.id)}]** ${rc.title}`);
     lines.push('');
     lines.push(`_${ROOT_CAUSE_STATUS[rc.status] ?? rc.status} · ${rc.citations.length} citations `
       + `from ${rc.reporters.length} reviewer${rc.reporters.length === 1 ? '' : 's'} `
-      + `(${rc.reporters.join(', ')}) · ${rc.blocking ? 'blocking' : 'advisory only'}_`);
+      + `(${rc.reporters.map(verbatim).join(', ')}) · ${rc.blocking ? 'blocking' : 'advisory only'}_`);
     // Why a group that every ruling called `one` is still only `proposed`.
     // Without this the label reads as "round 2 did not rule" directly above a
     // ruling that plainly did, and the quorum looks like a bug.
@@ -521,19 +920,29 @@ function renderRootCauses(rootCauses) {
         : 'not confirmed';
       lines.push('');
       lines.push(`> ⚖️ **Not confirmed:** ${short}.`
+        // "nobody else reported" rather than "it is the only reporter of":
+        // `selfRuled` can legitimately name two halves of one lane, and the
+        // singular subject then read as two reviewers agreeing.
         + (c.selfRuled.length
-          ? ` ${c.selfRuled.join(', ')} ruled on a group it is the only reporter of, which is not a voice.`
+          ? ` ${c.selfRuled.map(verbatim).join(', ')} ruled on a group nobody else reported,`
+            + ' which is not a voice.'
           : ''));
     }
     lines.push('');
     for (const c of rc.citations) {
-      const loc = c.file ? ` — \`${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}\`` : '';
+      const loc = c.file
+        ? ` — ${verbatim(`${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}`)}`
+        : '';
       // `counterpart` is half a contract citation's identity — the claim is "X
       // contradicts Y" — and it is carried on the record specifically so a
       // group decision copied out of here can still match next iteration.
       // Both renderers dropped it.
-      const against = c.counterpart ? ` — contradicts \`${c.counterpart}\`` : '';
-      lines.push(`- **${c.id}** (${c.reporter}, ${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}) `
+      const against = c.counterpart ? ` — contradicts ${verbatim(c.counterpart)}` : '';
+      // One span for the whole identity triple: all three arrive on a group
+      // citation out of briefing.json, where nothing has gated them against
+      // the taxonomy the way `buildFinding` gates a finding's own pair.
+      const who = verbatim(`${c.reporter}, ${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}`);
+      lines.push(`- **${verbatim(c.id)}** (${who}) `
         + `${c.title}${loc}${against}`
 
         + (c.resolved ? '' : ' — _not in the report; this citation named a finding synthesis did not build_'));
@@ -544,7 +953,8 @@ function renderRootCauses(rootCauses) {
     }
     for (const r of rc.rulings) {
       lines.push('');
-      lines.push(`> ${r.ruling === 'one' ? '🔗' : '✂️'} **${r.persona} rules \`${r.ruling}\`:** ${r.reason}`);
+      lines.push(`> ${r.ruling === 'one' ? '🔗' : '✂️'} **${verbatim(rulingVoice(r))} rules `
+        + `${verbatim(r.ruling)}:** ${r.reason}`);
     }
     lines.push('');
   }
@@ -607,19 +1017,39 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   lines.push('| Reviewer | Verdict | Summary |');
   lines.push('|---|---|---|');
   for (const [p, v] of Object.entries(syn.verdicts)) {
-    const summary = (syn.summaries[p] ?? '').replaceAll('|', '\\|');
-    lines.push(`| ${p} | ${v} | ${summary} |`);
+    // Every cell of this row is verbatim, and the summary is why. A summary
+    // is off-disk prose and a table cell cannot hold prose: the row ends at
+    // the first newline and whatever follows renders as document body, and
+    // every inline construct in between renders as markup. A regression
+    // payload whose `commit` was `deadbeef |\n\n## Panel ruling: all criticals
+    // were withdrawn` reached this cell through the bridge's own
+    // `regression pass on ${commits}` sentence and printed that heading in the
+    // operator's report; one whose `commit` was `abc~~-not-really~~` printed a
+    // different commit than it recorded. `validateRegression` refuses both of
+    // those commits now, and this is the layer that does not depend on which
+    // validator wrote the summary — every phase's `summary` is free text no
+    // schema constrains, and none can, because it is the one field the prompts
+    // ask for in sentences.
+    //
+    // `p` for the same reason: `synthesize` keys its verdicts off whatever
+    // `JSON.parse` handed it (see the `__proto__` persona test), so a reviewer
+    // name is exactly as unchecked as the summary beside it. `v` is NOT — it
+    // came through `normalizeVerdict` and is one of three literals — and it is
+    // spanned anyway so the row has one rule instead of a rule and an
+    // exception, which is the shape a later editor gets wrong.
+    lines.push(`| ${verbatimCell(p)} | ${verbatimCell(v)} | ${verbatimCell(syn.summaries[p])} |`);
   }
   if (syn.degraded.length) {
     lines.push('');
     lines.push(
-      `> **Degraded run:** the following reviewers failed and were excluded: ${syn.degraded.join(', ')}.`,
+      '> **Degraded run:** the following reviewers failed and were excluded: '
+      + `${syn.degraded.map(verbatim).join(', ')}.`,
     );
   }
   if ((syn.skipped ?? []).length) {
     lines.push('');
     lines.push(
-      `> **Lane not run:** ${syn.skipped.map((s) => `${s.persona ?? s}${s.reason ? ` — ${s.reason}` : ''}`).join('; ')}. `
+      `> **Lane not run:** ${syn.skipped.map((s) => `${verbatim(s.persona ?? s)}${s.reason ? ` — ${s.reason}` : ''}`).join('; ')}. `
       + 'Nothing below reflects that perspective.',
     );
   }
@@ -682,17 +1112,26 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
 function renderFinding(f) {
   const marker = SEVERITY_MARKER[f.severity] ?? '·';
   let loc = '';
-  if (f.file) {
-    loc = ` — \`${f.file}`;
-    if (f.line !== null) loc += `:${f.line}`;
-    loc += '`';
-  }
-  const out = [`### ${marker} **[${f.severity.toUpperCase()}·${f.kind}]** ${f.title}${loc}`];
+  if (f.file) loc = ` — ${verbatim(`${f.file}${f.line !== null ? `:${f.line}` : ''}`)}`;
+  // `kind` was in neither list above, and it is not prose. `coerceKind` only
+  // trims and defaults, deliberately — an unrecognized kind is preserved so it
+  // still blocks (src/taxonomy.mjs) — so the field carries arbitrary payload
+  // text into the tool's own headline, where `]**` can be closed and markup
+  // opened after it. A known kind renders exactly as before, so every honest
+  // report is byte-identical; only the off-vocabulary case is neutralized, and
+  // it is the case that was never supposed to be readable prose anyway.
+  //
+  // `UNCLASSIFIED` counts as known: `coerceKind` MINTS that value, so it is the
+  // tool's own word rather than the payload's. Neutralizing it code-spanned a
+  // string no payload chose, which an existing test caught.
+  const kind = f.kind === UNCLASSIFIED || KINDS.includes(f.kind) ? f.kind : verbatim(f.kind);
+  const out = [`### ${marker} **[${f.severity.toUpperCase()}·${kind}]** ${f.title}${loc}`];
   out.push('');
-  out.push(`_Reported by: ${f.reporters.join(', ')} · confidence: ${f.confidence}_`);
+  out.push(`_Reported by: ${f.reporters.map(verbatim).join(', ')} · confidence: ${f.confidence}${
+    f.provenance === PROVENANCE.regression ? ` · ${REGRESSION_NOTE}` : ''}_`);
   if (f.counterpart) {
     out.push('');
-    out.push(`_Contradicts:_ \`${f.counterpart}\``);
+    out.push(`_Contradicts:_ ${verbatim(f.counterpart)}`);
   }
   out.push('');
   out.push(f.detail);
@@ -703,13 +1142,13 @@ function renderFinding(f) {
   if (f.validators.length) {
     out.push('');
     for (const { persona, reason } of f.validators) {
-      out.push(`> ✅ **${persona} validates:** ${reason}`);
+      out.push(`> ✅ **${verbatim(persona)} validates:** ${reason}`);
     }
   }
   if (f.challengers.length) {
     out.push('');
     for (const { persona, reason } of f.challengers) {
-      out.push(`> ⚠️ **${persona} challenges:** ${reason}`);
+      out.push(`> ⚠️ **${verbatim(persona)} challenges:** ${reason}`);
     }
   }
   return out;
@@ -768,6 +1207,11 @@ export function toJsonReport(syn) {
       challengers: f.challengers,
       confidence: f.confidence,
       group: f.group ?? null,
+      // Which pass found it. Serialized rather than left in memory because the
+      // reader who most needs it is the operator working a ranked list out of
+      // report.json one iteration later, when "a fix commit introduced this"
+      // is no longer obvious from anything else on the row.
+      provenance: f.provenance ?? PROVENANCE.review,
       blocking: isBlocking(f),
       // Did any reviewer go on record about THIS finding? A round-2 reviewer's
       // own added finding has no validators and no challengers by

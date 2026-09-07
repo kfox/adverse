@@ -28,19 +28,13 @@ import { fileURLToPath } from 'node:url';
 import { importFromSrc } from './package-root.mjs';
 
 const { PERSONAS } = await importFromSrc('personas.mjs');
-const { PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS, VERIFY_INSTRUCTIONS } =
+const { FIX_INSTRUCTIONS, PHASE1_INSTRUCTIONS, PHASE2_BRIEFING_INSTRUCTIONS,
+        REGRESSION_INSTRUCTIONS, VERIFY_INSTRUCTIONS } =
   await importFromSrc('prompts.mjs');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(here, 'prompts');
-mkdirSync(outDir, { recursive: true });
-
-for (const p of Object.values(PERSONAS)) {
-  writeFileSync(path.join(outDir, `${p.name}.txt`), p.system + '\n', 'utf-8');
-}
-writeFileSync(path.join(outDir, 'round1.txt'), PHASE1_INSTRUCTIONS, 'utf-8');
-writeFileSync(path.join(outDir, 'round2.txt'), PHASE2_BRIEFING_INSTRUCTIONS, 'utf-8');
-writeFileSync(path.join(outDir, 'verify.txt'), VERIFY_INSTRUCTIONS, 'utf-8');
+const agentsDir = path.join(here, '..', 'agents');
 
 // --- subagent definitions ----------------------------------------------------
 // Deliberately no `model:` in the frontmatter. The Agent tool's own `model`
@@ -68,11 +62,44 @@ export function agentDefinition(persona) {
   ].join('\n');
 }
 
-const agentsDir = path.join(here, '..', 'agents');
-mkdirSync(agentsDir, { recursive: true });
-for (const p of Object.values(PERSONAS)) {
-  writeFileSync(path.join(agentsDir, `${p.name}.md`), agentDefinition(p), 'utf-8');
+// One per persona, plus round1, round2, verify, fix and regression.
+const SHARED_PROMPT_FILES = 5;
+
+// Every write lives in here, and nothing calls it on import. That is the whole
+// point of the function: `tests/prompts.test.mjs` imports this module for
+// `agentDefinition`, and while these writes ran at module scope that import
+// regenerated all twelve tracked files as a side effect of running the suite.
+// The drift test's own failure mode was the consequence — edit a prompt
+// constant without regenerating and the suite failed on the first run, silently
+// rewrote the file it had just compared, and passed on the second with nothing
+// done. A red gate that heals itself on a re-run is worse than no gate: the
+// habit it teaches is "run it again". It also left the working tree dirty from
+// a test run, which is a rule this repository states elsewhere and could not
+// keep here.
+function main() {
+  mkdirSync(outDir, { recursive: true });
+  for (const p of Object.values(PERSONAS)) {
+    writeFileSync(path.join(outDir, `${p.name}.txt`), p.system + '\n', 'utf-8');
+  }
+  writeFileSync(path.join(outDir, 'round1.txt'), PHASE1_INSTRUCTIONS, 'utf-8');
+  writeFileSync(path.join(outDir, 'round2.txt'), PHASE2_BRIEFING_INSTRUCTIONS, 'utf-8');
+  writeFileSync(path.join(outDir, 'verify.txt'), VERIFY_INSTRUCTIONS, 'utf-8');
+  writeFileSync(path.join(outDir, 'fix.txt'), FIX_INSTRUCTIONS, 'utf-8');
+  writeFileSync(path.join(outDir, 'regression.txt'), REGRESSION_INSTRUCTIONS, 'utf-8');
+
+  mkdirSync(agentsDir, { recursive: true });
+  for (const p of Object.values(PERSONAS)) {
+    writeFileSync(path.join(agentsDir, `${p.name}.md`), agentDefinition(p), 'utf-8');
+  }
+
+  process.stdout.write(
+    `wrote ${Object.keys(PERSONAS).length + SHARED_PROMPT_FILES} prompt files to ${outDir}\n`);
+  process.stdout.write(`wrote ${Object.keys(PERSONAS).length} agent definitions to ${agentsDir}\n`);
 }
 
-process.stdout.write(`wrote ${Object.keys(PERSONAS).length + 3} prompt files to ${outDir}\n`);
-process.stdout.write(`wrote ${Object.keys(PERSONAS).length} agent definitions to ${agentsDir}\n`);
+// Not `import.meta.main`: that is Node 24+, and package.json's engines floor is
+// 22, where it is `undefined` — the generator would quietly stop writing on the
+// oldest supported runtime and every regeneration would be a no-op.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

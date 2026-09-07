@@ -217,11 +217,11 @@ test('--merge-personas <persona> unions the split lane: findings, worse verdict,
   const dir = freshTmp();
   try {
     const a = reviewAs(dir, 'auditor-a.json', {
-      persona: 'auditor', verdict: 'approve', summary: 'half one',
+      persona: 'auditor', agent: 'auditor-a', verdict: 'approve', summary: 'half one',
       findings: [{ severity: 'warning', kind: 'defect', title: 'from half one' }],
     });
     const b = reviewAs(dir, 'auditor-b.json', {
-      persona: 'auditor', verdict: 'reject', summary: 'half two',
+      persona: 'auditor', agent: 'auditor-b', verdict: 'reject', summary: 'half two',
       findings: [{ severity: 'critical', kind: 'defect', title: 'from half two' }],
     });
     const out = path.join(dir, 'combined.json');
@@ -242,8 +242,10 @@ test('--merge-personas <persona> unions the split lane: findings, worse verdict,
 test('the worse verdict wins in either input order', () => {
   const dir = freshTmp();
   try {
-    const a = reviewAs(dir, 'a.json', { persona: 'auditor', verdict: 'conditional', summary: 's', findings: [] });
-    const b = reviewAs(dir, 'b.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
+    const a = reviewAs(dir, 'a.json',
+      { persona: 'auditor', agent: 'auditor-a', verdict: 'conditional', summary: 's', findings: [] });
+    const b = reviewAs(dir, 'b.json',
+      { persona: 'auditor', agent: 'auditor-b', verdict: 'approve', summary: 's', findings: [] });
     for (const order of [[a, b], [b, a]]) {
       const out = path.join(dir, 'combined.json');
       const r = runCombine(['--round1', ...order, '--merge-personas', 'auditor', '--out', out]);
@@ -258,8 +260,10 @@ test('the worse verdict wins in either input order', () => {
 test('an off-contract verdict is recorded as reject, loudly — it cannot erase its partner\'s reject', () => {
   const dir = freshTmp();
   try {
-    const a = reviewAs(dir, 'a.json', { persona: 'auditor', verdict: 'reject', summary: 's', findings: [] });
-    const b = reviewAs(dir, 'b.json', { persona: 'auditor', verdict: 'REJECTED', summary: 's', findings: [] });
+    const a = reviewAs(dir, 'a.json',
+      { persona: 'auditor', agent: 'auditor-a', verdict: 'reject', summary: 's', findings: [] });
+    const b = reviewAs(dir, 'b.json',
+      { persona: 'auditor', agent: 'auditor-b', verdict: 'REJECTED', summary: 's', findings: [] });
     for (const order of [[a, b], [b, a]]) {
       const out = path.join(dir, 'combined.json');
       const r = runCombine(['--round1', ...order, '--merge-personas', 'auditor', '--out', out]);
@@ -329,14 +333,52 @@ test('--merge-personas leaves the duplicate guard live for lanes it does not nam
   }
 });
 
-test('--merge-personas is refused for --round2 — round-2 payloads carry no findings to union', () => {
+// This pair used to assert that --merge-personas was REFUSED for --round2. The
+// refusal was right for the code it guarded: two cross-reviews unioned under
+// one persona name gave synthesis no way to say which half ruled, so the
+// self-validation guard threw every ruling away and the merge really did drop a
+// payload's work. Each entry now carries its own agent id (kfox/adverse#50),
+// which is what makes the union worth doing — so these tests are rewritten to
+// pin the union, not deleted.
+test('--merge-personas unions a split lane\'s two round-2 payloads, stamped per agent', () => {
   const dir = freshTmp();
   try {
-    const a = review(dir, 'auditor');
+    const a = reviewAs(dir, 'r2-auditor-a.json', {
+      persona: 'auditor', agent: 'auditor-a',
+      validate: [{ id: 'F1', from: 'steward', title: 'T1', reason: 'a agrees' }],
+      challenge: [], groups: [{ id: 'G1', ruling: 'one', reason: 'a says one' }], added: [],
+    });
+    const b = reviewAs(dir, 'r2-auditor-b.json', {
+      persona: 'auditor', agent: 'auditor-b',
+      validate: [], added: [],
+      challenge: [{ id: 'F2', from: 'auditor', title: 'T2', reason: 'b disagrees' }],
+      groups: [],
+    });
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round2', a, b, '--merge-personas', 'auditor', '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    const { auditor } = JSON.parse(readFileSync(out, 'utf-8'));
+    assert.deepEqual(auditor.validate.map((e) => [e.title, e.agent]), [['T1', 'auditor-a']]);
+    assert.deepEqual(auditor.challenge.map((e) => [e.title, e.agent]), [['T2', 'auditor-b']]);
+    assert.deepEqual(auditor.groups.map((g) => [g.id, g.agent]), [['G1', 'auditor-a']]);
+    // The merged object describes a lane, not a half, so it names no agent of
+    // its own — one there would label half B's rulings with half A's id.
+    assert.ok(!('agent' in auditor), 'the merged lane must not claim one half\'s id');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a split lane with only one round-2 half present is refused', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'r2-auditor-a.json', {
+      persona: 'auditor', agent: 'auditor-a', validate: [], challenge: [], added: [],
+    });
     const out = path.join(dir, 'combined.json');
     const r = runCombine(['--round2', a, '--merge-personas', 'auditor', '--out', out]);
-    assert.equal(r.status, 2);
-    assert.match(r.stderr, /applies only to --round1/);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /got 1/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -380,8 +422,10 @@ function writePlan(dir, lanes) {
 test('--plan derives --merge-personas from lanes the plan split (agents > 1)', () => {
   const dir = freshTmp();
   try {
-    const a = reviewAs(dir, 'auditor-a.json', { persona: 'auditor', verdict: 'approve', summary: 'half one', findings: [] });
-    const b = reviewAs(dir, 'auditor-b.json', { persona: 'auditor', verdict: 'reject', summary: 'half two', findings: [] });
+    const a = reviewAs(dir, 'auditor-a.json',
+      { persona: 'auditor', agent: 'auditor-a', verdict: 'approve', summary: 'half one', findings: [] });
+    const b = reviewAs(dir, 'auditor-b.json',
+      { persona: 'auditor', agent: 'auditor-b', verdict: 'reject', summary: 'half two', findings: [] });
     const plan = writePlan(dir, [
       { persona: 'auditor', run: true, agents: 2, reason: 'split' },
       { persona: 'steward', run: true, agents: 1, reason: 'not split' },
@@ -400,10 +444,11 @@ test('--plan derives --merge-personas from lanes the plan split (agents > 1)', (
 test('--plan and --merge-personas union rather than override each other', () => {
   const dir = freshTmp();
   try {
-    const a = reviewAs(dir, 'auditor-a.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
-    const b = reviewAs(dir, 'auditor-b.json', { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
-    const s1 = reviewAs(dir, 'steward-a.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
-    const s2 = reviewAs(dir, 'steward-b.json', { persona: 'steward', verdict: 'approve', summary: 's', findings: [] });
+    const lane = (persona, agent) => ({ persona, agent, verdict: 'approve', summary: 's', findings: [] });
+    const a = reviewAs(dir, 'auditor-a.json', lane('auditor', 'auditor-a'));
+    const b = reviewAs(dir, 'auditor-b.json', lane('auditor', 'auditor-b'));
+    const s1 = reviewAs(dir, 'steward-a.json', lane('steward', 'steward-a'));
+    const s2 = reviewAs(dir, 'steward-b.json', lane('steward', 'steward-b'));
     // The plan only knows about the auditor split; steward is named by hand.
     const plan = writePlan(dir, [{ persona: 'auditor', run: true, agents: 2, reason: 'split' }]);
     const out = path.join(dir, 'combined.json');
@@ -494,15 +539,17 @@ test('the Pragmatist missing from a round-2 combine is not warned about', () => 
   }
 });
 
-test('--merge-personas is still refused for --round2 even alongside --plan', () => {
+test('--plan derives the round-2 split roster too, and still demands both halves', () => {
   const dir = freshTmp();
   try {
-    const a = review(dir, 'auditor');
+    const a = reviewAs(dir, 'r2-auditor-a.json', {
+      persona: 'auditor', agent: 'auditor-a', validate: [], challenge: [], added: [],
+    });
     const plan = writePlan(dir, [{ persona: 'auditor', run: true, agents: 2, reason: 'split' }]);
     const out = path.join(dir, 'combined.json');
-    const r = runCombine(['--round2', a, '--plan', plan, '--merge-personas', 'auditor', '--out', out]);
-    assert.equal(r.status, 2);
-    assert.match(r.stderr, /applies only to --round1/);
+    const r = runCombine(['--round2', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 1, 'half a split lane is a degraded lane, not a quiet success');
+    assert.match(r.stderr, /got 1/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -571,6 +618,296 @@ test('a --plan file with no `lanes` array is a usage error, not a silent no-op',
     const r = runCombine(['--round1', a, '--plan', plan, '--out', out]);
     assert.equal(r.status, 2);
     assert.match(r.stderr, /not a plan\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- a split lane's two halves must be two distinct, real agents ------------
+//
+// validate.mjs binds each id to the filename its payload was written to; this
+// is the merge site, where the two are held against each other. `checkRoster`
+// counts payloads and never reads one, so neither of these was visible here.
+
+const half = (agent, over = {}) => ({
+  persona: 'auditor', agent, verdict: 'approve', summary: 's', findings: [], ...over,
+});
+
+function splitPlan(dir, agents = 2) {
+  return writePlan(dir, [{ persona: 'auditor', run: true, agents, reason: 'split' }]);
+}
+
+test('two halves of a split lane declaring ONE agent id are refused', () => {
+  const dir = freshTmp();
+  try {
+    // Both stamped `auditor-b`: the agent that wrote half A carries its
+    // sibling's name, so its round-2 ruling on its own finding counts as
+    // independent and a cross-validated critical drops to `disputed`.
+    const a = reviewAs(dir, 'dup-a.json', half('auditor-b'));
+    const b = reviewAs(dir, 'dup-b.json', half('auditor-b'));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--plan', splitPlan(dir), '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /already claimed by/);
+    assert.match(r.stderr, /dup-a\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a split half that declares no agent id is refused, not stamped with the lane', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'nameless-a.json', half('auditor-a'));
+    const b = reviewAs(dir, 'nameless-b.json',
+      { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] });
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--plan', splitPlan(dir), '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /has to say which half wrote it/);
+    assert.match(r.stderr, /nameless-b\.json/);
+    assert.doesNotMatch(r.stderr, /nameless-a\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an agent id outside the plan\'s roster for that lane is refused', () => {
+  const dir = freshTmp();
+  try {
+    // `auditor-c` is a well-formed id for this lane — it is what a three-way
+    // split's third agent is called — but this plan spawned two agents, so no
+    // such half exists and shape alone cannot say so.
+    const a = reviewAs(dir, 'roster-a.json', half('auditor-a'));
+    const b = reviewAs(dir, 'roster-c.json', half('auditor-c'));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--plan', splitPlan(dir), '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /is not an agent of the 'auditor' lane/);
+    assert.match(r.stderr, /auditor-a or auditor-b/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a hand-declared split with no plan still holds a claimed id to this lane', () => {
+  const dir = freshTmp();
+  try {
+    // `--merge-personas` without a plan has no roster to check against, so the
+    // membership check is shape (src/personas.mjs, isLaneAgent) — and membership
+    // and distinctness are exactly as load-bearing here as they are under a
+    // plan. PRESENCE is the one check that reads on the population: with no plan
+    // there is no count of halves to hold the pair to, so two halves that BOTH
+    // omit `agent` are the Phase 9 fold's legs and are accepted. What makes an
+    // omission a MISSING half there is a sibling's claim, not the plan — the
+    // mixed-pair tests below, which is where presence is exercised in this
+    // population. This test's body only ever exercised membership, so read its
+    // name as the guarantee it actually covers.
+    const a = reviewAs(dir, 'hand-a.json', half('auditor-a'));
+    const b = reviewAs(dir, 'hand-b.json', half('adversary-b'));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--merge-personas', 'auditor', '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /is not an agent of the 'auditor' lane/);
+    assert.match(r.stderr, /'auditor-<letter>'/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- one id beside one omission is a missing half, not a leg ----------------
+//
+// Accepting two UNLABELED halves is deliberate: SKILL.md Phase 9 folds one
+// lane's verify and regression legs through `--merge-personas`, and neither
+// verify.mjs nor regression.mjs writes an `agent`. The same gate also admitted
+// the MIXED pair, and that one is not inert.
+//
+// Measured end to end before this guard, with no plan: combine exited 0, the
+// unlabeled half's finding was stamped `agent: "auditor"`, and a round-2
+// payload in which `auditor-a` validated that finding produced
+// `validators: []` and `confidence: "solo"` — where the identical review with
+// the second half stamped `auditor-b` records
+// `validators: [{persona: "auditor"}]` and `confidence: "consensus"`.
+// `reportedBy` (src/synthesis.mjs) reads the bare persona as "the whole lane
+// reported this" and discards the sibling's honest ruling with it. One omitted
+// optional field, one silently converted consensus.
+
+const NAMELESS_HALF = { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] };
+
+for (const order of ['labeled half first', 'unlabeled half first']) {
+  test(`a mixed labeled/unlabeled pair with no plan is refused (${order})`, () => {
+    const dir = freshTmp();
+    try {
+      const labeled = reviewAs(dir, 'mixed-a.json', half('auditor-a'));
+      const nameless = reviewAs(dir, 'mixed-b.json', NAMELESS_HALF);
+      const files = order === 'labeled half first' ? [labeled, nameless] : [nameless, labeled];
+      const out = path.join(dir, 'combined.json');
+      const r = runCombine(['--round1', ...files, '--merge-personas', 'auditor', '--out', out]);
+
+      assert.equal(r.status, 1, r.stdout);
+      // The guard reads the pair, not the argv order: the message always names
+      // the half that owes an id, then the sibling whose claim makes it owe one.
+      assert.match(r.stderr, /mixed-b\.json: .*mixed-a\.json declares `agent` "auditor-a"/);
+      assert.match(r.stderr, /has to say which half wrote it too/);
+      assert.match(r.stderr, /'auditor-<letter>'/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+// `declaresAgent` answers "does this payload declare an id AT ALL", and two of
+// its three arms were pinned by nothing: dropping `agent !== ''`, and then
+// `agent !== null` as well, each left the full suite green. An empty string and
+// an explicit null are how a payload omits the field while looking like it did
+// not — a serializer that writes every key, a template with the value deleted —
+// and either one beside a sibling's claim is the missing half this guard exists
+// to refuse.
+for (const [label, value] of [['an empty string', ''], ['an explicit null', null]]) {
+  test(`${label} in \`agent\` is an omission, not a claim`, () => {
+    const dir = freshTmp();
+    try {
+      const labeled = reviewAs(dir, 'arm-a.json', half('auditor-a'));
+      const blank = reviewAs(dir, 'arm-b.json', { ...NAMELESS_HALF, agent: value });
+      const out = path.join(dir, 'combined.json');
+      const r = runCombine(['--round1', labeled, blank,
+        '--merge-personas', 'auditor', '--out', out]);
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(r.stderr, /arm-b\.json: .*arm-a\.json declares `agent` "auditor-a"/);
+      assert.match(r.stderr, /has to say which half wrote it too/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('a plan that declares the lane `agents: 1` does not license a mixed pair', () => {
+  const dir = freshTmp();
+  try {
+    // `--merge-personas` beside a `--plan` that does not split the lane is the
+    // Phase 9 fold's own documented invocation, and `laneAgents` returns null
+    // for it — so this is the no-plan population, reached the other way. The
+    // fold's two legs both omit `agent`; a pair where one half claims
+    // `auditor-a` is not that fold.
+    const a = reviewAs(dir, 'onelane-a.json', half('auditor-a'));
+    const b = reviewAs(dir, 'onelane-b.json', NAMELESS_HALF);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--merge-personas', 'auditor',
+      '--plan', splitPlan(dir, 1), '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /onelane-b\.json/);
+    assert.match(r.stderr, /has to say which half wrote it too/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an `agent` that is not a string is a bad id, not a half that omitted one', () => {
+  const dir = freshTmp();
+  try {
+    // The classifier's named default, and it fails noisy. `payloadAgent`
+    // (src/synthesis.mjs) coerces an ill-formed id to the bare persona, so
+    // `agent: 42` is a half that will be stamped with the whole LANE while
+    // looking labeled. Reading it as an omission would let a pair of them
+    // through as two unlabeled legs and cost both halves their vote in
+    // silence; the membership check says it out loud instead.
+    const a = reviewAs(dir, 'typed-a.json', half(42));
+    const b = reviewAs(dir, 'typed-b.json', half(42));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--merge-personas', 'auditor', '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /`agent` 42 is not an agent of the 'auditor' lane/);
+    assert.match(r.stderr, /typed-a\.json/);
+    assert.match(r.stderr, /typed-b\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unsplit lane is not asked for an agent id at all', () => {
+  const dir = freshTmp();
+  try {
+    // The named default: one payload has no sibling to be confused with, and
+    // its `agent` was already held against its own filename by validate.mjs.
+    const a = review(dir, 'auditor');
+    const plan = splitPlan(dir, 1);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(personasIn(out), ['auditor']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a round-2 split lane is held to the same two ids', () => {
+  const dir = freshTmp();
+  try {
+    const cross = (agent) => ({ persona: 'auditor', agent, validate: [], challenge: [], added: [] });
+    const a = reviewAs(dir, 'r2-dup-a.json', cross('auditor-a'));
+    const b = reviewAs(dir, 'r2-dup-b.json', cross('auditor-a'));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round2', a, b, '--plan', splitPlan(dir), '--out', out]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /already claimed by/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a lane merged for the Phase 9 fold is not asked for split-half ids', () => {
+  const dir = freshTmp();
+  try {
+    // `--merge-personas` is also how SKILL.md Phase 9 folds one lane's verify
+    // and regression payloads, and neither verify.mjs nor regression.mjs writes
+    // an `agent` field. Driving the id check off `roster.merged` — which unions
+    // the plan's split lanes with the raw flag values — demanded
+    // `'auditor-<letter>'` from both legs and exited 1 on the documented flow,
+    // with a message calling a lane the plan declares `agents: 1` "a declared
+    // split lane". Only the plan can tell a missing half from a leg.
+    const a = reviewAs(dir, 'round1-auditor.verified.json',
+      { persona: 'auditor', verdict: 'conditional', summary: 'the verify leg', findings: [] });
+    const b = reviewAs(dir, 'round1-auditor.regression.json',
+      { persona: 'auditor', verdict: 'approve', summary: 'the regression leg', findings: [] });
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--merge-personas', 'auditor',
+      '--plan', splitPlan(dir, 1), '--out', out]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(personasIn(out), ['auditor']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('combine accepts the regression fold that stamps `provenance` itself', () => {
+  // The inverse of what this test first asserted, and the correction matters.
+  // `provenance` IS refused from an agent payload — at validate.mjs, verify.mjs
+  // and regression.mjs's own reader. It must NOT be refused here: combine's
+  // inputs include `regression.mjs`'s fold, which stamps the field on its header
+  // and on every finding because stamping it is the fold's job. Gating it here
+  // refused the bridge's own output at exit 1, advising "Remove the key" — which
+  // would delete the regression note from the report.
+  const dir = freshTmp();
+  try {
+    const fold = reviewAs(dir, 'round1-steward.regression.json', {
+      persona: 'steward', verdict: 'conditional', summary: 'regression pass on abc1234',
+      provenance: 'regression',
+      findings: [{ severity: 'warning', kind: 'contract', file: 'a.mjs', line: 1,
+        title: 'found by the pass', detail: 'd', fix: null, provenance: 'regression' }],
+    });
+    const other = review(dir, 'auditor');
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', fold, other, '--out', out]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(personasIn(out), ['auditor', 'steward']);
+    const combined = JSON.parse(readFileSync(out, 'utf-8'));
+    assert.equal(combined.steward.findings[0].provenance, 'regression',
+      'the stamp has to survive the merge or the report cannot say who found it');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

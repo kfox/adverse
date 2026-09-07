@@ -482,3 +482,31 @@ test('--agents refuses a plan lane whose persona is not in the registry', () => 
     }
   }
 });
+
+test('a long documentation line runs the adversary without claiming a boundary', () => {
+  // The reason `assessScope` returns is what this bridge persists into
+  // plan.json's lane, so the operator surface and the artifact are one string.
+  // Measured before the fix, on this repo's own README shape: the lane read
+  // "trust-boundary signals present (0 in paths, 1 in added code, 0 in removed
+  // code)" for one added line of ordinary prose.
+  const prose = 'Amend the scope gate description so that it says what is true of the length '
+    + 'backstop, because the sentence it replaces described a gate that only ever matched '
+    + 'patterns and that is no longer the gate this repository ships to anybody at all.';
+  assert.ok(prose.length > 200, `fixture is ${prose.length} chars`);
+  const dir = repoWith({
+    base: { 'README.md': 'short line\n' },
+    change: { 'README.md': `short line\n${prose}\n` },
+  });
+  try {
+    const r = runPlan(['--repo', dir, '--base', 'main', '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    const lane = JSON.parse(r.stdout).lanes.find((l) => l.persona === 'adversary');
+
+    // Still run — an unreadable line is evidence in its own right.
+    assert.equal(lane.run, true, JSON.stringify(lane));
+    assert.match(lane.reason, /ran past the 200-character span limit/);
+    assert.doesNotMatch(lane.reason, /trust-boundary signals present/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

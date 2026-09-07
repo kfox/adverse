@@ -338,16 +338,35 @@ export const PERSONAS = Object.freeze({
 
 export const DEFAULT_PERSONAS = Object.freeze(['auditor', 'adversary', 'steward', 'pragmatist']);
 
-// Whether a lane takes part in round 2. A lane whose every kind is ADVISORY
-// has nothing to validate or challenge with: advisory findings cannot block,
-// so there is no blocking claim for it to go on record about, and going on
-// record is all round 2 is. The Pragmatist is that lane today.
+// Does this lane own nothing but ADVISORY kinds? Such a lane can make no claim
+// that blocks anything, and every question below turns on that one fact:
 //
-// Derived from the registry rather than naming the Pragmatist, so a second
-// advisory-only lane is covered the day someone adds it — and so the two
-// places that need this answer (suppressing the round-2 silence warning, and
-// refusing a round-2 payload) read one predicate instead of two copies that
-// can drift.
+//   src/personas.mjs    `crossReviews`   takes part in round 2
+//   src/regression.mjs  `ELIGIBLE`       may hold a fix commit's regression pass
+//   src/scaling.mjs     `sizeSkippable`  may be skipped on a small diff
+//
+// One predicate rather than a copy per question, because those answers must
+// never disagree — a lane with no blocking claim to go on record about in
+// round 2 has none to report a regression with either, and nothing that could
+// block if it is skipped.
+//
+// Do not maintain that table by hand and do not count it in prose. Every
+// count this comment ever carried was wrong: it said "two questions" while
+// there were three, was corrected to "THREE", and left the sentence four
+// lines below still saying "both callers". `ADVISORY_ONLY_CALLERS` in
+// tests/personas.test.mjs is the enumeration that is CHECKED — it is compared
+// against a scan of `src/`, `bin/` and `skills/adverse-review/scripts/` for
+// call sites, keyed by path from the repository root because two of those
+// directories hold a `regression.mjs`. It also requires each caller to be named
+// right here, so a new one cannot appear without that table failing a test. Add
+// the caller there; this is a rendering of it.
+//
+// An UNKNOWN persona is not advisory-only, and every caller an unknown name
+// can reach fails toward giving that lane work: `crossReviews` answers yes,
+// `sizeSkippable` answers no. `ELIGIBLE` is built from DEFAULT_PERSONAS and
+// so never sees an unknown name at all. A name this registry has never heard
+// of is a roster problem for roster.mjs to refuse, not a lane to quietly
+// demote here.
 //
 // `Object.hasOwn`, not a bare index: `persona` is model-written, and
 // `PERSONAS['__proto__']` on a plain object answers with Object.prototype.
@@ -355,9 +374,88 @@ export const DEFAULT_PERSONAS = Object.freeze(['auditor', 'adversary', 'steward'
 // Without that the property is untestable: the Pragmatist is the only such
 // lane today, so any test over the real registry agrees with a hard-coded
 // `persona !== 'pragmatist'` and cannot tell the two implementations apart.
+export function advisoryOnlyLane(persona, { personas = PERSONAS } = {}) {
+  if (!Object.hasOwn(personas, persona)) return false;
+  const kinds = personas[persona].kinds ?? [];
+  return kinds.length > 0 && kinds.every((kind) => ADVISORY_KINDS.has(kind));
+}
+
+// Whether a lane takes part in round 2. A lane whose every kind is ADVISORY
+// has nothing to validate or challenge with: advisory findings cannot block,
+// so there is no blocking claim for it to go on record about, and going on
+// record is all round 2 is. The Pragmatist is that lane today.
 export function crossReviews(persona, round = 1, { personas = PERSONAS } = {}) {
   if (round !== 2) return true;
-  if (!Object.hasOwn(personas, persona)) return true;
-  const kinds = personas[persona].kinds ?? [];
-  return kinds.length === 0 || !kinds.every((kind) => ADVISORY_KINDS.has(kind));
+  return !advisoryOnlyLane(persona, { personas });
+}
+
+// One letter, which is the whole set `agentNames` can emit:
+// `String.fromCharCode(97 + i)` with `MAX_SPLIT_AGENTS` capping `i` at 25. A
+// longer suffix is not an id this system produces, so accepting one only ever
+// admits a model-written string.
+const LANE_AGENT_SUFFIX = /^[a-z]$/;
+
+// Whether an agent id names THIS lane. A lane the plan did not split writes no
+// id at all and its agent is the persona itself; a lane split in two writes
+// `auditor-a` and `auditor-b` (src/scaling.mjs, `agentNames`, whose suffixes
+// come off `String.fromCharCode(97 + i)` — hence lowercase letters and nothing
+// else).
+//
+// This is the same class of guard `checkRoster` applies to the persona name one
+// field up, and it matters more here. The persona name is checked against a
+// registry, so an invented one is caught by construction; an agent id has no
+// registry, and round 2's self-validation guard keys on it — an id that does
+// not name its own lane would buy an agent an independent-looking vote on its
+// own finding, which is the single signal this whole design exists to produce.
+// The id also reaches a filename in repair.mjs, so a suffix that is not
+// letters is a path, not a name — and a suffix of 300 letters is not a name
+// either. `/^[a-z]+$/` bounded the alphabet and not the length: `auditor-`
+// plus `'a'.repeat(300)` passed this guard, passed repair.mjs's write guard,
+// and died in `writeFileSync` with an uncaught ENAMETOOLONG — a stack trace
+// rather than an exit code, taking every other lane in that invocation with
+// it. `AGENT_LABEL` caps a fix agent's label for the same reason.
+//
+// Naming the wrong HALF of the right lane is a separate hole this predicate
+// cannot close, and does not try to: `auditor-a` and `auditor-b` are both
+// well-formed ids for the auditor lane, so shape can never say which one
+// wrote a given file. The filename says, and skills/adverse-review/scripts/
+// validate.mjs is where the payload is held against it.
+export function isLaneAgent(persona, agent) {
+  if (typeof persona !== 'string' || typeof agent !== 'string') return false;
+  if (agent === persona) return true;
+  const prefix = `${persona}-`;
+  return agent.startsWith(prefix) && LANE_AGENT_SUFFIX.test(agent.slice(prefix.length));
+}
+
+// Whose work an agent id names: `claimed` when `isLaneAgent` accepts it, and
+// the LANE otherwise. `isLaneAgent` answers whether an id is well formed; this
+// answers the question every caller of it actually had, which is who to
+// attribute the work to when it is not.
+//
+// One implementation because the rule is one rule — "an id counts only if it
+// names its own lane; everything else resolves toward the persona" — and it
+// had grown a spelling per module, each with its own default: `claimedAgent`
+// under `entryAgent`/`payloadAgent`/`rulingAgent` in src/synthesis.mjs, a bare
+// ternary in src/briefing.mjs, and another in
+// skills/adverse-review/scripts/repair.mjs, where the answer becomes a
+// filename. The round-2 self-validation guard keys on this answer, so two of
+// them differing buys some agent an independent-looking vote on its own
+// finding.
+//
+// src/briefing.mjs and repair.mjs call this. Whatever still spells the rule by
+// hand is listed in `HAND_SPELLED_LANE_AGENT_RULE` in tests/personas.test.mjs,
+// which is checked — a NEW copy cannot appear quietly. The count is deliberately
+// not written here: the last two counts in this file were both wrong within a
+// commit of being written.
+//
+// `persona` is returned UNTOUCHED, whatever it is. Callers hand this a
+// persona that came off a JSON payload, so a null or undefined lane has to
+// come back as it went in rather than as a string that looks like an id.
+//
+// "Which HALF of the lane" is a different question and is one line on top of
+// this one, not a second copy of it: `rulingAgent` in src/synthesis.mjs takes
+// this answer and maps the bare persona to null, because a payload claiming to
+// BE the whole lane is claiming both halves and so can be neither.
+export function laneAgentOf(persona, claimed) {
+  return isLaneAgent(persona, claimed) ? claimed : persona;
 }
