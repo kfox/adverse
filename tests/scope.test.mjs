@@ -5,8 +5,9 @@
 // these check that it errs toward running, and one checks that it can still
 // actually skip — a gate that never skips is just an expensive way to say yes.
 
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { test } from 'node:test';
 
 import { assessScope } from '../src/scope.mjs';
 
@@ -208,15 +209,31 @@ test('scanning a very long line is still fast', () => {
 const removedLine = (line) => `--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n-${line}\n`;
 
 test('the removed-guard spans do not backtrack catastrophically', () => {
+  // Every unit here is repeated to 512 KB as ONE removed line. The second half
+  // of the list is one entry per span-bearing pattern, each followed by the
+  // padding that makes its own tail ambiguous — because the shape is what
+  // repeats, and a list holding only the input somebody happened to report is
+  // how `if (…) throw` shipped with the identical bug the entry above it was
+  // added for.
   for (const [name, unit] of [
     ['if (…) return', 'if ('],          // the reporter's input, verbatim
     ['guard … else', 'guard x '],
     ['os.path.join(…)', 'os.path.join('],
-    // Not a `.*` span but the same class and the worst of them: `\s*\(?\s*`
-    // put two quantifiers over the same characters side by side, and a removed
-    // line of `if` plus padding cost 26.9 s at 128 KB — 16x the per-byte cost
-    // of the `if (…) throw` span, and 439 s for the pattern alone at 512 KB.
+    // Not a `.*` span but the same class: two quantifiers over the same
+    // characters with a nullable atom between them. `\s*\(?\s*` cost 26.9 s at
+    // 128 KB of `if` plus padding, and 439 s for the pattern alone at 512 KB.
     ['if + padding', 'if' + ' '.repeat(4095)],
+    // The tail of `if (…) throw` was `\)\s*\{?\s*` — the same shape, one
+    // pattern lower in the file, and it survived the fix above because the fix
+    // only looked at the line it was reported on. 512 KB of this took 3.4 s.
+    ['if () + padding', 'if ()' + ' '.repeat(4091)],
+    ['guard + padding', 'guard x else' + ' '.repeat(4084)],
+    ['os.path.join() + padding', 'os.path.join()' + ' '.repeat(4082)],
+    ['SELECT + padding', 'SELECT' + ' '.repeat(4090)],
+    ['{ + padding', '{' + ' '.repeat(4095)],
+    ['assert + padding', 'assert' + ' '.repeat(4090)],
+    ['shell= + padding', 'shell=' + ' '.repeat(4090)],
+    ['UPDATE x SET + padding', 'UPDATE x' + ' '.repeat(4088)],
   ]) {
     const body = unit.repeat((512 * 1024) / unit.length);
     const started = Date.now();
@@ -252,9 +269,13 @@ test('each bounded span still fires on the guard it was written for, alone', () 
   // a plain substring. It names the pattern without quoting the bound, so this
   // test stays about detection and the timing test above stays about the bound.
   // `if\s*\(` alone would be ambiguous — the negated-condition signal
-  // `\bif\s*\(?\s*(!…)` contains it too.
+  // `\bif[\s(]*(!…)` contains it too. The fingerprint below is the alternation
+  // rather than the span: `\{\s*(throw|raise|return)` orders the same three
+  // words differently, so `(throw|return|raise)` names exactly one pattern
+  // while quoting neither a bound nor the whitespace tail — both of which have
+  // now been rewritten once under this test.
   for (const [line, signal] of [
-    ['if (isStale(c)) return cached(c);', '\\)\\s*\\{?\\s*(throw|return|raise)'],
+    ['if (isStale(c)) return cached(c);', '(throw|return|raise)'],
     ['guard let c = cache[k] else fallback(k)', '\\bguard\\b'],
     ['p = os.path.join(base, request.args["f"])', 'os\\.path\\.join'],
   ]) {
@@ -264,4 +285,195 @@ test('each bounded span still fires on the guard it was written for, alone', () 
     assert.ok(r.evidence[0].signal.includes(signal),
       `${line} tripped ${r.evidence[0].signal}, expected the bounded ${signal}`);
   }
+});
+
+// --- the class, read off the file instead of timed --------------------------
+// Timing tests pin the inputs somebody thought of. This one pins the shape:
+// it parses every regex literal in src/scope.mjs and rejects any where two
+// repeatable quantifiers sit over intersecting character sets with nothing but
+// nullable atoms between them. That is the whole bug, twice: `\s*\(?\s*` and
+// `\)\s*\{?\s*` both let the engine split one run of padding N+1 ways and
+// rescan the tail from each split. It is the check that was missing when a
+// commit fixed the first and called it "the worst instance in this file" while
+// the second sat 14 lines below.
+
+// One representative character per class the patterns use. Set membership is
+// computed by running the atom itself, so this never has to reimplement what
+// `\s` or `[^)]` means.
+const PROBES = [' ', '\t', '\n', 'a', 'A', '0', '_', '(', ')', '{', '}', '[', ']',
+                '!', '=', '-', '.', ':', ';', ',', '/', '\\', '"', "'", '*', '?', '<', '>'];
+
+const scopeSource = readFileSync(new URL('../src/scope.mjs', import.meta.url), 'utf-8');
+
+// Regex literals in the signal arrays: indented array elements, comments out.
+function regexLiterals(source) {
+  const found = [];
+  for (const line of source.split('\n')) {
+    if (!line.startsWith('  ') || line.trimStart().startsWith('//')) continue;
+    for (const m of line.matchAll(/\/(?:\\.|\[(?:\\.|[^\]])*\]|[^/\\\s])+\/[dgimsuvy]*(?=\s*,|\s*$)/g)) {
+      found.push(m[0]);
+    }
+  }
+  return found;
+}
+
+// Split a pattern body into atoms, each carrying its quantifier bounds. A
+// group or a lookaround is one opaque atom: these patterns never put a
+// quantified group next to a quantified class, and treating one as opaque
+// fails toward "not flagged", which the tests above would then catch by timing.
+function atomsOf(body) {
+  const atoms = [];
+  let i = 0;
+  while (i < body.length) {
+    const start = i;
+    const c = body[i];
+    if (c === '\\') i += 2;
+    else if (c === '[') {
+      i += 1;
+      if (body[i] === '^') i += 1;
+      if (body[i] === ']') i += 1;
+      while (i < body.length && body[i] !== ']') i += body[i] === '\\' ? 2 : 1;
+      i += 1;
+    } else if (c === '(') {
+      let depth = 0;
+      do {
+        if (body[i] === '\\') { i += 2; continue; }
+        if (body[i] === '(') depth += 1;
+        if (body[i] === ')') depth -= 1;
+        i += 1;
+      } while (i < body.length && depth > 0);
+    } else i += 1;
+    const source = body.slice(start, i);
+    const quantifierAt = i;
+
+    let min = 1;
+    let max = 1;
+    const q = /^(?:(\*)|(\+)|(\?)|\{(\d+)(,(\d*))?\})/.exec(body.slice(i));
+    if (q) {
+      i += q[0].length;
+      if (body[i] === '?' || body[i] === '+') i += 1;
+      if (q[1]) { min = 0; max = Infinity; }
+      else if (q[2]) { min = 1; max = Infinity; }
+      else if (q[3]) { min = 0; max = 1; }
+      else {
+        min = Number(q[4]);
+        max = q[5] === undefined ? min : (q[6] === '' ? Infinity : Number(q[6]));
+      }
+    }
+    atoms.push({ source, text: source + body.slice(quantifierAt, i), min, max });
+  }
+  return atoms;
+}
+
+// The set of PROBES a one-character atom matches, or null if the atom is not a
+// one-character matcher (a group, or a zero-width assertion).
+function charSet(source, flags) {
+  if (/^\\[bB]$/.test(source) || source === '^' || source === '$' || source.startsWith('(')) return null;
+  const probe = new RegExp(`^(?:${source})$`, flags.replace(/[gy]/g, ''));
+  const set = new Set(PROBES.filter((ch) => probe.test(ch)));
+  return set.size ? set : null;
+}
+
+// The finding: A and B both repeatable, over intersecting sets, with only
+// nullable atoms between them.
+function ambiguousPairs(literal) {
+  const cut = literal.lastIndexOf('/');
+  const atoms = atomsOf(literal.slice(1, cut));
+  const flags = literal.slice(cut + 1);
+  const hits = [];
+  for (let a = 0; a < atoms.length; a += 1) {
+    const setA = atoms[a].max > 1 ? charSet(atoms[a].source, flags) : null;
+    if (!setA) continue;
+    for (let b = a + 1; b < atoms.length; b += 1) {
+      const between = atoms.slice(a + 1, b);
+      if (between.some((x) => x.min > 0)) break;
+      const setB = atoms[b].max > 1 ? charSet(atoms[b].source, flags) : null;
+      if (setB && [...setA].some((ch) => setB.has(ch))) {
+        hits.push(atoms.slice(a, b + 1).map((x) => x.text).join(''));
+      }
+    }
+  }
+  return hits;
+}
+
+test('the shape checker finds the bug it exists for, and clears the fixed form', () => {
+  // Without this the checker could be vacuous — a function that returns [] for
+  // everything would pass the sweep below and pin nothing.
+  assert.deepEqual(ambiguousPairs(String.raw`/\bif\s*\(?\s*(!(?!=)|not\b)/`), [String.raw`\s*\(?\s*`]);
+  assert.deepEqual(
+    ambiguousPairs(String.raw`/\bif\s*\([^\n]{0,200}?\)\s*\{?\s*(throw|return|raise)\b/`),
+    [String.raw`\s*\{?\s*`],
+  );
+  assert.deepEqual(ambiguousPairs(String.raw`/\bif[\s(]*(!(?!=)|not\b)/`), []);
+  assert.deepEqual(
+    ambiguousPairs(String.raw`/\bif\s*\([^\n]{0,200}?\)[\s{]*(throw|return|raise)\b/`), [],
+  );
+  // Adjacency alone is not the bug; overlapping sets are. `\w*\s*` has one
+  // split per position and is linear, and a checker that flagged it would have
+  // to be silenced somewhere, which is how a checker stops being read.
+  assert.deepEqual(ambiguousPairs(String.raw`/\bassert\w*\s*\(/i`), []);
+  assert.deepEqual(ambiguousPairs(String.raw`/\bshell\s*[:=]\s*True\b/i`), []);
+});
+
+test('no signal pattern in scope.mjs has two quantifiers over one class', () => {
+  const literals = regexLiterals(scopeSource);
+  assert.ok(literals.length >= 60, `only ${literals.length} regex literals parsed — the extractor missed the arrays`);
+  const offenders = literals
+    .map((literal) => [literal, ambiguousPairs(literal)])
+    .filter(([, hits]) => hits.length);
+  assert.deepEqual(offenders, [],
+    `quadratic shape reintroduced: ${offenders.map(([l, h]) => `${l} (${h.join(', ')})`).join('; ')}`);
+});
+
+// --- a bound must not turn a slow `run` into a fast `skip` -------------------
+// The first pass at the ReDoS above bounded the spans and stopped there, which
+// bought speed with silence: a guard padded past the bound matched nothing, and
+// "matched nothing" is this module's word for `skip`. Under a bias that accepts
+// two wasted model calls to avoid one unreviewed vulnerability, that is a worse
+// failure than the stall it replaced, because it is the quiet one.
+
+test('a negation far from its `if` is still a signal — the {0,16} bound erased it', () => {
+  // The reported case is 17 characters, one past the bound an earlier fix
+  // chose. Every line here stays under SPAN_LIMIT_CHARS, so the unreadable-line
+  // backstop cannot be what rescues it: the only thing that can is the pattern
+  // itself reading the whole run. A single character class has one greedy path,
+  // so it costs nothing to let it.
+  for (const gap of [16, 17, 40, 120]) {
+    const line = `if${' '.repeat(gap)}(!ok) bail();`;
+    assert.ok(line.length <= 200, 'the fixture must not reach the unreadable-line backstop');
+    const r = assessScope({ files: ['src/render/widget.js'], diff: removedLine(line) });
+    assert.equal(r.recommend, 'run', `${gap}-space gap: ${JSON.stringify(r.evidence)}`);
+    assert.ok(r.evidence.some((e) => e.signal.includes('!(?!=)|not')),
+      `${gap}-space gap tripped ${JSON.stringify(r.evidence.map((e) => e.signal))}`);
+  }
+});
+
+test('a guard whose span outruns the bound reaches run as an unreadable line', () => {
+  // 300 characters of condition puts `)` past the `{0,200}` window, so the
+  // `if (…) throw` pattern genuinely cannot see this guard — and nothing else
+  // in either list matches it either (`throw` needs line start or a brace).
+  // Before the backstop this returned `skip` with empty evidence.
+  const line = `if (${'x'.repeat(300)}) throw new Error(1);`;
+  const r = assessScope({ files: ['src/render/widget.js'], diff: removedLine(line) });
+  assert.equal(r.recommend, 'run', JSON.stringify(r.evidence));
+  assert.deepEqual(r.evidence.map((e) => e.signal), [
+    'line over 200 chars — longer than any bounded span can read end to end',
+  ]);
+  assert.equal(r.evidence[0].kind, 'content-removed');
+});
+
+test('the unreadable-line backstop decides on length, and 200 characters is the line', () => {
+  const at = (n) => assessScope({ files: ['src/render/widget.js'], diff: removedLine('x'.repeat(n)) });
+  assert.equal(at(200).recommend, 'skip', 'a line the bounded spans can read is still judged on its content');
+  assert.deepEqual(at(200).evidence, []);
+  assert.equal(at(201).recommend, 'run', 'one character past every span limit is unreadable, not clean');
+  assert.match(at(201).evidence[0].signal, /^line over 200 chars/);
+});
+
+test('the backstop covers added lines too — SELECT and os.path.join are bounded there as well', () => {
+  const added = `--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n+${'y'.repeat(400)}\n`;
+  const r = assessScope({ files: ['src/render/widget.js'], diff: added });
+  assert.equal(r.recommend, 'run', JSON.stringify(r.evidence));
+  assert.equal(r.evidence[0].kind, 'content');
+  assert.match(r.reason, /1 in added code/);
 });

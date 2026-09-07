@@ -96,16 +96,28 @@ const REMOVED_LINE_SIGNALS = [
   // plain `if (a != b)` comparison from reading as a negated guard; the
   // paren-required version alone missed the Python and Go guards verbatim.
   //
-  // ONE bounded class where this read `\s*\(?\s*`. Two adjacent `\s*` over the
-  // same characters is the "three adjacent quantifiers over overlapping
-  // classes" the SQL signal above was rewritten for, and it was the worst
-  // instance in this file rather than an edge of it: a removed line of `if`
-  // plus padding cost 0.4 s at 16 KB, 1.7 s at 32 KB, 6.7 s at 64 KB and
-  // 26.9 s at 128 KB — 4x per doubling, and 16x the per-byte cost of the
-  // `if (…) throw` span below. A single class has one greedy path, so the
-  // bound is the only ceiling it needs. 16 is far past any real indentation
-  // between `if` and its negation, and past it the line is padding.
-  /\bif[\s(]{0,16}(!(?!=)|not\b)/,
+  // ONE class where this read `\s*\(?\s*`. Two quantifiers over the same
+  // characters with a nullable atom between them is the "adjacent quantifiers
+  // over overlapping classes" the SQL signal above was rewritten for: the
+  // engine can split one run of padding N+1 ways and rescan the tail from each
+  // split, so a removed line of `if` plus padding cost 0.4 s at 16 KB, 1.7 s at
+  // 32 KB, 6.7 s at 64 KB and 26.9 s at 128 KB — 4x per doubling.
+  //
+  // It was NOT, as an earlier revision of this comment claimed, "the worst
+  // instance in this file": the `if (…) throw` span below carried the identical
+  // `\)\s*\{?\s*` tail and measured the same 4x curve on the same input shape
+  // (420 ms / 1672 ms / 6690 ms / 26756 ms at 16/32/64/128 KB, end to end
+  // through assessScope) until it was collapsed the same way. Both are fixed
+  // here; a static shape check in tests/scope.test.mjs now enumerates the whole
+  // file for the pattern instead of trusting a claim like that one.
+  //
+  // One class has one greedy path, so it needs no ceiling at all — 512 KB of
+  // padding costs 2 ms unbounded. The `{0,16}` an earlier fix added alongside
+  // the class was therefore pure false negative: `if` + 16 spaces + `(!ok)`
+  // needs 17 characters from the class and so stopped counting as a signal at
+  // all, which turns a slow `run` into a fast `skip` and inverts the bias this
+  // module is built on.
+  /\bif[\s(]*(!(?!=)|not\b)/,
   /\bunless\b/,
   // Bounded spans, for the reason the SQL signal above gives and by the same
   // shape: an unanchored `.*` before a required literal retries from every
@@ -115,11 +127,20 @@ const REMOVED_LINE_SIGNALS = [
   // execFileSync's 1 MiB maxBuffer the only ceiling. That is minutes of CPU
   // per fix commit inside the Phase 9 loop, on bytes a PR author picks: a
   // commit deleting a vendored or minified file puts them straight onto the
-  // removed-line scan. 200 characters is the SQL signal's window; a guard
-  // whose `else` is further away than that is not a guard a reader would
-  // recognize either.
+  // removed-line scan. 200 characters is the SQL signal's window, and a line
+  // long enough for that window to hide something is caught by
+  // SPAN_LIMIT_CHARS below instead, so the bound costs model calls rather than
+  // detection.
   /\bguard\b.{0,200}?\belse\b/,
-  /\bif\s*\([^\n]{0,200}?\)\s*\{?\s*(throw|return|raise)\b/,
+  // The tail is one class, `\)[\s{]*`, and not `\)\s*\{?\s*`, for the reason
+  // the negated-condition signal above gives: bounding the span in FRONT of
+  // `\)` does nothing about a nullable atom between two whitespace quantifiers
+  // behind it. Measured end to end through assessScope on `'if ()' +
+  // ' '.repeat(N)` as one removed line: 16 KB 420 ms, 32 KB 1672 ms, 64 KB
+  // 6690 ms, 128 KB 26756 ms. The single class is 2 ms at 512 KB and matches
+  // strictly more than the old tail (any run of braces and space, not one
+  // brace), which is the direction the bias wants.
+  /\bif\s*\([^\n]{0,200}?\)[\s{]*(throw|return|raise)\b/,
   // The enforcement consequence, at line start (multi-line guard body) or
   // right after an opening brace (`else { throw … }`, `if !ok { return … }`).
   /^\s*(throw|raise)\b/,
@@ -129,6 +150,26 @@ const REMOVED_LINE_SIGNALS = [
   /\b40[13]\b/,
   /\bperms?\b/i, /\brole\b/i, /\badmin/i, /\bowner/i,
 ];
+
+// The widest span any signal above can read end to end. Those `{0,200}` bounds
+// are what keep the spans linear on bytes a PR author picks, and the price of
+// every one of them is the same blind spot: a guard whose two halves sit
+// further apart than this matches nothing, so a padded or minified line reads
+// back as "no signal" — a slow `run` quietly converted into a fast `skip`,
+// which inverts the one-directional bias this whole module is built on.
+//
+// So a line too long for the bounds to read is evidence in its own right
+// ("anything unreadable counts as evidence", at the top of this file). That
+// closes the class rather than any one bound: exceeding ANY span limit can
+// now only cost model calls, never silence, whichever pattern the line
+// defeated. It is deliberately the noisy direction, and cheaply so: 57 lines
+// of this repository's own tracked files run past 200 characters, 39 of them
+// in one README, while a commit deleting a vendored or minified file — the
+// case where the bounds really do go blind — is exactly the one where nobody
+// can claim to have looked.
+const SPAN_LIMIT_CHARS = 200;
+const UNREADABLE_LINE_SIGNAL =
+  `line over ${SPAN_LIMIT_CHARS} chars — longer than any bounded span can read end to end`;
 
 // Lines a unified diff adds. The `+++ b/path` header is not an added line —
 // but `+++i;` IS, and matching the bare `+++` prefix silently dropped every
@@ -141,8 +182,9 @@ const REMOVED_LINE_SIGNALS = [
 // line — precisely where a payload would sit — was never shown to the Adversary
 // lane. This module's bias is one-directional on purpose (a false positive
 // costs two model calls; a false negative ships a vulnerability nobody looked
-// for), so cost control belongs in the patterns, not in dropping input. The SQL
-// signal, the one that was actually super-linear, is bounded by shape now.
+// for), so cost control belongs in the patterns, not in dropping input. Every
+// pattern that was super-linear is bounded by shape now, and SPAN_LIMIT_CHARS
+// above keeps those bounds from silently costing detection.
 export function addedLines(diffText) {
   return String(diffText).split('\n')
     .filter((l) => l.startsWith('+') && !l.startsWith('+++ '))
@@ -171,13 +213,18 @@ export function assessScope({ files = [], diff = '' } = {}) {
   }
 
   const seen = new Set();
+  const record = (kind, signal, line) => {
+    if (seen.has(signal)) return;
+    seen.add(signal);
+    evidence.push({ kind, signal, sample: line.trim().slice(0, 120) });
+  };
   const scan = (lines, kind, signals) => {
     for (const line of lines) {
+      if (line.length > SPAN_LIMIT_CHARS) record(kind, UNREADABLE_LINE_SIGNAL, line);
       for (const re of signals) {
-        const m = re.exec(line);
-        if (!m || seen.has(re.source)) continue;
-        seen.add(re.source);
-        evidence.push({ kind, signal: re.source, sample: line.trim().slice(0, 120) });
+        // A pattern that already fired cannot add evidence, and re-running it
+        // down every remaining line of a minified diff is the bulk of the cost.
+        if (!seen.has(re.source) && re.test(line)) record(kind, re.source, line);
       }
     }
   };
