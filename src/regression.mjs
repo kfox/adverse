@@ -362,22 +362,27 @@ export function chooseRegressionLane(
       + ' review produces — read the exclusion above as approximate'
     : '';
 
-  // Whose word the disinterest rests on. With a list, the sentence is checked
-  // against it. Under `closesNothing` there is no list to check it against, so
-  // the sentence attributes the claim instead of asserting it — an artifact
-  // that says "it reported none of the findings this commit closed" when
-  // nothing was excluded is the fail-open in prose, and it reads identically to
-  // a pass that really was disinterested.
+  // Whose word the disinterest rests on: the caller's, in both arms, and both
+  // sentences say so. A `closedBy` list is exactly as unchecked as
+  // `closesNothing` — nothing verifies the names against what was actually
+  // reported, because the ledger records fix-batch labels rather than
+  // reporting lanes (kfox/adverse#58, item 6) — and the asserted form this
+  // replaced ("it reported none of the findings this commit closed") claimed a
+  // verification nothing ran: one wrong-but-well-formed name bought the exact
+  // sentence this module was hardened to prevent.
   const disinterest = closesNothing
     ? 'the caller declared that this commit closes no finding any lane reported, so no lane'
       + ' was excluded on this run'
-    : 'it reported none of the findings this commit closed';
+    : `the caller named ${names.length} lane(s) as having reported into this commit, and it`
+      + ' is not among them';
+  const basis = closesNothing ? 'declared-none' : 'declared-list';
 
   const disinterested = order.find((persona) => !reported.has(persona));
   if (disinterested) {
     return {
       persona: disinterested,
       conflicted: false,
+      disinterest: basis,
       unresolved,
       reason: `${disinterested}: ${lens}, and ${disinterest}${dropped}`,
     };
@@ -392,6 +397,7 @@ export function chooseRegressionLane(
   return {
     persona: order[0],
     conflicted: true,
+    disinterest: basis,
     unresolved,
     reason: `${order[0]}: ${lens}, but every lane that can hold a regression `
       + `(${order.join(', ')}) reported a finding this commit closed, so this pass is run by`

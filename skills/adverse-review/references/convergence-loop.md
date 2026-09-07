@@ -318,8 +318,14 @@ reviewer is the one selection an interested party must not make:
 
 ```bash
 node ${SKILL_DIR}/scripts/regression.mjs --repo . --commit <fix-sha> \
-    --closed-by <persona> [--closed-by <persona> …]
+    --closed-by <persona> [--closed-by <persona> …] \
+    --json > "$ADVERSE_RUN"/lane-choice-<fix-sha>.json
 ```
+
+Save the `--json` output: it is the only record of HOW the reviewing lane was
+picked and on whose word, and the fold below stamps it onto the pass so the
+report can say which. Without it, a pass chosen under `--closed-by-none` is
+indistinguishable on disk from one chosen against a named exclusion list.
 
 `--closed-by` is every persona that reported a finding this commit closed,
 spelled the way the registry spells it — lowercase, or a split lane's half like
@@ -409,7 +415,8 @@ beside the verifications:
 node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/*/regression-*.json
 
 node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/*/regression-*.json \
-    --outdir "$ADVERSE_RUN" ${LEDGER:+--ledger "$LEDGER" --repo .}
+    --outdir "$ADVERSE_RUN" --choice "$ADVERSE_RUN"/lane-choice-*.json \
+    ${LEDGER:+--ledger "$LEDGER" --repo .}
 ```
 
 Pass `--ledger` whenever the run has one. The fold then annotates any finding

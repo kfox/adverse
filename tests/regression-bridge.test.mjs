@@ -352,6 +352,88 @@ test('--refold is how a deliberate re-read of the same commit says so', () => {
   }
 });
 
+test('a lane choice rides the choose mode\'s own JSON into the fold artifact', () => {
+  // Nothing else records HOW the reviewing lane was picked: a fold produced
+  // after --closed-by-none used to be byte-identical to one produced after a
+  // named exclusion list, so a reader could not tell a declared disinterest
+  // from a checked one. The choice is stamped by the bridge, and the summary —
+  // the one string synthesize copies into the report — says which basis it was.
+  const dir = gitRepo();
+  try {
+    const choose = run(['--repo', dir, '--commit', 'HEAD', '--closed-by', 'steward', '--json']);
+    assert.equal(choose.status, 0, choose.stderr);
+    const choice = JSON.parse(choose.stdout);
+    assert.equal(choice.disinterest, 'declared-list');
+    writeFileSync(path.join(dir, 'lane-choice.json'), choose.stdout);
+    writeFileSync(path.join(dir, 'regression-pass-1.json'),
+      JSON.stringify(pass({ persona: choice.persona, commit: 'HEAD' })));
+
+    const r = run(['--payload', path.join(dir, 'regression-pass-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json'), '--repo', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, `round1-${choice.persona}.regression.json`), 'utf-8'));
+    assert.equal(out.passes[0].laneChoice.disinterest, 'declared-list');
+    assert.equal(out.passes[0].laneChoice.conflicted, false);
+    assert.match(out.summary, /lane choice on record: declared-list/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a pass with no lane choice on file says so in the summary', () => {
+  const dir = freshTmp();
+  try {
+    const r = fold(dir, { 'regression-adversary-1.json': pass() });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    assert.match(out.summary, /lane choice unrecorded for 1 of 1 pass\(es\)/);
+    assert.equal('laneChoice' in out.passes[0], false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an overridden routing is warned about and never stamped', () => {
+  // The choice picked one lane and a different lane ran the pass: that is the
+  // orchestrator overriding the routing, which must not read as a recorded
+  // choice.
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'lane-choice.json'), JSON.stringify({
+      persona: 'steward', commit: 'abc1234', conflicted: false,
+      disinterest: 'declared-list', reason: 'steward: chosen',
+    }));
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /picked steward for abc1234, but this pass was run by adversary/);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    assert.equal('laneChoice' in out.passes[0], false);
+    assert.match(out.summary, /lane choice unrecorded/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a file that is not a lane choice is refused, not stamped', () => {
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'lane-choice.json'),
+      JSON.stringify({ persona: 'steward', commit: 'abc1234' }));
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json')]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /not a lane choice/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a fold naming more distinct commits than one run produces is refused', () => {
   // The staleness check resolves each distinct commit spelling through git and
   // the payload-file count is the one input nothing else bounds, so a glob over
