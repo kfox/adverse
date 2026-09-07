@@ -72,6 +72,7 @@ test('checkKind: advisory defaults to the real registry, and stays a boolean', (
   // filters on `=== true`. The option is kept for a caller that genuinely has
   // a different set; its default is the registry rather than a hole.
   assert.equal(checkKind('design', null, null, null).advisory, true);
+  assert.equal(checkKind('contract', 'a.py', 1, 'docs/a.md').advisory, true);
   assert.equal(checkKind('defect', 'a.py', 1, null).advisory, false);
   // An explicit set still wins over the default.
   assert.equal(checkKind('defect', 'a.py', 1, null, { advisoryKinds: new Set(['defect']) }).advisory, true);

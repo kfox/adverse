@@ -42,6 +42,7 @@ import path from 'node:path';
 import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
+const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
 const { checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { buildBriefing } = await importFromSrc('briefing.mjs');
@@ -183,6 +184,6 @@ process.stdout.write(
   + `${briefing.groups.length ? ` (${briefing.groups.map((g) => `${g.id}=${g.members.join('+')}${g.oversized ? ' OVERSIZED' : ''}`).join(', ')})` : ''}\n`
   + `  cited outside the diff (annotated, not rejected): ${stats.outside.length}${ids(stats.outside)}\n`
   + `  under-anchored for their kind (annotated, not rejected): ${stats.underAnchored.length}${ids(stats.underAnchored)}\n`
-  + `  advisory (design — cannot block): ${stats.advisory.length}${ids(stats.advisory)}\n`
+  + `  advisory (${[...ADVISORY_KINDS].join(', ')} — cannot block): ${stats.advisory.length}${ids(stats.advisory)}\n`
   + `  already settled in an earlier iteration: ${stats.settled.length}${ids(stats.settled)}\n`
   + `  REGRESSED (recorded fixed, reported again): ${stats.regressed.length}${ids(stats.regressed)}\n`);

@@ -86,6 +86,14 @@ test('an advisory finding never holds the loop open', () => {
   assert.equal(run(['--ledger', path.join(repo, 'l.json'), '--report', report, '--repo', repo], repo).status, 0);
 });
 
+test('a contract finding never holds the loop open either', () => {
+  const { repo } = repoWithTwoCommits();
+  const report = writeJson(repo, 'report.json', {
+    findings: [blockingFinding({ kind: 'contract', blocking: false })],
+  });
+  assert.equal(run(['--ledger', path.join(repo, 'l.json'), '--report', report, '--repo', repo], repo).status, 0);
+});
+
 test('exit 3 at the iteration cap — a stop, not a pass', () => {
   const { repo, reviewed } = repoWithTwoCommits();
   const ledger = path.join(repo, 'l.json');

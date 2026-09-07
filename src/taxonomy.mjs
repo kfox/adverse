@@ -10,13 +10,16 @@
 // whether it can be traced across commits, and whether it can hold a
 // convergence loop open.
 //
-// `design` is ADVISORY by construction. Design opinions do not converge: a
-// reviewer can always want different structure, so counting them in a
-// stop condition means the loop never stops. They are recorded and ranked,
-// never blocking. Every other kind blocks — including an unrecognized one, so
-// that a finding cannot escape the gate by being mislabeled.
+// `design` and `contract` are ADVISORY by construction, for the same reason
+// from two directions. Design opinions do not converge: a reviewer can always
+// want different structure. Contract findings do not run out: every sentence of
+// prose is a checkable claim, so a fix's own comments and docs replenish the
+// supply — counting either kind in a stop condition means the loop never
+// stops. Both are recorded and ranked, never blocking. `defect` and
+// `behavioral` block — and so does an unrecognized kind, so that a finding
+// cannot escape the gate by being mislabeled.
 export const KINDS = Object.freeze(['defect', 'behavioral', 'contract', 'design']);
-export const ADVISORY_KINDS = Object.freeze(new Set(['design']));
+export const ADVISORY_KINDS = Object.freeze(new Set(['design', 'contract']));
 
 export const SEVERITIES = Object.freeze(['critical', 'warning', 'info']);
 

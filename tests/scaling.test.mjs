@@ -299,6 +299,12 @@ test('advisory-only findings: round 2 skippable, and a critical design never rai
   assert.equal(r.maxIterations, DEFAULT_MAX_ITERATIONS);
 });
 
+test('a contract-only round 1: round 2 skippable, and a critical contract never raises the cap', () => {
+  const r = escalate([payload('steward', [finding({ kind: 'contract', severity: 'critical' })])]);
+  assert.equal(r.rounds, 1);
+  assert.equal(r.maxIterations, DEFAULT_MAX_ITERATIONS);
+});
+
 test('one warning defect: round 2 runs, cap stays at the default', () => {
   const r = escalate([payload('auditor', [finding()])]);
   assert.equal(r.rounds, 2);
