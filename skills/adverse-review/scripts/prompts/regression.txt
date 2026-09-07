@@ -94,7 +94,7 @@ payload that can be truncated or misremembered.
 ```
 {
   "persona": "<your persona name, lowercase>",
-  "commit":  "<the fix commit you read>",
+  "commit":  "<the fix commit you read, matching ^[0-9A-Za-z][0-9A-Za-z._/~^{}-]{0,63}$>",
   "checked": [
     { "question": "stricter" | "permissive" | "hot-path" | "shared-state",
       "against":  "<what you read to answer it, concretely>" }
