@@ -260,12 +260,15 @@ one per persona — two for a lane the plan split. Each gets:
     `$ADVERSE_RUN/<agent>/round1-<agent>.json`, where `<agent>` is the persona
     (`-a`/`-b`-suffixed for a split lane's halves) — its own subdirectory, and
     not a reply with the JSON in chat. The Write tool creates the directory.
-- **Model**: `opus` unless the user asked otherwise. If the user picks a smaller
-  model, pass it to every persona — mixing models across personas defeats the
-  single-model design. That rule is about the panel, whose whole method is one
-  model wearing four lenses. The roles outside it — a fix agent, the absorber
-  commit, the regression pass — are not lanes and are tiered per role instead;
-  Phase 7 says on what basis.
+- **Model**: `sonnet` by default. Escalate the panel to a higher tier when the
+  review warrants it — that is your judgment call, and the diff makes the case:
+  pinned paths, credential or sandbox handling, subtle concurrency, a change
+  whose failure ships something. The user's explicit choice wins over both.
+  Whatever the tier, pass the SAME model to every persona — mixing models
+  across personas defeats the single-model design. That rule is about the
+  panel, whose whole method is one model wearing four lenses. The roles outside
+  it — a fix agent, the absorber commit, the regression pass — are not lanes
+  and are tiered per role instead; Phase 7 says on what basis.
 
 The Steward needs one thing the others don't: point it at where this repo keeps
 its rules and its architecture notes (`CLAUDE.md`, `CONTRIBUTING.md`,
