@@ -40,7 +40,7 @@ test('every kind has an owner', () => {
   }
 });
 
-test('the advisory kind has exactly one owner', () => {
+test('every advisory kind has exactly one owner', () => {
   for (const advisory of ADVISORY_KINDS) {
     const owners = all.filter((p) => p.kinds.includes(advisory));
     assert.equal(owners.length, 1,
@@ -48,11 +48,12 @@ test('the advisory kind has exactly one owner', () => {
   }
 });
 
-test('a persona that owns only advisory kinds says so in its prompt', () => {
+test('a persona that owns an advisory kind is told so in its prompt, per kind', () => {
   for (const p of all) {
-    if (!p.kinds.every((k) => ADVISORY_KINDS.has(k))) continue;
-    assert.match(p.system, /advisory/i,
-      `${p.name} can never block and must be told so, or it will calibrate as if it could`);
+    for (const kind of p.kinds.filter((k) => ADVISORY_KINDS.has(k))) {
+      assert.match(p.system, new RegExp(`\\\`${kind}\\\`[^.]*\\badvisory\\b`, 'i'),
+        `${p.name} owns advisory '${kind}' and must be told it cannot block, or it will calibrate as if it could`);
+    }
   }
 });
 

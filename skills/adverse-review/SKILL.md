@@ -78,13 +78,15 @@ run that hits the cap is a **stop, not a pass**.
 |---|---|---|
 | **Auditor** | correctness: does it compute the right answer | `defect`, `behavioral` |
 | **Adversary** | what an attacker can do | `defect`, `behavioral` (with an attack) |
-| **Steward** | what the code says about itself: docs, schemas, rules, and tests | `contract`, `behavioral` |
+| **Steward** | what the code says about itself: docs, schemas, rules, and tests | `contract` — **advisory**, `behavioral` |
 | **Pragmatist** | shape: structure, coupling, complexity | `design` — **advisory** |
 
 Two rules follow from that table and both are load-bearing:
 
-- **`design` findings never block.** Design opinions do not converge — a
-  reviewer can always want different structure — so counting them means the
+- **`design` and `contract` findings never block.** Design opinions do not
+  converge — a reviewer can always want different structure — and contract
+  findings never run out: every sentence of prose is a checkable claim, and a
+  fix's own comments and docs replenish the supply. Counting either means the
   loop never ends. They are reported, ranked, and handed to the user as a
   backlog. Never treat one as a merge gate, and never let one hold a loop open.
 - **Never override a persona prompt with general review instructions.** The

@@ -227,10 +227,10 @@ Severity says how bad a finding is. It cannot say what would *settle* it, and th
 |---|---|---|
 | `defect` | reading the cited line | yes |
 | `behavioral` | executing it, or an argument about execution | yes |
-| `contract` | opening both files and comparing | yes |
+| `contract` | opening both files and comparing | **no** |
 | `design` | nothing — it is an opinion about shape | **no** |
 
-`design` is advisory by construction. Design opinions do not converge: a reviewer can always want different structure, and such a finding is legitimately a `warning`, so any loop that counts them never terminates. They are reported and ranked under their own heading, and handed over as a backlog rather than a gate.
+`design` and `contract` are advisory by construction, for the same reason from two directions. Design opinions do not converge: a reviewer can always want different structure, and such a finding is legitimately a `warning`, so any loop that counts them never terminates. Contract findings never run out: every sentence of prose is a checkable claim, so each fix's own comments and docs replenish the supply. Both are reported and ranked under their own heading, and handed over as a backlog rather than a gate.
 
 An unclassified or unrecognized kind **blocks**. Defaulting the other way would let a real finding escape the gate by arriving mislabeled.
 
@@ -343,7 +343,7 @@ tests/
 - **Subprocess agent contract.** The CLI assumes the agent reads prompt from stdin and writes the response to stdout, exiting cleanly. Most coding agents support this; some need a flag (`-p` for Claude Code, `exec` for Codex CLI). When in doubt, run the agent manually with a stdin prompt first to confirm the shape.
 - **Not a fix-applier — mostly.** The CLI produces a report and stops; hand it to your coding agent if you want fixes applied. The Skill's convergence loop *does* apply fixes, but only when the user asks for that shape, and it records a reason for every finding it declines as well as every one it fixes.
 - **The review plan is a budget policy, not a judgment.** The scope gate decides whether the Adversary lane has anything to look at by pattern-matching changed paths plus added and removed lines — and by length, with no pattern involved: several of its patterns read a bounded span (200 characters) to stay linear on bytes a PR author picks, so any changed line longer than that span is treated as unreadable-therefore-evidence and runs the lane. That is reported as its own reason, never as a trust-boundary signal; the scaling policy sizes the rest — lanes, agents per lane, rounds, and the iteration cap — from the diff and from what round 1 found. Neither can know that an innocuous-looking helper is called from an auth path, so both are biased toward more review (pins force the full panel on paths a repo names), and a skipped lane is always named in the report — an unmentioned one reads exactly like a lane that looked and found nothing.
-- **`design` findings never gate.** That is deliberate, but it means the loop can converge with real design feedback outstanding. It is reported as a backlog; someone still has to read it.
+- **`design` and `contract` findings never gate.** That is deliberate, but it means the loop can converge with real design feedback and real documentation drift outstanding. Both are reported as a backlog; someone still has to read it.
 
 ## License and credit
 
