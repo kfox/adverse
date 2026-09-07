@@ -2,7 +2,14 @@
 // works as an email/chat attachment, in CI artifacts, or pasted into a wiki.
 // Vanilla HTML + scoped CSS + a few lines of JS — no framework, no build step.
 
-import { ADVISORY_KINDS, assertCoversStatuses } from './taxonomy.mjs';
+import { ADVISORY_KINDS, PROVENANCE, assertCoversStatuses } from './taxonomy.mjs';
+
+// The dashboard's wording for a finding the regression pass found, kept here
+// rather than shared with the Markdown renderer for the same reason each
+// renderer keeps its own root-cause labels: the wording belongs to the medium.
+// What must not differ is the question both ask, and that is the taxonomy's.
+// No `esc`: it is this file's own literal, not a reviewer's string.
+const REGRESSION_NOTE = 'introduced by a fix commit (regression pass)';
 
 // Null prototype: same reasoning as SEVERITY_MARKER in src/synthesis.mjs. A
 // group severity of "constructor" defeated the `?? SEVERITY_BADGE.info`
@@ -257,7 +264,7 @@ function renderCard(f) {
       ${loc ? `<span class="loc">${esc(loc)}</span>` : ''}
     </summary>
     <div class="body">
-      <p class="reporters">Reported by: ${esc(f.reporters.join(', '))} · confidence: ${esc(f.confidence)}${f.counterpart ? ` · contradicts ${esc(f.counterpart)}` : ''}</p>
+      <p class="reporters">Reported by: ${esc(f.reporters.join(', '))} · confidence: ${esc(f.confidence)}${f.provenance === PROVENANCE.regression ? ` · ${REGRESSION_NOTE}` : ''}${f.counterpart ? ` · contradicts ${esc(f.counterpart)}` : ''}</p>
       <div class="detail">${esc(f.detail).replaceAll('\n', '<br>')}</div>
       ${f.fix ? `<div class="fix"><strong>Fix:</strong> ${esc(f.fix)}</div>` : ''}
       ${validates}

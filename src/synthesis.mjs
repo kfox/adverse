@@ -34,7 +34,7 @@
 // enough (not advisory, not `info`) to hold a change open.
 
 import { isLaneAgent } from './personas.mjs';
-import { ADVISORY_KINDS, GROUP_RULINGS, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
+import { ADVISORY_KINDS, GROUP_RULINGS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
          assertCoversStatuses } from './taxonomy.mjs';
 
 // Verdict → score mapping. The natural symmetric choice: approve and reject
@@ -113,6 +113,31 @@ function rulingAgent(persona, payload, entry) {
   const agent = claimedAgent(persona, payload, entry);
   return agent === persona ? null : agent;
 }
+
+// ---------- Provenance ------------------------------------------------------
+//
+// "The fix introduced this" and "round 2 noticed this" are different facts, and
+// an operator reading a ranked list cannot act on the first without knowing
+// which it is. Both arrive as `added` findings — a regression found against a
+// commit that already landed IS the `added` shape, and giving it a parallel
+// channel would mean every consumer of `findings` had to learn about a second
+// one — so the distinction rides on the finding instead.
+//
+// Read from the ENTRY first and the payload second, the same order
+// `claimedAgent` uses and for the same reason: a split-lane merge unions two
+// payloads' entry lists under one payload header, so an identity that lives
+// only on the header is one the merge cannot carry.
+function provenanceOf(payload, entry) {
+  return entry?.provenance === PROVENANCE.regression
+    || payload?.provenance === PROVENANCE.regression
+    ? PROVENANCE.regression : PROVENANCE.review;
+}
+
+// What the report says beside a finding the regression pass found. Spelled out
+// rather than printing the bare word: `regression` next to `confidence: solo`
+// reads as another confidence label, and the fact that matters to a reader
+// deciding what to do is that a commit which already landed introduced it.
+const REGRESSION_NOTE = 'found by the regression pass on a fix commit that landed';
 
 // The agent a whole payload was written by, read off the payload's own
 // persona because a bridge merging two files has no key to consult.
@@ -272,6 +297,12 @@ function buildFinding(persona, raw, agent = persona) {
     // round 2 needs a second string to tell `auditor-a` from `auditor-b`.
     // Confidence never reads this list; only the self-validation guard does.
     reporterAgents: [agent],
+    // Which pass produced this finding — an ordinary review round, or a
+    // regression pass over a fix commit that already landed. Declared here so
+    // the field exists on every finding whether or not a run ran the pass; a
+    // shape that appears only sometimes is one every consumer has to guess
+    // about. `upsert` promotes it, so the default is the quiet one.
+    provenance: PROVENANCE.review,
     validators: [], // Array<{persona, reason}>
     challengers: [],
     confidence: 'solo',
@@ -415,9 +446,13 @@ export function synthesize(round1, round2 = {},
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
-  function upsert(persona, raw, agent) {
-    const f = buildFinding(persona, raw, agent);
+  // Takes the whole payload rather than a pre-computed agent id: it now needs
+  // two things off the payload header, and computing one of them at each call
+  // site and the other here is how the two answers drift apart.
+  function upsert(persona, payload, raw) {
+    const f = buildFinding(persona, raw, entryAgent(persona, payload, raw));
     if (f === null) return null;
+    f.provenance = provenanceOf(payload, raw);
     const norm = normTitle(f.title);
     const primaryKey = `${norm}|${f.file ?? ''}|${f.line ?? ''}`;
     let existing = byKey.get(primaryKey) ?? byNormTitle.get(norm);
@@ -429,6 +464,12 @@ export function synthesize(round1, round2 = {},
       if (severityRank(f.severity) < severityRank(existing.severity)) {
         existing.severity = f.severity;
       }
+      // Regression provenance is sticky across a merge. A second lane noticing
+      // the same thing in the ordinary way does not make it less true that a
+      // fix commit introduced it, and losing that fact is the silent
+      // direction: the operator reads a ranked list and cannot tell the two
+      // apart. Keeping it costs one line of report text.
+      if (f.provenance === PROVENANCE.regression) existing.provenance = PROVENANCE.regression;
       if (f.detail.length > existing.detail.length) existing.detail = f.detail;
       if (!existing.fix && f.fix) existing.fix = f.fix;
       if (existing.file === null && f.file) existing.file = f.file;
@@ -452,14 +493,14 @@ export function synthesize(round1, round2 = {},
   // 1. Phase 1 findings
   for (const [persona, review] of Object.entries(round1)) {
     for (const raw of review?.findings ?? []) {
-      if (raw && typeof raw === 'object') upsert(persona, raw, entryAgent(persona, review, raw));
+      if (raw && typeof raw === 'object') upsert(persona, review, raw);
     }
   }
 
   // 2. Phase 2 "added" findings (treated as first-class)
   for (const [persona, cross] of Object.entries(round2)) {
     for (const raw of cross?.added ?? []) {
-      if (raw && typeof raw === 'object') upsert(persona, raw, entryAgent(persona, cross, raw));
+      if (raw && typeof raw === 'object') upsert(persona, cross, raw);
     }
   }
 
@@ -820,7 +861,8 @@ function renderFinding(f) {
   }
   const out = [`### ${marker} **[${f.severity.toUpperCase()}·${f.kind}]** ${f.title}${loc}`];
   out.push('');
-  out.push(`_Reported by: ${f.reporters.join(', ')} · confidence: ${f.confidence}_`);
+  out.push(`_Reported by: ${f.reporters.join(', ')} · confidence: ${f.confidence}${
+    f.provenance === PROVENANCE.regression ? ` · ${REGRESSION_NOTE}` : ''}_`);
   if (f.counterpart) {
     out.push('');
     out.push(`_Contradicts:_ \`${f.counterpart}\``);
@@ -899,6 +941,11 @@ export function toJsonReport(syn) {
       challengers: f.challengers,
       confidence: f.confidence,
       group: f.group ?? null,
+      // Which pass found it. Serialized rather than left in memory because the
+      // reader who most needs it is the operator working a ranked list out of
+      // report.json one iteration later, when "a fix commit introduced this"
+      // is no longer obvious from anything else on the row.
+      provenance: f.provenance ?? PROVENANCE.review,
       blocking: isBlocking(f),
       // Did any reviewer go on record about THIS finding? A round-2 reviewer's
       // own added finding has no validators and no challengers by

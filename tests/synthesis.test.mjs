@@ -909,3 +909,73 @@ test('split and contested need no quorum — both dissolve the group', () => {
     }, { rootCauseGroups: groups }).rootCauses[0].status,
     'contested');
 });
+
+// --- provenance: which pass found it ------------------------------------------
+//
+// "The fix introduced this" and "round 2 noticed this" are different facts, and
+// an operator working a ranked list cannot act on the first without knowing
+// which it is. Both arrive as `added` findings on purpose (a regression against
+// a landed commit IS the `added` shape), so the report has to carry the
+// difference on the finding itself.
+
+const regressionPass = (persona, findings) =>
+  ({ persona, provenance: 'regression', verdict: 'conditional', summary: '', findings });
+
+test('a regression pass marks its findings, and an ordinary round does not', () => {
+  const syn = synthesize({
+    auditor: v('conditional', [f('Latent race', 'critical')]),
+    adversary: regressionPass('adversary', [f('The drain lost its bound', 'critical')]),
+  }, {});
+  const byTitle = Object.fromEntries(syn.findings.map((x) => [x.title, x.provenance]));
+  assert.equal(byTitle['The drain lost its bound'], 'regression');
+  assert.equal(byTitle['Latent race'], 'review',
+    'a finding nobody said anything about must default to the quiet value');
+
+  const md = renderMarkdown(syn);
+  assert.match(md, /The drain lost its bound\n\n_Reported by: adversary · confidence: solo · found by the regression pass on a fix commit that landed_\n/);
+  assert.match(md, /Latent race\n\n_Reported by: auditor · confidence: solo_\n/,
+    'the ordinary finding\'s line carries no note at all');
+  assert.match(renderHtml(syn), /introduced by a fix commit \(regression pass\)/);
+});
+
+test('provenance rides on the entry too — a merged payload has one header for two lists', () => {
+  // mergeSplitReviews unions two payloads' findings under one header, so a
+  // marker that lived only on the header would be dropped by exactly the merge
+  // a split lane needs. Same read order as `claimedAgent`: entry, then payload.
+  const merged = mergeSplitReviews(
+    { persona: 'auditor', verdict: 'approve', summary: 'a', findings: [] },
+    regressionPass('auditor', [{ ...f('Second writer to the cache', 'warning'),
+                                 provenance: 'regression' }]));
+  assert.ok(!('provenance' in merged), 'the merged header speaks for neither half');
+  const [finding] = synthesize({ auditor: merged }, {}).findings;
+  assert.equal(finding.provenance, 'regression');
+});
+
+test('regression provenance survives a second reporter, whichever order they merge in', () => {
+  // A second lane noticing the same thing in the ordinary way does not make it
+  // less true that a fix commit introduced it — and "last writer wins" would
+  // lose it in one of these two orders and look correct in the other.
+  const title = 'The bound stopped bounding';
+  const first = synthesize({
+    adversary: regressionPass('adversary', [f(title, 'critical')]),
+    auditor: v('reject', [f(title, 'critical')]),
+  }, {});
+  const second = synthesize({
+    auditor: v('reject', [f(title, 'critical')]),
+    adversary: regressionPass('adversary', [f(title, 'critical')]),
+  }, {});
+  assert.equal(first.findings[0].provenance, 'regression');
+  assert.equal(second.findings[0].provenance, 'regression');
+  assert.equal(first.findings[0].confidence, 'cross-validated',
+    'the provenance axis must not disturb the confidence arithmetic');
+});
+
+test('a round-2 added finding can carry provenance, and the JSON report keeps it', () => {
+  const round1 = { auditor: v('approve') };
+  const round2 = { steward: { persona: 'steward', provenance: 'regression', validate: [],
+                              challenge: [], added: [f('Changelog now lies', 'warning')] } };
+  const json = toJsonReport(synthesize(round1, round2));
+  assert.equal(json.findings[0].provenance, 'regression');
+  assert.equal(toJsonReport(synthesize({ auditor: v('approve', [f('Ordinary')]) }, {}))
+    .findings[0].provenance, 'review');
+});

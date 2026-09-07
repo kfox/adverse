@@ -20,6 +20,18 @@ export const ADVISORY_KINDS = Object.freeze(new Set(['design']));
 
 export const SEVERITIES = Object.freeze(['critical', 'warning', 'info']);
 
+// Which pass produced a finding. `review` is an ordinary review round;
+// `regression` is the read-only pass a lane that did not report the finding
+// runs over a fix commit that already landed (src/regression.mjs). The axis
+// exists because "the fix introduced this" and "round 2 noticed this" are
+// different facts and an operator reading a ranked list cannot act on the first
+// without knowing which it is.
+//
+// Here rather than in synthesis.mjs for the same reason ADVISORY_KINDS is here:
+// both renderers have to ask the question, and neither should learn the answer
+// from a string literal of its own.
+export const PROVENANCE = Object.freeze({ review: 'review', regression: 'regression' });
+
 // Null prototype, because `severity` is reviewer-supplied and callers test
 // membership with `severity in SEVERITY_RANK` and `SEVERITY_RANK[s]`. A plain
 // object answers `constructor`, `toString`, `valueOf` and nine more with
