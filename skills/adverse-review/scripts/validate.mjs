@@ -50,9 +50,7 @@
 // says so, and that is the whole of its claim: it holds a payload against its
 // filename, not against its author.
 
-import { parseArgs } from 'node:util';
-
-import { readJson, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { validateFix, validatePhase1, validatePhase2, validateRegression, validateVerify } =
@@ -100,7 +98,13 @@ const VALIDATORS = Object.assign(Object.create(null), {
   regression: { validate: validateRegression, byPersona: true, passNumbered: true },
 });
 
-const { values, positionals } = parseArgs({
+const USAGE = 'Usage: validate.mjs --phase round1|round2|verify|fix|regression'
+  + ' <file.json> [file2.json …]\n'
+  + `  --phase must be one of: ${Object.keys(VALIDATORS).join('|')}`;
+
+const { values, positionals } = parseBridgeArgs({
+  prefix: 'validate',
+  usage: USAGE,
   options: { phase: { type: 'string' } },
   strict: true,
   allowPositionals: true,
@@ -108,9 +112,7 @@ const { values, positionals } = parseArgs({
 
 const phase = values.phase && VALIDATORS[values.phase];
 if (!phase || !positionals.length) {
-  usage('Usage: validate.mjs --phase round1|round2|verify|fix|regression'
-    + ' <file.json> [file2.json …]\n'
-    + `  --phase must be one of: ${Object.keys(VALIDATORS).join('|')}`);
+  usage(USAGE);
 }
 
 // The lane and the half, read off one name. `agent` is null when the basename

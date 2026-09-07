@@ -320,3 +320,15 @@ test('synthesize subcommand rejects an empty --round2-skipped reason', () => {
     assert.match(r.stderr, /non-empty reason/);
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
+
+test('--help on a subcommand prints usage at exit 0, and a parse refusal is exit 2 without a stack trace', () => {
+  const help = runCli(['synthesize', '--help']);
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /^Usage: adverse/);
+
+  const refusal = runCli(['synthesize', '--no-such-flag']);
+  assert.equal(refusal.status, 2, refusal.stderr);
+  assert.match(refusal.stderr, /synthesize: Unknown option/);
+  assert.match(refusal.stderr, /Usage: adverse/);
+  assert.doesNotMatch(refusal.stderr, /at .*parse_args/);
+});

@@ -12,11 +12,10 @@
 // deliberately not 0 — a capped run is a stop, not a pass, and a loop that
 // exits clean on the cap would be lying about what it found.
 
-import { parseArgs } from 'node:util';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-import { readJson, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
@@ -25,7 +24,13 @@ const {
 } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 
-const { values } = parseArgs({
+const USAGE = 'Usage:\n'
+  + '  converge.mjs --ledger L.json --record decisions.json --report report.json --repo DIR --at REVIEWED_REF [--base REF]\n'
+  + '  converge.mjs --ledger L.json --report report.json --repo DIR [--head REF] [--max-iterations N]\n';
+
+const { values } = parseBridgeArgs({
+  prefix: 'converge',
+  usage: USAGE,
   options: {
     report:  { type: 'string' },
     ledger:  { type: 'string' },
@@ -40,10 +45,7 @@ const { values } = parseArgs({
 });
 
 if (!values.ledger) {
-  usage(
-    'Usage:\n'
-    + '  converge.mjs --ledger L.json --record decisions.json --report report.json --repo DIR --at REVIEWED_REF [--base REF]\n'
-    + '  converge.mjs --ledger L.json --report report.json --repo DIR [--head REF] [--max-iterations N]\n');
+  usage(USAGE);
 }
 
 // Identifies a report so a decision can say which observation it answered.

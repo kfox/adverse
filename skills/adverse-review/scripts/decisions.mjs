@@ -27,9 +27,8 @@
 // time a disposition was added.
 
 import { writeFileSync } from 'node:fs';
-import { parseArgs } from 'node:util';
 
-import { readJson, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { NAMED_NOT_FIXED_DISPOSITION, foldFixPayloads } = await importFromSrc('decisions.mjs');
@@ -40,7 +39,11 @@ const { validateFix } = await importFromSrc('prompts.mjs');
 // reason triage.mjs, repair.mjs and verify.mjs take them: strict parsing
 // without this throws on the second path the shell expands, and the glob is the
 // obvious thing to type.
-const { values, positionals } = parseArgs({
+const USAGE = 'Usage: decisions.mjs --fix a.json [--fix b.json …] --out decisions.json';
+
+const { values, positionals } = parseBridgeArgs({
+  prefix: 'decisions',
+  usage: USAGE,
   options: {
     fix: { type: 'string', multiple: true },
     out: { type: 'string' },
@@ -51,7 +54,7 @@ const { values, positionals } = parseArgs({
 
 values.fix = [...(values.fix ?? []), ...positionals];
 if (!values.fix.length || !values.out) {
-  usage('Usage: decisions.mjs --fix a.json [--fix b.json …] --out decisions.json');
+  usage(USAGE);
 }
 
 const payloads = [];

@@ -350,7 +350,8 @@ function cmdPersonas() {
 export async function main(argv = process.argv.slice(2)) {
   const cmd = argv[0];
   const rest = argv.slice(1);
-  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h'
+      || rest.includes('--help') || rest.includes('-h')) {
     process.stdout.write(HELP);
     return cmd ? 0 : 2;
   }
@@ -359,6 +360,9 @@ export async function main(argv = process.argv.slice(2)) {
     if (cmd === 'synthesize') return await cmdSynthesize(rest);
     if (cmd === 'personas') return cmdPersonas();
   } catch (e) {
+    if (typeof e.code === 'string' && e.code.startsWith('ERR_PARSE_ARGS')) {
+      die(`${cmd}: ${e.message.split('\n')[0]}\n\n${HELP}`);
+    }
     die(e.message ?? String(e));
   }
   die(`unknown command: ${cmd}\n\n${HELP}`);

@@ -56,9 +56,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { parseArgs } from 'node:util';
 
-import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { makeWriteQueue, parseBridgeArgs, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { closeQuietly, openRegularFileSync } = await importFromSrc('fsSafe.mjs');
@@ -74,7 +73,14 @@ const { PROVENANCE } = await importFromSrc('taxonomy.mjs');
 // same reason triage.mjs and verify.mjs accept them: strict parsing without
 // this throws on the second path the shell expands, and the glob is the obvious
 // thing to type.
-const { values, positionals } = parseArgs({
+const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
+  + ' (--closed-by <persona>… | --closed-by-none) [--json]\n'
+  + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
+  + ' [--refold] [--ledger <ledger.json> --repo <dir>]';
+
+const { values, positionals } = parseBridgeArgs({
+  prefix: 'regression',
+  usage: USAGE,
   options: {
     repo:             { type: 'string' },
     commit:           { type: 'string' },
@@ -89,11 +95,6 @@ const { values, positionals } = parseArgs({
   strict: true,
   allowPositionals: true,
 });
-
-const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
-  + ' (--closed-by <persona>… | --closed-by-none) [--json]\n'
-  + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
-  + ' [--refold] [--ledger <ledger.json> --repo <dir>]';
 
 const payloads = [...(values.payload ?? []), ...positionals];
 

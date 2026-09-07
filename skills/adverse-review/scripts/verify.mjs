@@ -43,10 +43,7 @@
 // in Phase 7. It is not carried into `report.json`; the dispositions that have
 // to reach the arithmetic are the open ones, and those are now findings.
 
-
-import { parseArgs } from 'node:util';
-
-import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { makeWriteQueue, parseBridgeArgs, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 
 import { importFromSrc } from './package-root.mjs';
 
@@ -59,21 +56,24 @@ const { KINDS, SEVERITIES } = await importFromSrc('taxonomy.mjs');
 // same reason as triage.mjs and repair.mjs: strict parsing without this throws
 // on the second path the shell expands, and the glob is the obvious thing to
 // type.
-const { values, positionals } = parseArgs({
+const USAGE = 'Usage: verify.mjs --verify a.json [--verify b.json …] --outdir <dir>'
+  + ' [--briefing briefing.json]';
+
+const { values, positionals } = parseBridgeArgs({
+  prefix: 'verify',
+  usage: USAGE,
   options: {
     verify: { type: 'string', multiple: true },
     outdir: { type: 'string' },
     briefing: { type: 'string' },
   },
-
   strict: true,
   allowPositionals: true,
 });
 
 values.verify = [...(values.verify ?? []), ...positionals];
 if (!values.verify.length || !values.outdir) {
-  usage('Usage: verify.mjs --verify a.json [--verify b.json …] --outdir <dir>'
-      + ' [--briefing briefing.json]');
+  usage(USAGE);
 }
 
 // Nothing reaches disk until every payload has been read and validated — see
