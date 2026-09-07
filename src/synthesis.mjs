@@ -176,8 +176,8 @@ export function stampedFieldClaim(payload) {
   const site = payloadStampSite(payload);
   if (!site) return null;
   return `\`${site}\` is stamped by the bridge that writes a regression pass to disk,`
-    + ' not claimed by a payload: it is what makes the report say a fix commit introduced'
-    + ' a finding. Remove the key.';
+    + " not claimed by a payload: it is what makes the report say a fix commit's"
+    + ' regression pass found a finding. Remove the key.';
 }
 
 // What the report says beside a finding the regression pass found. Spelled out

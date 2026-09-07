@@ -1055,10 +1055,14 @@ node ${SKILL_DIR}/scripts/regression.mjs --repo . --commit <fix-sha> \
 
 `--closed-by` is every persona that reported a finding this commit closed,
 spelled the way the registry spells it — lowercase, or a split lane's half like
-`auditor-a`. A name that resolves to no lane is refused at exit 2, not ignored:
-`--closed-by Auditor` differs by one capital letter, excluded nobody, and
-handed the pass to the lane that reported the finding under a line asserting it
-had reported none of them.
+`auditor-a`. A name this review could not have written is refused at exit 2,
+not ignored — and that is a wider rule than "resolves to no lane". Both of
+these are refused: `--closed-by Auditor` differs by one capital letter,
+excluded nobody, and handed the pass to the lane that reported the finding
+under a line asserting it had reported none of them; `--closed-by auditor-ab`
+*does* name the auditor lane but is not a half the splitter emits, and one
+tightening of that suffix pattern silently moved it from excluding the auditor
+to excluding nobody. If the bridge would have to guess at a name, retype it.
 
 **The flag is required, and omitting it is the same failure spelled shorter.**
 With no `--closed-by` at all the run used to exit 0 having excluded nobody,

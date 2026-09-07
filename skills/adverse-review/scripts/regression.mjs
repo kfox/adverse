@@ -113,12 +113,19 @@ function requireRevision(rev) {
 // assessScope the shape it reads as "nothing to assess", which recommends
 // running the Adversary — the same fail-toward-the-boundary direction the rest
 // of this tool takes, and the reason the failure is reported rather than fatal.
+// `--end-of-options` is the argv-side half of src/trace.mjs's rule: "two
+// independent guards, because either alone is one flag away from being
+// bypassed". `requireRevision` is the pattern half and runs first, so nothing
+// here is reachable today — which is the point. A revision that stops looking
+// like an option to the pattern (a future spelling, a caller that skips the
+// guard) still cannot become one to git.
 function readCommit(repo, rev) {
   const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8' });
   try {
     return {
-      files: git('show', '--pretty=format:', '--name-only', rev).split('\n').filter(Boolean),
-      diff: git('show', '--format=', rev),
+      files: git('show', '--pretty=format:', '--name-only', '--end-of-options', rev)
+        .split('\n').filter(Boolean),
+      diff: git('show', '--format=', '--end-of-options', rev),
     };
   } catch (e) {
     process.stderr.write(`  ! regression: cannot read ${rev} in ${repo}: ${e.message.trim()}\n`
@@ -338,6 +345,12 @@ function foldPayloads(sources, outdir) {
     process.stdout.write(`regression ${lane.sources.join(' + ')} -> ${dest}\n`);
   }
 
+  // "found by", not "introduced by": a regression entry is classified
+  // `intended-inert`, `intended-undocumented` or `unintended`, and only the
+  // last was introduced in the sense a reader takes from that word. Same
+  // correction src/html.mjs's REGRESSION_NOTE already carries; this line and
+  // the report cell are the two an operator reads, so they make one claim.
   process.stdout.write(`${sources.length} pass(es) from ${byPersona.size} lane(s):`
-    + ` ${findings} finding(s), stamped so the report can say a fix commit introduced them\n`);
+    + ` ${findings} finding(s), stamped so the report can say a fix commit's regression`
+    + ' pass found them\n');
 }

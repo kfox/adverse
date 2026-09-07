@@ -68,6 +68,15 @@ test('a pass reshapes into the round-1 shape triage.mjs reads, stamped', () => {
     assert.equal(out.provenance, 'regression');
     assert.deepEqual(out.passes, [{ commit: 'abc1234', checked: checked() }],
       'what the pass says it checked has to survive the reshape');
+
+    // The line an operator reads may not claim more than the payload carries.
+    // A pass classifies each entry `intended-inert`, `intended-undocumented`
+    // or `unintended`, and only the last was INTRODUCED in the sense a reader
+    // takes from that word — the same over-claim src/html.mjs's REGRESSION_NOTE
+    // was already corrected for, and this fixture's entry is `unintended`, so
+    // the assertion is about the wording rather than about this classification.
+    assert.match(r.stdout, /a fix commit's regression pass found them/);
+    assert.doesNotMatch(r.stdout, /introduced/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
