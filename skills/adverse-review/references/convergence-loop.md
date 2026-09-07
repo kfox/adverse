@@ -409,8 +409,16 @@ beside the verifications:
 node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/regression-*.json
 
 node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/regression-*.json \
-    --outdir "$ADVERSE_RUN"
+    --outdir "$ADVERSE_RUN" ${LEDGER:+--ledger "$LEDGER" --repo .}
 ```
+
+Pass `--ledger` whenever the run has one. The fold then annotates any finding
+that re-litigates a settled decision with the recorded disposition and reason —
+the same `adjudicated` block triage writes — so a pass that proposes reinstating
+what an earlier iteration `declined` arrives already labeled. That oscillation
+is measured, not hypothetical: a campaign's regression agent, briefed on a
+commit alone, re-proposed a fix the ledger had recorded as critical two
+iterations earlier, and only the operator's memory caught it.
 
 `--phase regression` reads the persona off the basename with the pass number
 stripped, so `regression-auditor-1.json` and `regression-auditor-2.json` both

@@ -55,12 +55,15 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { closeQuietly, openRegularFileSync } = await importFromSrc('fsSafe.mjs');
+const { annotate, checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
+const { makeAnchorTracer, resolveRef } = await importFromSrc('trace.mjs');
 const { chooseRegressionLane, unresolvedLanes } = await importFromSrc('regression.mjs');
 const { validateRegression } = await importFromSrc('prompts.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
@@ -79,6 +82,7 @@ const { values, positionals } = parseArgs({
     'closed-by-none': { type: 'boolean' },
     payload:          { type: 'string', multiple: true },
     outdir:           { type: 'string' },
+    ledger:           { type: 'string' },
     refold:           { type: 'boolean' },
     json:             { type: 'boolean' },
   },
@@ -88,18 +92,42 @@ const { values, positionals } = parseArgs({
 
 const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
   + ' (--closed-by <persona>… | --closed-by-none) [--json]\n'
-  + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir> [--refold]';
+  + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
+  + ' [--refold] [--ledger <ledger.json> --repo <dir>]';
 
 const payloads = [...(values.payload ?? []), ...positionals];
 
 if (payloads.length) {
   if (!values.outdir) usage(USAGE);
-  foldPayloads(payloads, values.outdir);
+  if (values.ledger && !values.repo) usage(USAGE);
+  foldPayloads(payloads, values.outdir, values.ledger
+    ? loadBoundLedger(values.ledger, path.resolve(values.repo)) : null);
 } else if (values.commit) {
   chooseLane(values.repo ?? '.', values.commit,
     values['closed-by'] ?? [], values['closed-by-none'] === true);
 } else {
   usage(USAGE);
+}
+
+// The same ledger load and repository binding triage.mjs enforces, for the
+// same reason: an annotation says "this was already decided — here is why",
+// and a foreign ledger accepted here puts its text in front of whoever reads
+// the fold.
+function loadBoundLedger(ledgerPath, repo) {
+  let ledger = emptyLedger();
+  try {
+    ledger = loadLedger(ledgerPath);
+  } catch (e) {
+    process.stderr.write(`regression: ${e.message}\n`);
+    process.exit(1);
+  }
+  const problems = checkBinding(ledger, (ref) => resolveRef(repo, ref));
+  if (problems.length) {
+    process.stderr.write('regression: this ledger does not belong to this repository:\n'
+      + problems.map((pr) => `  - ${pr}\n`).join(''));
+    process.exit(1);
+  }
+  return { ledger, traceFor: makeAnchorTracer({ repo, to: 'HEAD' }) };
 }
 
 // --- who runs it -------------------------------------------------------------
@@ -395,7 +423,7 @@ function refuseKnownFolds(byPersona, outdir, refold) {
 // A Map, not an object literal: the key is a persona, and although
 // `requireKnownPersona` has already refused anything outside the registry,
 // nothing downstream should have to know that to be safe.
-function foldPayloads(sources, outdir) {
+function foldPayloads(sources, outdir, bound) {
   const byPersona = new Map();
   for (const src of sources) {
     const payload = readPayload(src);
@@ -427,6 +455,7 @@ function foldPayloads(sources, outdir) {
   const writes = makeWriteQueue('regression');
   let findings = 0;
   for (const [persona, lane] of byPersona) {
+    if (bound) lane.findings = annotate(lane.findings, bound.ledger, bound.traceFor);
     const commits = lane.passes.map((p) => p.commit).join(', ');
     const out = {
       persona,
