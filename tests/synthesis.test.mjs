@@ -1077,7 +1077,15 @@ test('a regression pass marks its findings, and an ordinary round does not', () 
   assert.match(md, /The drain lost its bound\n\n_Reported by: adversary · confidence: solo · found by the regression pass on a fix commit that landed_\n/);
   assert.match(md, /Latent race\n\n_Reported by: auditor · confidence: solo_\n/,
     'the ordinary finding\'s line carries no note at all');
-  assert.match(renderHtml(syn), /introduced by a fix commit \(regression pass\)/);
+  // Both renderers word it for their medium and both must make the same CLAIM.
+  // The dashboard said "introduced by a fix commit", which asserts causation the
+  // payload does not carry: a regression entry is classified `intended-inert`,
+  // `intended-undocumented` or `unintended`, and only the last was introduced in
+  // the sense a reader takes from that sentence.
+  const html = renderHtml(syn);
+  assert.match(html, /found by a fix commit's regression pass/);
+  assert.doesNotMatch(html, /introduced by/,
+    'the dashboard must not assert the fix introduced a finding the pass merely found');
 });
 
 test('provenance rides on the entry too — a merged payload has one header for two lists', () => {

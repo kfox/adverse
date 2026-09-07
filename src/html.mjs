@@ -10,9 +10,15 @@ import { rulingVoice } from './synthesis.mjs';
 // The dashboard's wording for a finding the regression pass found, kept here
 // rather than shared with the Markdown renderer for the same reason each
 // renderer keeps its own root-cause labels: the wording belongs to the medium.
-// What must not differ is the question both ask, and that is the taxonomy's.
+// What must not differ is the CLAIM, and this one did. It read "introduced by a
+// fix commit", which asserts causation the payload does not carry: a regression
+// entry is classified `intended-inert`, `intended-undocumented` or `unintended`,
+// and only the last of those was introduced in the sense a reader takes from
+// that sentence. The Markdown renderer's copy said "found by the regression
+// pass", which is what the provenance field actually means, so this one now
+// says the same thing in fewer words.
 // No `esc`: it is this file's own literal, not a reviewer's string.
-const REGRESSION_NOTE = 'introduced by a fix commit (regression pass)';
+const REGRESSION_NOTE = 'found by a fix commit\'s regression pass';
 
 // Null prototype: same reasoning as SEVERITY_MARKER in src/synthesis.mjs. A
 // group severity of "constructor" defeated the `?? SEVERITY_BADGE.info`

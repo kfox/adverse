@@ -744,7 +744,10 @@ them from the briefing rather than retyping them.
 
 - All five top-level keys are required. \`fixed\`, \`declined\` and
   \`named_not_fixed\` may each be empty; a batch where every finding was declined
-  legitimately commits nothing.
+  legitimately commits nothing. \`commits\` may be empty only then — if
+  \`fixed\` names a fix, \`commits\` must name the commit that made it, because
+  the regression pass runs once per fix commit and cannot run against a commit
+  nobody named. Blank strings are refused, here as everywhere.
 - \`mutations\` is required on every \`fixed\` entry. An empty list is a claim that
   this fix added no test — reviewable, and sometimes true. A mutation entry
   naming no victim is not evidence and is refused.
@@ -1245,6 +1248,13 @@ export function validateFix(obj) {
     if (typeof obj.commits[i] !== 'string') {
       return `commits[${i}] must be a string, got ${typeName(obj.commits[i])}.`;
     }
+    // Blank refused too, the way every other string field in this validator
+    // refuses one: `commits: [""]` reaches Phase 9 as a commit to run a
+    // regression pass against that names nothing. Spelled out rather than
+    // delegated to `requireText` so the message keeps its index — `commits[0]`
+    // tells the agent which element, `commits.0` reads like a key it never
+    // wrote.
+    if (!obj.commits[i].trim()) return `commits[${i}] is empty.`;
   }
 
   for (const key of ['fixed', 'declined']) {
@@ -1254,6 +1264,17 @@ export function validateFix(obj) {
       if (err) return err;
     }
   }
+  // A fix with no commit leaves the orchestrator holding decisions to record
+  // and nothing to run Phase 9's regression pass against — that pass is defined
+  // as one per fix commit — and nothing said so, which is the silent skip
+  // SKILL.md refuses for the pass itself. Cross-field rather than blanket: an
+  // all-declined batch legitimately commits nothing, and the prompt says so.
+  if (obj.commits.length === 0 && obj.fixed.length > 0) {
+    return `\`commits\` is empty but \`fixed\` claims ${obj.fixed.length} `
+      + 'fix(es). Name the commit(s) you wrote: Phase 9 runs one regression pass '
+      + 'per fix commit, and an unnamed commit is a pass that never runs.';
+  }
+
   // Only a `fixed` entry claims a code change, so only a `fixed` entry owes a
   // mutation table. Requiring one from a decline would ask an agent to invent
   // evidence for work it did not do.

@@ -406,6 +406,25 @@ test('fix: rejects a non-array `commits` and a non-string sha', () => {
   assert.match(validateFix(goodFix({ commits: [42] })), /commits\[0\] must be a string/);
 });
 
+test('fix: a blank sha is refused, with the index the agent can act on', () => {
+  assert.match(validateFix(goodFix({ commits: [''] })), /commits\[0\] is empty/);
+  assert.match(validateFix(goodFix({ commits: ['abc1234', '   '] })), /commits\[1\] is empty/);
+});
+
+// Phase 9 runs one regression pass per fix commit, so a payload claiming fixes
+// and naming no commit leaves decisions to record and nothing to run a pass
+// against — the silent skip SKILL.md refuses for the pass itself. Cross-field,
+// not blanket: the second arm is the case that must stay legal.
+test('fix: claiming a fix with no commit is refused; declining everything is not', () => {
+  const claimed = goodFix({ commits: [] });
+  assert.ok(claimed.fixed.length > 0, 'the fixture must claim a fix for this to mean anything');
+  assert.match(validateFix(claimed), /`commits` is empty but `fixed` claims 1 fix/);
+
+  const allDeclined = goodFix({ commits: [], fixed: [] });
+  assert.equal(validateFix(allDeclined), null,
+    'a batch where every finding was declined legitimately commits nothing');
+});
+
 test('fix: a decision missing an identity field the ledger matches on is refused', () => {
   for (const key of ['kind', 'severity', 'counterpart', 'line', 'confidence']) {
     const p = goodFix();

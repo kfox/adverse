@@ -1242,7 +1242,7 @@ ledger, rather than only in conversation state.
 | 1 — file list & plan | Once `plan.json` is written | The plan is a file now, not a fact anyone has to remember. |
 | 2 — round 1 | **Never** until every persona's file passes `validate.mjs` | An unsaved or unvalidated reviewer payload is exactly the state a mid-phase compaction loses — a subagent still working has nothing durable yet. |
 | 3 — triage | Once `briefing.json` is written | Triage's whole output is a file; Phase 4 reads it, not the conversation. |
-| 4 — round 2 | **Never** until every `round2-<persona>.json` passes `validate.mjs`, and never between triage and synthesize | Same unsaved-payload risk as Phase 2, plus `$ROUNDS`/`$CAP`/`$R2_REASON` exist only as shell variables until Phase 6 writes the report that carries them forward. |
+| 4 — round 2 | **Never** until every `round2-<agent>.json` passes `validate.mjs` — both halves of a split lane, not one file per persona, and never between triage and synthesize | Same unsaved-payload risk as Phase 2, plus `$ROUNDS`/`$CAP`/`$R2_REASON` exist only as shell variables until Phase 6 writes the report that carries them forward. |
 | 5 — repair, combine | Once `round1.json` and `round2.json` are written | The repaired and combined files are the only state Phase 6 needs. |
 | 6 — synthesize | Once `report.json` / `report.md` are written | This is the artifact the whole triage → synthesize span exists to produce. |
 | 7 — decide, record | **Never mid-fix-batch.** Safe once decisions are `--record`ed to the ledger *and* every fix commit is on the branch with the gate re-run green over all of them together | Before that, "which findings are fixed" and "what the diff contains" exist only as edits in flight — exactly the state Phases 8–9 depend on. A worktree's own green is not the composed one, so a batch that ran concurrently is not checkpointable until the replay is done. |
@@ -1267,7 +1267,7 @@ Everywhere else, disk already holds what the loop needs next.
 | `triage.mjs` reports `REGRESSED` | Lead with it. A fix that did not take is more important than any new finding. |
 | `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge or ruling and continue. |
 | `triage.mjs` reports an `OVERSIZED` candidate root cause | The edges chained further than one root cause plausibly reaches. It will not collapse whatever round 2 says; tell round 2 to name the smaller root causes inside it. |
-| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`/`decisions`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
+| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`/`decisions`/`regression`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
 | `converge.mjs` exits 3 | The cap, not success. Say plainly what is still open. |
 | Ledger version mismatch | Do not delete it. Tell the user which version it is; the schema changed under them. |
 | `node` not on PATH | Tell the user to install Node 22+. Do not improvise a fallback. |
@@ -1279,8 +1279,12 @@ Everywhere else, disk already holds what the loop needs next.
   Phase 1 plan scales that in both directions: a small boundary-free diff runs
   2 round-1 calls (Auditor + Steward) and, when round 1 reports nothing of a
   blocking kind, no round 2 — a floor of **2**. A large diff splits the
-  per-file lanes into two agents each, up to 6 + 3 = **9**. Each loop
-  iteration adds ~3 cheap verification calls, not another 7.
+  per-file lanes into two agents each, and round 2 is per AGENT rather than per
+  persona — both halves rule, which is the point of splitting — so it is
+  6 + 5 = **11**, not 6 + 3: four round-2 calls from the two split lanes plus
+  the Steward, the Pragmatist never cross-reviewing. Each loop iteration adds
+  ~3 cheap verification calls, not another 7, plus one regression pass per fix
+  commit.
 - **Every deterministic step is deterministic on purpose.** Triage, repair,
   tracing, synthesis, and the stop condition are Node code because a model in
   any of those positions can hallucinate consensus, and consensus is the
