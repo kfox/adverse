@@ -713,7 +713,9 @@ Per-worktree green does not compose. Cherry-pick each worktree's commit onto the
 branch in dependency order, then run the repo's own gate (Phase 0) over what
 that produced: N worktrees means N gate runs plus one, and a conflict on replay
 needs resolving. This buys wall-clock, not tokens — say which one you bought,
-because the setup cost is visible and the saving is not.
+because the setup cost is visible and the saving is not. Once a worktree's
+commit is replayed, that worktree is spent — it goes in Phase 10's teardown
+with the reviewer fleet.
 
 **A worktree isolates the source tree. It does not isolate the build or
 dependency environment, and that is where the shared mutable state usually
@@ -829,6 +831,21 @@ The ledger lives outside the run directory (Phase 0) precisely so that nothing
 about cleaning up scratch can touch it. **Keep it if the work is not merged
 yet** — a later pass on the same branch starts from these conclusions. Do not
 commit either.
+
+**Worktrees are the one thing a run does delete.** The mktemp rule above covers
+files, which the OS reaps; a `git worktree add` also registers state in the
+repository's own `.git/worktrees`, which nothing reaps — one campaign left
+about sixty stale registrations cluttering `git worktree list` and shadowing
+its branches. Anything worth keeping is in a commit or the run directory by
+now, so remove every worktree this run created — the reviewer fleet and any
+fix-agent worktrees alike — with the tool built for it, never `rm -rf`:
+
+```bash
+for agent in $AGENTS; do
+  git worktree remove --force "$WORKTREES/$agent"
+done
+git worktree prune
+```
 
 ## Phase 11 — harvest what the run taught
 
