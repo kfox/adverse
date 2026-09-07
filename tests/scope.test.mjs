@@ -196,3 +196,50 @@ test('scanning a very long line is still fast', () => {
   assessScope({ files: ['x.js'], diff });
   assert.ok(Date.now() - started < 1000, 'a 200k-character line must not stall the scan');
 });
+
+// --- the SQL signal was not the only unbounded span --------------------------
+// Three more patterns had `.*`/`[^)]*` before a required literal, which is the
+// same quadratic shape. Measured on this tree, `if (` repeated as ONE removed
+// line: 64 KB 2.2 s, 128 KB 6.9 s, 256 KB 26.7 s, 512 KB 107.4 s — a clean 4x
+// per doubling, with execFileSync's 1 MiB maxBuffer the only ceiling, inside a
+// loop that runs this per fix commit. A commit deleting a vendored or minified
+// file puts a PR author's own bytes on the removed-line scan.
+
+const removedLine = (line) => `--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n-${line}\n`;
+
+test('the removed-guard spans do not backtrack catastrophically', () => {
+  for (const [name, unit] of [
+    ['if (…) return', 'if ('],          // the reporter's input, verbatim
+    ['guard … else', 'guard x '],
+    ['os.path.join(…)', 'os.path.join('],
+  ]) {
+    const body = unit.repeat((512 * 1024) / unit.length);
+    const started = Date.now();
+    assessScope({ files: ['x.js'], diff: removedLine(body) });
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 1000, `${name}: 512 KB took ${elapsed}ms — the span is unbounded again`);
+  }
+});
+
+test('each bounded span still fires on the guard it was written for, alone', () => {
+  // Discriminating fixtures, and that is the whole point of them: every line in
+  // the shape test above also trips a second signal (`!`, `{ throw`, `role`,
+  // `deny`, `403`), so none of them could tell a bounded pattern from a deleted
+  // one. Each line here matches exactly one pattern, named beside it.
+  // The expected `signal` is a fragment of the pattern's own source, matched as
+  // a plain substring. It names the pattern without quoting the bound, so this
+  // test stays about detection and the timing test above stays about the bound.
+  // `if\s*\(` alone would be ambiguous — the negated-condition signal
+  // `\bif\s*\(?\s*(!…)` contains it too.
+  for (const [line, signal] of [
+    ['if (isStale(c)) return cached(c);', '\\)\\s*\\{?\\s*(throw|return|raise)'],
+    ['guard let c = cache[k] else fallback(k)', '\\bguard\\b'],
+    ['p = os.path.join(base, request.args["f"])', 'os\\.path\\.join'],
+  ]) {
+    const r = assessScope({ files: ['src/render/widget.js'], diff: removedLine(line) });
+    assert.equal(r.recommend, 'run', line);
+    assert.equal(r.evidence.length, 1, `${line} must trip exactly one signal, not two`);
+    assert.ok(r.evidence[0].signal.includes(signal),
+      `${line} tripped ${r.evidence[0].signal}, expected the bounded ${signal}`);
+  }
+});

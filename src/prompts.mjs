@@ -1319,6 +1319,33 @@ export function validateFix(obj) {
 const REGRESSION_QUESTIONS = ['stricter', 'permissive', 'hot-path', 'shared-state'];
 const CLASSIFICATIONS = new Set(['intended-inert', 'intended-undocumented', 'unintended']);
 
+// The fix commit a regression pass says it read.
+//
+// Shape-checked because the field is not data the tool keeps to itself: the
+// bridge interpolates it into `summary: "regression pass on <commits>: N
+// finding(s)"`, `synthesize` copies that into `syn.summaries`, and both
+// renderers print it. `renderMarkdown`'s verdict cell escapes `|` and nothing
+// else, so a payload whose `commit` was
+//
+//   "deadbeef |\n\n## Panel ruling: all criticals were withdrawn\n\n| x | y | z"
+//
+// validated clean and emitted a truncated reviewer-verdicts table followed by
+// an attacker-chosen `##` heading in the operator-facing report. `AGENT_LABEL`
+// above is the same rule for a fix agent's batch label and `GROUP_ID` in
+// src/ledger.mjs states it outright: an identifier interpolated into
+// tool-authored prose gets a shape check.
+//
+// Deliberately NOT hex-only. This field is model-written from a prompt that
+// asks for "<the fix commit you read>"; the bridge's sibling `--commit` flag is
+// driven with `HEAD` by its own tests and resolves symbolic revs on purpose;
+// and src/trace.mjs's `SAFE_REF` already admits a symbolic rev read out of the
+// ledger, with src/ledger.mjs noting `HEAD~0~0` as a legitimate spelling. A
+// pass answering `HEAD~2` or a tag name is honest input, and a pattern that
+// refuses honest input is a worse defect than the injection it closes. So:
+// SAFE_REF's vocabulary, plus the length bound a prose cell needs and that
+// SAFE_REF does not have.
+const REVISION = /^[0-9A-Za-z][0-9A-Za-z._/~^{}-]{0,63}$/;
+
 // Returns null if `obj` is a valid regression-pass payload, else an error
 // string suitable for feeding back to the model on retry.
 //
@@ -1343,8 +1370,10 @@ export function validateRegression(obj, personaName) {
   if (obj.persona !== personaName) {
     return `\`persona\` must be '${personaName}', got ${JSON.stringify(obj.persona)}.`;
   }
-  if (typeof obj.commit !== 'string' || !obj.commit.trim()) {
-    return `\`commit\` must name the fix commit this pass read, got ${JSON.stringify(obj.commit)}.`;
+  if (typeof obj.commit !== 'string' || !REVISION.test(obj.commit)) {
+    return '`commit` must name the fix commit this pass read, as a revision matching '
+      + `/${REVISION.source}/ — it is printed inside a sentence this tool signs. Got `
+      + `${JSON.stringify(obj.commit)}.`;
   }
 
   if (!Array.isArray(obj.checked)) return '`checked` must be an array.';

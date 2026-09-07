@@ -849,7 +849,17 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   lines.push('| Reviewer | Verdict | Summary |');
   lines.push('|---|---|---|');
   for (const [p, v] of Object.entries(syn.verdicts)) {
-    const summary = (syn.summaries[p] ?? '').replaceAll('|', '\\|');
+    // Newlines collapsed as well as `|` escaped. A summary is off-disk prose
+    // and a table cell cannot hold a line break: the row ends at the first
+    // newline and whatever follows is rendered as document body. A regression
+    // payload whose `commit` was `deadbeef |\n\n## Panel ruling: all criticals
+    // were withdrawn` reached this cell through the bridge's own
+    // `regression pass on ${commits}` sentence and printed that heading in the
+    // operator's report. `validateRegression` now refuses that commit, and
+    // this is the layer that does not depend on which validator wrote the
+    // summary — every phase's `summary` is free text no schema constrains.
+    const summary = (syn.summaries[p] ?? '').replace(/\s*[\r\n]+\s*/g, ' ')
+      .replaceAll('|', '\\|');
     lines.push(`| ${p} | ${v} | ${summary} |`);
   }
   if (syn.degraded.length) {

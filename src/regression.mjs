@@ -73,6 +73,31 @@ function laneOf(agent) {
   return DEFAULT_PERSONAS.find((persona) => isLaneAgent(persona, agent)) ?? null;
 }
 
+// The `closedBy` entries `laneOf` could not place, in the order given.
+//
+// `laneOf` returning null is the right answer for ONE name: an unrecognized
+// string must not exclude a lane it does not name, and it must not throw
+// either. Dropping the whole unresolved set and saying nothing is a different
+// thing, and it is the classifier whose unmatched input silently does nothing —
+// the shape the CANDIDATE_ORDER check above already refuses for this module's
+// own constant, left open for the one input a caller supplies.
+//
+// Measured: `--closed-by Auditor --closed-by adversary` differs from the
+// accepted spelling by one capital letter, excluded the Auditor from nothing,
+// and exited 0 having put the lane that reported the finding in charge of
+// reviewing its own fix — under a `reason` that reads "it reported none of the
+// findings this commit closed". The wrong lane is recoverable; the artifact
+// asserting disinterest it does not have is not.
+//
+// Returned rather than thrown because the exit code belongs to the caller: the
+// skill bridge refuses the run at exit 2 (skills/adverse-review/scripts/
+// regression.mjs), and a library caller that wants the old fail-open can have
+// it, but only by reading this field and choosing.
+export function unresolvedLanes(closedBy) {
+  const names = Array.isArray(closedBy) ? closedBy : [];
+  return names.filter((agent) => laneOf(agent) === null);
+}
+
 // `closedBy` is the set of personas (or split-lane agent ids) that reported the
 // findings this commit closed. `files` and `diff` describe the fix commit, and
 // are handed straight to assessScope — the Adversary's gate everywhere else in
@@ -96,13 +121,24 @@ export function chooseRegressionLane({ closedBy = [], files = [], diff = '' } = 
     if (lane) reported.add(lane);
   }
 
+  const unresolved = unresolvedLanes(closedBy);
+  // The caveat rides in the sentence the artifact prints, not only in the
+  // field beside it: the harm was never the lane chosen, it was a `reason`
+  // claiming the pass is disinterested while part of the exclusion list had
+  // been silently discarded.
+  const dropped = unresolved.length
+    ? `, having excluded nothing for ${unresolved.map((n) => JSON.stringify(n)).join(', ')}`
+      + ' — which named no lane'
+    : '';
+
   const disinterested = order.find((persona) => !reported.has(persona));
   if (disinterested) {
     return {
       persona: disinterested,
       conflicted: false,
+      unresolved,
       reason: `${disinterested}: ${lens}, and it reported none of the findings this`
-        + ' commit closed',
+        + ` commit closed${dropped}`,
     };
   }
 
@@ -115,8 +151,9 @@ export function chooseRegressionLane({ closedBy = [], files = [], diff = '' } = 
   return {
     persona: order[0],
     conflicted: true,
+    unresolved,
     reason: `${order[0]}: ${lens}, but every lane that can hold a regression `
       + `(${order.join(', ')}) reported a finding this commit closed, so this pass is run by`
-      + ' one of them. Read its silence knowing it was already invested in this fix.',
+      + ` one of them${dropped}. Read its silence knowing it was already invested in this fix.`,
   };
 }

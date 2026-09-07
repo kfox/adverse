@@ -45,7 +45,7 @@ import { parseArgs } from 'node:util';
 import { readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { chooseRegressionLane } = await importFromSrc('regression.mjs');
+const { chooseRegressionLane, unresolvedLanes } = await importFromSrc('regression.mjs');
 const { validateRegression } = await importFromSrc('prompts.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 const { PROVENANCE } = await importFromSrc('taxonomy.mjs');
@@ -115,8 +115,36 @@ function readCommit(repo, rev) {
   }
 }
 
+// The registry check `readPayload` makes on a payload's persona forty lines
+// below, applied to the one input a CALLER supplies. `chooseRegressionLane`
+// resolves each name through `laneOf` and drops what it cannot place — right
+// for the library, fail-open here, because the caller is the orchestrator that
+// just fixed the code and the whole point of this bridge is that it does not
+// get to pick its own reviewer.
+//
+// `--closed-by Auditor` (one capital) excluded nobody and printed "auditor: …
+// and it reported none of the findings this commit closed" at exit 0, over the
+// reporting lane reviewing its own fix. Refused by value rather than
+// lowercased, exactly as `requireKnownPersona` refuses a re-cased persona: a
+// name this bridge has to guess at is a name the orchestrator should retype.
+//
+// Exit 2, not 1, per bridge-io.mjs's contract — exit 1 is a claim about a
+// review, and this run never got as far as choosing who would do one.
+function requireLaneNames(closedBy) {
+  const unresolved = unresolvedLanes(closedBy);
+  if (!unresolved.length) return closedBy;
+
+  process.stderr.write('regression: --closed-by '
+    + `${unresolved.map((n) => JSON.stringify(n)).join(', ')} names no lane`
+    + ` (expected one of ${DEFAULT_PERSONAS.join(', ')}, lowercase, or a split`
+    + " lane's half like auditor-a)\n");
+  process.exit(2);
+}
+
 function chooseLane(repo, rev, closedBy) {
-  const { files, diff } = readCommit(repo, requireRevision(rev));
+  const commit = requireRevision(rev);
+  requireLaneNames(closedBy);
+  const { files, diff } = readCommit(repo, commit);
   const choice = chooseRegressionLane({ closedBy, files, diff });
 
   if (values.json) {

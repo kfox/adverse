@@ -63,7 +63,14 @@ const CONTENT_SIGNALS = [
   /\bhmac\b/i, /\bhashlib\b/, /\bmd5\b/i, /\bsha1\b/i, /\bcompare_digest\b/,
   /Content-Security-Policy/i, /Access-Control-/i, /X-Frame-Options/i, /SameSite/i,
   /\bchmod\b/, /\bchown\b/, /\bsetuid\b/, /\bsudo\b/,
-  /\bos\.path\.join\s*\([^)]*\b(request|input|arg|param|user)/i,
+  // `[^)]*` is the same unbounded-span-before-a-required-literal shape as the
+  // two bounded signals in REMOVED_LINE_SIGNALS below, and it is quadratic for
+  // the same reason: on `os.path.join(` repeated with no `)` and no argument
+  // name, every one of those prefixes retries the whole tail. Measured alone:
+  // 64 KB 0.5 s, 128 KB 1.9 s, 256 KB 7.8 s. Worse exposure than its two
+  // siblings, because CONTENT_SIGNALS is scanned against ADDED lines as well
+  // as removed ones.
+  /\bos\.path\.join\s*\([^)]{0,200}?\b(request|input|arg|param|user)/i,
   // No leading \b: these have to match camelCase call sites too, and
   // `\bpermission` does not match `hasPermission`.
   /authenticat/i, /authoriz/i, /permission/i, /sanitiz/i, /credential/i,
@@ -90,8 +97,19 @@ const REMOVED_LINE_SIGNALS = [
   // paren-required version alone missed the Python and Go guards verbatim.
   /\bif\s*\(?\s*(!(?!=)|not\b)/,
   /\bunless\b/,
-  /\bguard\b.*\belse\b/,
-  /\bif\s*\(.*\)\s*\{?\s*(throw|return|raise)\b/,
+  // Bounded spans, for the reason the SQL signal above gives and by the same
+  // shape: an unanchored `.*` before a required literal retries from every
+  // position the prefix matches, so both of these were quadratic in line
+  // length. Measured on `if (` repeated as ONE removed line — 64 KB 2.2 s,
+  // 128 KB 6.9 s, 256 KB 26.7 s, 512 KB 107.4 s, a clean 4x per doubling with
+  // execFileSync's 1 MiB maxBuffer the only ceiling. That is minutes of CPU
+  // per fix commit inside the Phase 9 loop, on bytes a PR author picks: a
+  // commit deleting a vendored or minified file puts them straight onto the
+  // removed-line scan. 200 characters is the SQL signal's window; a guard
+  // whose `else` is further away than that is not a guard a reader would
+  // recognize either.
+  /\bguard\b.{0,200}?\belse\b/,
+  /\bif\s*\([^\n]{0,200}?\)\s*\{?\s*(throw|return|raise)\b/,
   // The enforcement consequence, at line start (multi-line guard body) or
   // right after an opening brace (`else { throw … }`, `if !ok { return … }`).
   /^\s*(throw|raise)\b/,

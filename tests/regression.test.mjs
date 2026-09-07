@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { chooseRegressionLane } from '../src/regression.mjs';
+import { chooseRegressionLane, unresolvedLanes } from '../src/regression.mjs';
 
 const diffOf = (...added) =>
   ['diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1 +1 @@', ...added.map((l) => `+${l}`)].join('\n');
@@ -53,15 +53,42 @@ test('a split lane\'s half is still that lane', () => {
   assert.equal(chosen.conflicted, false);
 });
 
-test('a name that belongs to no lane excludes nothing', () => {
-  // `closedBy` comes off ledger decisions, where a persona string is
-  // model-written. An unrecognized one must not silently exclude the lane the
-  // pass wanted, and must not throw either.
-  const chosen = chooseRegressionLane({
-    ...ROUTINE, closedBy: ['referee', 'AUDITOR', 'auditor_a', '__proto__', null, 42],
-  });
+test('a name that belongs to no lane excludes nothing, and is reported', () => {
+  // `closedBy` comes off a caller, where a persona string is model- or
+  // hand-written. An unrecognized one must not silently exclude the lane the
+  // pass wanted, and must not throw either — but it must not be DROPPED in
+  // silence, which is what this test used to pin. `--closed-by Auditor` is one
+  // capital letter from `auditor`: it excluded nobody, and the `reason` then
+  // asserted the chosen lane "reported none of the findings this commit
+  // closed" about the lane that had reported them all.
+  const dropped = ['referee', 'AUDITOR', 'auditor_a', '__proto__', null, 42];
+  const chosen = chooseRegressionLane({ ...ROUTINE, closedBy: dropped });
   assert.equal(chosen.persona, 'auditor');
   assert.equal(chosen.conflicted, false);
+  assert.deepEqual(chosen.unresolved, dropped,
+    'every name the resolver could not place, in the order given');
+  assert.match(chosen.reason, /excluded nothing for/);
+  assert.match(chosen.reason, /"AUDITOR"/);
+});
+
+test('a resolvable list leaves nothing unresolved — the field is not always full', () => {
+  // The discriminating case for the assertion above: if `unresolved` were
+  // simply `closedBy`, or simply everything, both tests could not hold.
+  const chosen = chooseRegressionLane({ ...ROUTINE, closedBy: ['auditor', 'steward-b'] });
+  assert.deepEqual(chosen.unresolved, []);
+  assert.equal(chosen.persona, 'adversary');
+  assert.doesNotMatch(chosen.reason, /excluded nothing/);
+});
+
+test('unresolvedLanes keeps the unplaceable names and drops the real ones', () => {
+  // The predicate the skill bridge refuses on, tested where it lives so the
+  // bridge's exit code and the library's `unresolved` field cannot disagree.
+  assert.deepEqual(unresolvedLanes(['auditor', 'Auditor', 'adversary-a', 'adversary-A']),
+    ['Auditor', 'adversary-A']);
+  assert.deepEqual(unresolvedLanes(['pragmatist']), [],
+    'the Pragmatist is a lane; that it cannot HOLD a pass is a different rule');
+  assert.deepEqual(unresolvedLanes([]), []);
+  assert.deepEqual(unresolvedLanes('auditor'), [], 'a non-array excludes nothing, as before');
 });
 
 test('the Pragmatist never runs the pass, not even when nothing else is left', () => {
