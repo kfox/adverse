@@ -43,7 +43,7 @@ test('validates a round1 payload the persona name is read from the filename', ()
   }
 });
 
-// --- the filename is the identity ------------------------------------------
+// --- a payload is bound to its filename -------------------------------------
 // The persona is the lane and the full basename is the AGENT — the half that
 // wrote the file. Both are read here because this is the only component that
 // holds the filename and the payload at once. It used to hold only the first:
@@ -418,7 +418,7 @@ test('a pass number does not become a lane half, and a half is still a half', ()
 
 test('the pass-number strip is scoped to the regression phase', () => {
   // Loosening the round1/round2 derivation is how the half-binding critical
-  // would come back: there the basename is the agent's only unforgeable id, so
+  // would come back: there the basename is the only thing holding a payload to
   // `round1-auditor-1.json` still implies a persona named `auditor-1`.
   const dir = freshTmp();
   try {

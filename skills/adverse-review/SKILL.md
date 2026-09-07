@@ -323,12 +323,21 @@ holds only for an agent that writes the one path it was given, and every
 reviewer has a Write tool and a shared `$ADVERSE_RUN`. One author writing three
 files still renders `confidence: consensus`.
 
-Nothing in this Skill can close that, and Phase 0 does not: the run directory is
-shared **on purpose**, because the bridges glob it. Closing it needs a harness
-that can give each subagent a write sandbox of its own — then the filename is an
-identity again, and this check is the thing that enforces it. Until then, treat
-these guards as what they are: they stop a payload contradicting its own path,
-and they do not authenticate its author. `combine.mjs --plan`
+What is missing to close it is **enforcement, not layout.** The bridges do not
+require one shared directory — they take the paths you hand them, so
+`combine.mjs --round1 "$ADVERSE_RUN"/*/round1-*.json` works with each agent
+writing into `$ADVERSE_RUN/<agent>/` of its own, and `validate.mjs` still binds
+each payload to its basename. Only the flat globs written in Phase 2 and Phase 5
+assume siblings.
+
+So give each agent its own subdirectory when the harness can make that
+subdirectory the only place it may write, and widen those globs by one segment.
+Absent that enforcement the layout buys nothing — an agent free to write
+anywhere can write into a sibling's directory as easily as into a sibling's
+filename — which is why this is a harness capability and not a Phase 0 step you
+can simply adopt. Until you have it, treat these guards as what they are: they
+stop a payload contradicting its own path, and they do not authenticate its
+author. `combine.mjs --plan`
 refuses a lane whose two halves claim one id or an id the plan never spawned.
 A half declaring its sibling's id would rule on its own finding as if it were
 the other half's — two characters, and consensus is counterfeit.

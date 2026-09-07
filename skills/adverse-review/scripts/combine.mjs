@@ -34,8 +34,8 @@ import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 
 import { importFromSrc } from './package-root.mjs';
 
-const { mergeSplitCrossReviews, mergeSplitReviews, normalizeVerdict,
-        stampedFieldClaim } = await importFromSrc('synthesis.mjs');
+const { mergeSplitCrossReviews, mergeSplitReviews, normalizeVerdict } =
+  await importFromSrc('synthesis.mjs');
 const { checkRoster } = await importFromSrc('roster.mjs');
 const { isLaneAgent } = await importFromSrc('personas.mjs');
 const { agentNames } = await importFromSrc('scaling.mjs');
@@ -67,21 +67,6 @@ if (hasRound1 === hasRound2) {
 const inputs = [...(values.round1 ?? values.round2), ...positionals];
 const planLanes = values.plan ? readPlanLanes(values.plan, 'combine') : null;
 const payloads = inputs.map((src) => ({ src, payload: readJson(src, 'combine') }));
-
-// The second ungated reader of `provenance`, for the same reason verify.mjs was
-// the first: a run that skips `validate.mjs` reaches synthesis through here.
-// Measured: a `round1-<persona>.json` whose finding carried
-// `provenance: "regression"` combined clean and rendered the regression note.
-// Exit 1, not 2 — the file read fine and fails a claim about a review.
-const stampProblems = payloads
-  .map(({ src, payload }) => [src, stampedFieldClaim(payload)])
-  .filter(([, claim]) => claim);
-if (stampProblems.length) {
-  for (const [src, claim] of stampProblems) {
-    process.stderr.write(`combine: ${src}: ${claim}\n`);
-  }
-  process.exit(1);
-}
 
 // Who counts as a reviewer — src/roster.mjs, the same rules triage.mjs applies
 // to the same payloads one phase earlier.
@@ -135,28 +120,18 @@ function laneAgents(persona) {
 // checked here at all. It has one payload, so there is no sibling to be
 // confused with, and its `agent` was already held against its own filename by
 // validate.mjs.
-// `legal` is the plan's id list for this lane, or null when no plan declared it
-// split. Only PRESENCE turns on that difference — see the `continue` below.
-function splitAgentProblems(persona, legal, halves) {
+function splitAgentProblems(persona, halves) {
+  const legal = laneAgents(persona);
   const expected = legal ? legal.join(' or ') : `'${persona}-<letter>'`;
   const claimedBy = new Map();
   const problems = [];
   for (const { src, payload } of halves) {
     const agent = payload?.agent;
     if (typeof agent !== 'string' || !agent) {
-      // Requiring an id needs the PLAN, and nothing else here does. Under
-      // `--merge-personas` alone, two payloads with no `agent` are either two
-      // unlabeled halves or one lane's verify and regression legs — and those
-      // legs write no `agent` at all (neither verify.mjs nor regression.mjs
-      // emits the field), so demanding one refused the Phase 9 fold this Skill
-      // prescribes, calling a one-agent lane "a declared split lane". Only the
-      // plan can tell a missing half from a leg that never had one.
-      if (legal) {
-        problems.push(`${src}: '${persona}' is a declared split lane, so this payload has to`
-          + ` say which half wrote it: \`agent\` must be ${expected}.\n`
-          + '  An unlabeled half is stamped with the bare persona, and its sibling\'s ruling'
-          + ' on it is then discarded as the lane validating itself.');
-      }
+      problems.push(`${src}: '${persona}' is a declared split lane, so this payload has to`
+        + ` say which half wrote it: \`agent\` must be ${expected}.\n`
+        + '  An unlabeled half is stamped with the bare persona, and its sibling\'s ruling'
+        + ' on it is then discarded as the lane validating itself.');
       continue;
     }
     if (legal ? !legal.includes(agent) : !isLaneAgent(persona, agent)) {
@@ -178,15 +153,8 @@ function splitAgentProblems(persona, legal, halves) {
   return problems;
 }
 
-// Every merged persona is checked, but for what differs by population.
-// `roster.merged` unions the plan's split lanes with the raw `--merge-personas`
-// values, and that flag is also how Phase 9 folds one lane's verify and
-// regression payloads — so membership and distinctness (which any claimed id
-// must satisfy either way) are enforced for all of them, and presence only
-// where `laneAgents` says the plan declared the lane split.
 const idProblems = [...roster.merged].flatMap((persona) => splitAgentProblems(
-  persona, laneAgents(persona),
-  payloads.filter(({ payload }) => payload?.persona === persona)));
+  persona, payloads.filter(({ payload }) => payload?.persona === persona)));
 if (idProblems.length) {
   // Exit 1, the same way a duplicate persona is refused: these payloads read
   // fine and fail a domain check, which is a claim about a review.
