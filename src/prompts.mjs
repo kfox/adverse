@@ -64,7 +64,7 @@ instruction exists to avoid.
 \`\`\`
 {
   "persona":   "<your persona name, lowercase>",
-  "agent":     "<your agent id, only if your lane was split; else omit>",
+  "agent":     "<the id in your output filename, if it names one; else omit>",
   "verdict":   "approve" | "conditional" | "reject",
   "summary":   "<one sentence, <= 200 chars>",
   "findings": [
@@ -80,9 +80,16 @@ large diff partitioned by file, where you were told you are \`auditor-a\` or
 two halves reporting one problem cannot inflate it into agreement between two
 reviewers; the agent id is what lets round 2 tell your findings from your
 sibling's, so that its judgment on yours can count as the independent review it
-is. Omit the key entirely if nobody told you your lane was split. It must be
-your own persona name or that name with a suffix — an id naming a lane you are
-not is a reviewer who does not exist.
+is.
+
+**Read the id off the path you were told to write to.** If that filename ends
+in \`-<letter>.json\` — \`round1-auditor-a.json\` — then \`agent\` is exactly
+\`auditor-a\`. If it does not, omit the key. Those are the only two
+right answers: the validator derives the expected id from the filename and
+refuses a payload that disagrees with it, because the filename is the one part
+of your identity you did not write. A half that omits the id cannot be told from
+the whole lane, and an id naming a lane you are not is a reviewer who does not
+exist.
 
 \`verdict\` rubric:
 - \`approve\` — nothing in your lane warrants blocking the change.
@@ -285,9 +292,13 @@ spends the second agent's whole round and produces nothing.
 Your OWN entries are not up for re-litigation, same as any unsplit lane: they
 go forward as they are.
 
-Put your agent id in \`agent\`. Without it the synthesizer cannot tell you from
-your sibling, and it will fall back to discarding every ruling you made on your
-own lane — including the ones on the half you did not write.
+Put your agent id in \`agent\`, read off the path you were told to write to —
+\`round2-auditor-a.json\` means \`auditor-a\`, and a filename naming no half
+means omit the key. Without it the synthesizer cannot tell you from your
+sibling, and it will fall back to discarding every ruling you made on your own
+lane — including the ones on the half you did not write. The validator checks
+the id against the filename and refuses a mismatch, so guessing costs you a
+retry.
 
 ## Your decisions
 
@@ -314,7 +325,7 @@ payload that can be truncated or misremembered.
 \`\`\`
 {
   "persona": "<your persona name, lowercase>",
-  "agent":   "<your agent id, only if your lane was split; else omit>",
+  "agent":   "<the id in your output filename, if it names one; else omit>",
   "validate": [
     { "id": "F3", "from": "<reporter persona>", "title": "<verbatim from briefing>", "reason": "<why you agree, 1-3 sentences>" }
   ],

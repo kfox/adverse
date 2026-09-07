@@ -19,7 +19,7 @@ instruction exists to avoid.
 ```
 {
   "persona":   "<your persona name, lowercase>",
-  "agent":     "<your agent id, only if your lane was split; else omit>",
+  "agent":     "<the id in your output filename, if it names one; else omit>",
   "verdict":   "approve" | "conditional" | "reject",
   "summary":   "<one sentence, <= 200 chars>",
   "findings": [
@@ -44,9 +44,16 @@ large diff partitioned by file, where you were told you are `auditor-a` or
 two halves reporting one problem cannot inflate it into agreement between two
 reviewers; the agent id is what lets round 2 tell your findings from your
 sibling's, so that its judgment on yours can count as the independent review it
-is. Omit the key entirely if nobody told you your lane was split. It must be
-your own persona name or that name with a suffix — an id naming a lane you are
-not is a reviewer who does not exist.
+is.
+
+**Read the id off the path you were told to write to.** If that filename ends
+in `-<letter>.json` — `round1-auditor-a.json` — then `agent` is exactly
+`auditor-a`. If it does not, omit the key. Those are the only two
+right answers: the validator derives the expected id from the filename and
+refuses a payload that disagrees with it, because the filename is the one part
+of your identity you did not write. A half that omits the id cannot be told from
+the whole lane, and an id naming a lane you are not is a reviewer who does not
+exist.
 
 `verdict` rubric:
 - `approve` — nothing in your lane warrants blocking the change.
