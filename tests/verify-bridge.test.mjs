@@ -312,15 +312,19 @@ test('a still-open verification with an empty title still reaches findings', () 
   }
 });
 
-// --- a round-2 addition can only ever bind by title ------------------------
-// `briefing.json` IS the round-2 prompt, built from round 1, and `report.json`
-// carries no ids at all — so a finding a round-2 reviewer ADDED has no briefing
-// id and never will. Binding by id alone left every verification of one at the
-// blocking `warning`/`behavioral` fallback, which for a `design` finding
-// contradicts the rule that design never blocks, and which SKILL.md wrongly
-// described as "recoverable by passing the flag".
+// --- a stale or invented id still binds by title ---------------------------
+// `briefing.mjs` re-mints ids positionally on every triage run, so an id a
+// reviewer copied from an earlier iteration names nothing in this briefing.
+// Binding by id alone left every such verification at the blocking
+// `warning`/`behavioral` fallback, which for a `design` finding contradicts the
+// rule that design never blocks. The fixture below is the honest shape of that
+// class: the finding IS briefed, under an id the payload does not use.
+//
+// A round-2 ADDITION is NOT this class and this route does not reach it: it is
+// in `briefing.json` under no key, so it keeps the blocking fallback. That gap
+// is deliberate for now — noisy beats silent — and tracked separately.
 
-test('a reopened design finding binds by title when its id is not in the briefing', () => {
+test('a briefed finding cited by an id the briefing does not carry binds by title', () => {
   const dir = freshTmp();
   try {
     const briefing = briefingWith(dir, {
@@ -330,7 +334,8 @@ test('a reopened design finding binds by title when its id is not in the briefin
     const src = path.join(dir, 'verify-pragmatist.json');
     writeFileSync(src, JSON.stringify({
       persona: 'pragmatist',
-      // The id names nothing: this finding was added in round 2.
+      // The id names nothing in THIS briefing — a stale id from an earlier
+      // iteration, whose positional ids do not survive a re-triage.
       verified: [{ id: 'R2-3', title: 'the module is two modules in one file',
         status: 'open', reason: 'the seam is unchanged' }],
       added: [],

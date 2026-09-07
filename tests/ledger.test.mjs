@@ -1069,8 +1069,9 @@ test('a root-cause fix from an EARLIER report still says the fix left a symptom 
 // disposition that was not `fixed` made whatever claim the rung it landed on
 // made. Narrowing the first symptom (a footnote announced as a failed fix) left
 // the shape in place one rung down: `noted` claimed identity at any match
-// strength, and an entry whose disposition is missing or unrecognized — which
-// `validateLedger` tolerates by design — claimed to be a fix agent's footnote.
+// strength, and an entry whose disposition is missing — which `checkBinding`
+// tolerates by design, testing `!== undefined` before membership — claimed to
+// be a fix agent's footnote.
 
 test('a weak noted match hedges instead of claiming it is this finding', () => {
   // A `named_not_fixed` item may legitimately carry `line: null` (its schema
@@ -1096,11 +1097,15 @@ test('a strong noted match still names the finding outright', () => {
 });
 
 test('an entry with an unrecognized disposition claims no provenance', () => {
-  // `validateLedger` tests `!== undefined` before it tests membership, so an
-  // entry like this reaches `annotate`. It used to be announced as "a fix agent
-  // named it outside its own scope" — provenance invented for an entry whose
-  // provenance is exactly what is unknown. This is also the rung a fifth
-  // disposition lands on before it is given one of its own.
+  // `checkBinding` tests `!== undefined` before it tests membership, so the
+  // MISSING case reaches `annotate` in the real flow. An unrecognized value is
+  // refused there instead, and both bridges reject the ledger on any problem,
+  // so `'bogus'` reaches this rung only because the test calls `annotate`
+  // directly — kept because this rung is the defense-in-depth answer for it,
+  // and the rung a fifth disposition lands on before it is given its own.
+  // Either way it used to be announced as "a fix agent named it outside its
+  // own scope" — provenance invented for an entry whose provenance is exactly
+  // what is unknown.
   for (const disposition of ['bogus', undefined]) {
     const [f] = annotate([finding()], ledgerWith(entry({ disposition })));
     assert.equal(f.adjudicated.settled, false, `disposition ${disposition}`);

@@ -967,9 +967,12 @@ this pass honest instead of alarmist:
   it: a changelog, a docstring, an architecture note, a config default, a
   README. This is the category the loop has no other channel for at all. It is
   usually a \`contract\` finding, so name the file that disagrees in
-  \`counterpart\` — an entry naming no Y matches only a finding that names none
-  either, and triage requires one on every \`contract\` finding, so the next
-  pass re-raises the one you just decided.
+  \`counterpart\` — the ledger matches on it, and an entry naming no Y matches
+  only a finding that names none either. Triage annotates a counterpart-less
+  \`contract\` finding as under-anchored rather than rejecting it, so whether
+  the next pass's finding names a Y is up to the reviewer who writes it: record
+  yours and the match is decided on identity, omit it and you are betting the
+  next reviewer omits it too.
 - \`unintended\` — the diff changed something it was not written to change.
   This is what the pass is for.
 

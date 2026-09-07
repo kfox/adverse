@@ -504,12 +504,17 @@ function matchNote(m, { settled, tooWeak, sameReport }) {
         + 'different one in the same file. Nothing is settled either way; the '
         + 'reasoning below is shown only as context, and may not be about this.';
   }
-  // Neither settled, nor noted, nor fixed. `validateLedger` tolerates an entry
-  // whose disposition is missing or unrecognized (it tests `!== undefined`
-  // first), and every such entry used to fall through to the NOTED rung and be
-  // announced as "a fix agent named it outside its own scope" — provenance
-  // invented for an entry whose provenance is precisely what is unknown. This
-  // is the rung a fifth disposition lands on until it is given one of its own.
+  // Neither settled, nor noted, nor fixed. `checkBinding` tolerates an entry
+  // whose disposition is MISSING — it tests `!== undefined` before membership —
+  // while an entry carrying an unrecognized value is refused there, and both
+  // callers reject the whole ledger on any problem (triage.mjs, converge.mjs),
+  // so that one never reaches `annotate` through the real flow. The missing
+  // case does, and it used to fall through to the NOTED rung and be announced
+  // as "a fix agent named it outside its own scope" — provenance invented for
+  // an entry whose provenance is precisely what is unknown. This rung is also
+  // where a fifth disposition lands until it is given one of its own, and the
+  // defense-in-depth answer for any future caller that skips the binding
+  // check.
   if (m.entry.disposition !== 'fixed') {
     return 'An earlier entry matches this finding, but it records no disposition '
       + 'this tool recognizes, so nothing can be inferred about what was decided '

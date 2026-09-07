@@ -147,8 +147,15 @@ function bindToBriefing(v, src) {
   let entry = briefed.get(v.id);
   if (!entry) {
     // The id named nothing. Fall back to the title, which is the join key every
-    // downstream edge already rides on — see the index above for why this is
-    // the only route a round-2 addition has.
+    // downstream edge already rides on. The class this reaches is a BRIEFED
+    // finding cited by a stale or invented id: `briefing.mjs` re-mints ids
+    // positionally on every triage run, so an id copied from an earlier
+    // iteration's briefing names nothing here, or worse, names a different
+    // finding. A round-2 ADDITION is a different case and this route does not
+    // reach it — it is in `briefing.json` under no key at all, because triage's
+    // only finding input is `--round1` — so its verification lands on
+    // REOPENED_FALLBACK with a null anchor. Noisy rather than silent, which is
+    // the safe direction, and a known gap rather than a covered case.
     const byTitle = briefedByTitle.get(normalizeTitle(v.title));
     if (byTitle) return byTitle;
     process.stderr.write(`  ! verify: ${src}: unresolvable id ${JSON.stringify(v.id)}`

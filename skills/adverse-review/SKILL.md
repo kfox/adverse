@@ -1216,12 +1216,20 @@ with. Without it each one falls back to a blocking `warning`/`behavioral`:
 noisy rather than silent, and recoverable by passing the flag.
 
 The bridge binds by id and then by title, and the second route is not a
-convenience. `briefing.json` is the round-2 *prompt*, built from round 1, and
-`report.json` carries no ids at all — so a finding a round-2 reviewer **added**
-has no briefing id and never will. Binding by id alone put every verification
-of one at the blocking fallback, which for a `design` finding contradicts the
-rule that design never blocks and made the loop unable to converge on advisory
-work. A title that matches two briefed findings binds to neither: it cannot say
+convenience. `briefing.mjs` re-mints finding ids **positionally on every triage
+run**, so an id a reviewer copied out of an earlier iteration's briefing names
+nothing here — or, worse, names a different finding. Binding by id alone put
+every such verification at the blocking fallback, which for a `design` finding
+contradicts the rule that design never blocks and made the loop unable to
+converge on advisory work.
+
+One case neither route reaches: a finding a round-2 reviewer **added**. It is
+in `briefing.json` under no key at all — triage's only finding input is
+`--round1` — so its verification keeps the blocking `warning`/`behavioral`
+fallback with a null anchor. That is noisy rather than silent, which is the
+direction to fail in, but it is a gap and not a covered case: an advisory
+round-2 addition verified `open` will hold the loop open until someone records
+a decision on it. A title that matches two briefed findings binds to neither: it cannot say
 which is meant, and guessing is how a severity gets copied off the wrong
 finding, so that case falls back to blocking and says so.
 
