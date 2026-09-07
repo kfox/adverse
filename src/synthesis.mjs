@@ -752,6 +752,72 @@ function consensusLabel(score, verdicts) {
 }
 
 // ---------- Markdown renderer -----------------------------------------------
+//
+// Every string below arrives in agent-written JSON, and this renderer draws one
+// line through them rather than escaping whatever the last incident named:
+//
+//   NAMES A THING -> verbatim. A persona, an agent, a verdict, a finding or
+//   group id, a `file`, a `line`, a `counterpart`, a ruling, and the one-line
+//   `summary` the tool signs. None of these has any legitimate markup in it,
+//   and the summary is the position where the tool wraps its OWN sentence
+//   around payload data, so a construct that renders differently than it was
+//   recorded is a lie about the run. `verbatim` below is the whole rule.
+//
+//   IS PROSE -> rendered as Markdown, on purpose. A finding's `title` and
+//   `detail`, a `fix`, a validation, challenge or ruling `reason`, a skip
+//   reason, and `round2Skipped`. The prompts ask for sentences in these fields
+//   and reviewers legitimately write code spans, lists and emphasis inside
+//   them; code-spanning a six-sentence `detail` would cost the report its
+//   readability to buy nothing an operator cares about. They are TRUSTED, not
+//   overlooked: a reviewer who writes `~~` into a title gets strikethrough,
+//   which is a formatting choice inside a block that is already labeled as
+//   that reviewer's words. It is not a claim the tool is making.
+//
+// The HTML renderer (src/html.mjs) makes no such distinction — `esc` runs on
+// everything, prose included — because there the alternative is live markup in
+// a browser rather than emphasis in a text file.
+
+// A payload-supplied value rendered so GFM interprets none of it.
+//
+// Neutralization here is a CODE SPAN rather than a list of escaped characters,
+// because the list does not close. The verdict cell escaped `|`, collapsed
+// newlines, and did nothing else, so a regression payload whose `commit` was
+// `abc~~-not-really~~` reached the report through the bridge's own
+// `regression pass on ${commits}` sentence and rendered as `abc-not-really`
+// struck through: the commit an operator READS differs from the commit the
+// tool RECORDED, inside the sentence the tool signs as its own conclusion.
+// `www.host/p` in the same position rendered as a live attacker-chosen link.
+// Those are two members of a set that also holds `_`, `*`, backticks,
+// `[label](url)`, `<img …>`, `#`, and whatever GFM's next extension adds; a
+// validator that enumerates them is a fix for the two we thought of. Inside a
+// code span GFM parses none of it — the autolink extension included — so the
+// construct nobody has thought of yet is covered too.
+//
+// The fence is CommonMark's rule rather than one fixed backtick: a run one
+// longer than the longest run in the text, padded with a space when the text
+// starts or ends with a backtick (a reader strips exactly one). The locators
+// below WERE wrapped in a bare single backtick, which is a code span a `file`
+// of ``a`b`` walks straight out of.
+//
+// Newlines collapse rather than escape, because there is no spelling of a line
+// break that survives a table row, and a value spanning lines in any other
+// position is prose this function's callers have already decided it is not.
+function verbatim(text) {
+  const flat = String(text ?? '').replace(/\s*[\r\n]+\s*/g, ' ');
+  if (flat === '') return '';
+  const longest = (flat.match(/`+/g) ?? []).reduce((n, run) => Math.max(n, run.length), 0);
+  const fence = '`'.repeat(longest + 1);
+  const pad = flat.startsWith('`') || flat.endsWith('`') ? ' ' : '';
+  return `${fence}${pad}${flat}${pad}${fence}`;
+}
+
+// The same, for a cell of the one Markdown table this file emits. A `|` splits
+// a GFM row before any inline parser runs, code span or not, so it still needs
+// the backslash — which the table reader consumes, leaving the literal
+// character inside the span.
+function verbatimCell(text) {
+  return verbatim(String(text ?? '').replaceAll('|', '\\|'));
+}
 
 // Null prototype, like every other lookup keyed by something a payload can
 // name. A root-cause group carries a reviewer-supplied `severity` through
@@ -804,11 +870,11 @@ function renderRootCauses(rootCauses) {
   lines.push('');
   for (const rc of rootCauses) {
     const marker = SEVERITY_MARKER[rc.severity] ?? '·';
-    lines.push(`### ${marker} **[${rc.id}]** ${rc.title}`);
+    lines.push(`### ${marker} **[${verbatim(rc.id)}]** ${rc.title}`);
     lines.push('');
     lines.push(`_${ROOT_CAUSE_STATUS[rc.status] ?? rc.status} · ${rc.citations.length} citations `
       + `from ${rc.reporters.length} reviewer${rc.reporters.length === 1 ? '' : 's'} `
-      + `(${rc.reporters.join(', ')}) · ${rc.blocking ? 'blocking' : 'advisory only'}_`);
+      + `(${rc.reporters.map(verbatim).join(', ')}) · ${rc.blocking ? 'blocking' : 'advisory only'}_`);
     // Why a group that every ruling called `one` is still only `proposed`.
     // Without this the label reads as "round 2 did not rule" directly above a
     // ruling that plainly did, and the quorum looks like a bug.
@@ -823,19 +889,25 @@ function renderRootCauses(rootCauses) {
         // `selfRuled` can legitimately name two halves of one lane, and the
         // singular subject then read as two reviewers agreeing.
         + (c.selfRuled.length
-          ? ` ${c.selfRuled.join(', ')} ruled on a group nobody else reported,`
+          ? ` ${c.selfRuled.map(verbatim).join(', ')} ruled on a group nobody else reported,`
             + ' which is not a voice.'
           : ''));
     }
     lines.push('');
     for (const c of rc.citations) {
-      const loc = c.file ? ` — \`${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}\`` : '';
+      const loc = c.file
+        ? ` — ${verbatim(`${c.file}${c.line !== null && c.line !== undefined ? `:${c.line}` : ''}`)}`
+        : '';
       // `counterpart` is half a contract citation's identity — the claim is "X
       // contradicts Y" — and it is carried on the record specifically so a
       // group decision copied out of here can still match next iteration.
       // Both renderers dropped it.
-      const against = c.counterpart ? ` — contradicts \`${c.counterpart}\`` : '';
-      lines.push(`- **${c.id}** (${c.reporter}, ${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}) `
+      const against = c.counterpart ? ` — contradicts ${verbatim(c.counterpart)}` : '';
+      // One span for the whole identity triple: all three arrive on a group
+      // citation out of briefing.json, where nothing has gated them against
+      // the taxonomy the way `buildFinding` gates a finding's own pair.
+      const who = verbatim(`${c.reporter}, ${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}`);
+      lines.push(`- **${verbatim(c.id)}** (${who}) `
         + `${c.title}${loc}${against}`
 
         + (c.resolved ? '' : ' — _not in the report; this citation named a finding synthesis did not build_'));
@@ -846,7 +918,8 @@ function renderRootCauses(rootCauses) {
     }
     for (const r of rc.rulings) {
       lines.push('');
-      lines.push(`> ${r.ruling === 'one' ? '🔗' : '✂️'} **${rulingVoice(r)} rules \`${r.ruling}\`:** ${r.reason}`);
+      lines.push(`> ${r.ruling === 'one' ? '🔗' : '✂️'} **${verbatim(rulingVoice(r))} rules `
+        + `${verbatim(r.ruling)}:** ${r.reason}`);
     }
     lines.push('');
   }
@@ -909,29 +982,39 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   lines.push('| Reviewer | Verdict | Summary |');
   lines.push('|---|---|---|');
   for (const [p, v] of Object.entries(syn.verdicts)) {
-    // Newlines collapsed as well as `|` escaped. A summary is off-disk prose
-    // and a table cell cannot hold a line break: the row ends at the first
-    // newline and whatever follows is rendered as document body. A regression
+    // Every cell of this row is verbatim, and the summary is why. A summary
+    // is off-disk prose and a table cell cannot hold prose: the row ends at
+    // the first newline and whatever follows renders as document body, and
+    // every inline construct in between renders as markup. A regression
     // payload whose `commit` was `deadbeef |\n\n## Panel ruling: all criticals
     // were withdrawn` reached this cell through the bridge's own
     // `regression pass on ${commits}` sentence and printed that heading in the
-    // operator's report. `validateRegression` now refuses that commit, and
-    // this is the layer that does not depend on which validator wrote the
-    // summary — every phase's `summary` is free text no schema constrains.
-    const summary = (syn.summaries[p] ?? '').replace(/\s*[\r\n]+\s*/g, ' ')
-      .replaceAll('|', '\\|');
-    lines.push(`| ${p} | ${v} | ${summary} |`);
+    // operator's report; one whose `commit` was `abc~~-not-really~~` printed a
+    // different commit than it recorded. `validateRegression` refuses both of
+    // those commits now, and this is the layer that does not depend on which
+    // validator wrote the summary — every phase's `summary` is free text no
+    // schema constrains, and none can, because it is the one field the prompts
+    // ask for in sentences.
+    //
+    // `p` for the same reason: `synthesize` keys its verdicts off whatever
+    // `JSON.parse` handed it (see the `__proto__` persona test), so a reviewer
+    // name is exactly as unchecked as the summary beside it. `v` is NOT — it
+    // came through `normalizeVerdict` and is one of three literals — and it is
+    // spanned anyway so the row has one rule instead of a rule and an
+    // exception, which is the shape a later editor gets wrong.
+    lines.push(`| ${verbatimCell(p)} | ${verbatimCell(v)} | ${verbatimCell(syn.summaries[p])} |`);
   }
   if (syn.degraded.length) {
     lines.push('');
     lines.push(
-      `> **Degraded run:** the following reviewers failed and were excluded: ${syn.degraded.join(', ')}.`,
+      '> **Degraded run:** the following reviewers failed and were excluded: '
+      + `${syn.degraded.map(verbatim).join(', ')}.`,
     );
   }
   if ((syn.skipped ?? []).length) {
     lines.push('');
     lines.push(
-      `> **Lane not run:** ${syn.skipped.map((s) => `${s.persona ?? s}${s.reason ? ` — ${s.reason}` : ''}`).join('; ')}. `
+      `> **Lane not run:** ${syn.skipped.map((s) => `${verbatim(s.persona ?? s)}${s.reason ? ` — ${s.reason}` : ''}`).join('; ')}. `
       + 'Nothing below reflects that perspective.',
     );
   }
@@ -994,18 +1077,14 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
 function renderFinding(f) {
   const marker = SEVERITY_MARKER[f.severity] ?? '·';
   let loc = '';
-  if (f.file) {
-    loc = ` — \`${f.file}`;
-    if (f.line !== null) loc += `:${f.line}`;
-    loc += '`';
-  }
+  if (f.file) loc = ` — ${verbatim(`${f.file}${f.line !== null ? `:${f.line}` : ''}`)}`;
   const out = [`### ${marker} **[${f.severity.toUpperCase()}·${f.kind}]** ${f.title}${loc}`];
   out.push('');
-  out.push(`_Reported by: ${f.reporters.join(', ')} · confidence: ${f.confidence}${
+  out.push(`_Reported by: ${f.reporters.map(verbatim).join(', ')} · confidence: ${f.confidence}${
     f.provenance === PROVENANCE.regression ? ` · ${REGRESSION_NOTE}` : ''}_`);
   if (f.counterpart) {
     out.push('');
-    out.push(`_Contradicts:_ \`${f.counterpart}\``);
+    out.push(`_Contradicts:_ ${verbatim(f.counterpart)}`);
   }
   out.push('');
   out.push(f.detail);
@@ -1016,13 +1095,13 @@ function renderFinding(f) {
   if (f.validators.length) {
     out.push('');
     for (const { persona, reason } of f.validators) {
-      out.push(`> ✅ **${persona} validates:** ${reason}`);
+      out.push(`> ✅ **${verbatim(persona)} validates:** ${reason}`);
     }
   }
   if (f.challengers.length) {
     out.push('');
     for (const { persona, reason } of f.challengers) {
-      out.push(`> ⚠️ **${persona} challenges:** ${reason}`);
+      out.push(`> ⚠️ **${verbatim(persona)} challenges:** ${reason}`);
     }
   }
   return out;

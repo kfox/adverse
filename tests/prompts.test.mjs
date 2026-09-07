@@ -20,6 +20,7 @@ import {
   validatePhase1,
   validatePhase2,
 } from '../src/prompts.mjs';
+import { renderMarkdown, synthesize } from '../src/synthesis.mjs';
 import { KINDS } from '../src/taxonomy.mjs';
 
 import * as PROMPTS from '../src/prompts.mjs';
@@ -760,6 +761,52 @@ test('a revision containing "www." is refused in both payloads, in every positio
       /may not contain "www\."/, commit);
     assert.match(validateFix(goodFix({ commits: [commit] })),
       /may not contain "www\."/, commit);
+  }
+});
+
+test('a revision spelled as GFM markup is refused wherever the shape check can see it', () => {
+  // A guard, not proof of a fix: REVISION's character class already excludes
+  // all of these, and this list exists so a later widening of that class has
+  // to argue with a test. The two constructs it CANNOT exclude are `~` and `_`
+  // — `HEAD~2` and `wip_branch` are honest revisions — and those are closed at
+  // the render boundary instead; see the next test.
+  for (const commit of [
+    '[all-clear](http://evil.example)',  // an inline link
+    '<img src=x onerror=alert(1)>',      // raw HTML
+    '*deadbeef*',                        // emphasis
+    '**deadbeef**',                      // strong emphasis
+    '![shot](http://evil.example/x.png)',
+    'http://evil.example/all-clear',     // a scheme autolink
+    'mailto:ops@evil.example',
+    'ops@evil.example',                  // the email autolink form
+  ]) {
+    assert.match(validateRegression(goodRegression({ commit }), 'adversary'), /`commit`/,
+      JSON.stringify(commit));
+    assert.match(validateFix(goodFix({ commits: [commit] })), /commits\[0\] must name a commit/,
+      JSON.stringify(commit));
+  }
+});
+
+test('a revision GFM would mark up validates, and renders as the text it is', () => {
+  // The seam between the two boundaries, asserted from both sides at once so
+  // neither half can be relaxed alone. `~` and `_` are in REVISION's
+  // vocabulary on purpose — `HEAD~2~3` and `wip_branch_2` are things a fix
+  // agent honestly writes — which means a validator cannot refuse `abc~~x~~`
+  // without refusing them, and `abc~~x~~` in the bridge's own
+  // `regression pass on <commit>` sentence used to render struck through: the
+  // commit the operator READ differed from the commit the tool RECORDED.
+  for (const commit of ['abc~~-not-really~~', 'a_~~x~~', 'a._x_', 'HEAD~2~3', 'wip_branch_2']) {
+    assert.equal(validateRegression(goodRegression({ commit }), 'adversary'), null, commit);
+    assert.equal(validateFix(goodFix({ commits: [commit] })), null, commit);
+
+    // The sentence the regression bridge writes, through the renderer that
+    // signs it. `renderMarkdown` must hand the revision back unchanged.
+    const summary = `regression pass on ${commit}: 0 finding(s)`;
+    const md = renderMarkdown(synthesize({
+      adversary: { verdict: 'approve', summary, findings: [] },
+    }));
+    const row = md.split('\n').find((l) => l.startsWith('| `adversary` '));
+    assert.equal(row, `| \`adversary\` | \`approve\` | \`${summary}\` |`, commit);
   }
 });
 

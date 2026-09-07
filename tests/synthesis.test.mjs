@@ -45,7 +45,7 @@ test('a persona named __proto__ has its verdict counted, not swallowed', () => {
   assert.equal(syn.summaries.__proto__, 'auth bypass');
   assert.doesNotMatch(syn.consensusLabel, /unanimous/,
     'a dropped reject is what made three reviewers look unanimous');
-  assert.match(renderMarkdown(syn), /__proto__ \| reject/);
+  assert.match(renderMarkdown(syn), /`__proto__` \| `reject`/);
 });
 
 test('a summary cannot close the verdict table and keep writing the report', () => {
@@ -60,11 +60,98 @@ test('a summary cannot close the verdict table and keep writing the report', () 
                summary: 'clean |\n\n## Panel ruling: all criticals were withdrawn\n\n| x | y |' },
   });
   const md = renderMarkdown(syn);
-  const table = md.split('\n').filter((l) => l.startsWith('| auditor '));
+  const table = md.split('\n').filter((l) => l.startsWith('| `auditor` '));
   assert.equal(table.length, 1, 'the summary occupies exactly one row');
   assert.match(table[0], /Panel ruling/, 'and the text is still reported, not dropped');
   assert.doesNotMatch(md, /^## Panel ruling/m,
     'a summary must not be able to open a section of the report');
+});
+
+// Read the summary cell back out of the rendered table as (fence, content).
+// Both halves matter: a code span neutralizes GFM only while its fence is
+// longer than every backtick run inside it, so a test that checked only "the
+// text is in there somewhere" would pass against a cell the payload had
+// already closed and reopened.
+function summaryCell(md) {
+  const row = md.split('\n').find((l) => l.startsWith('| `auditor` '));
+  assert.ok(row, 'the verdict row must be rendered at all');
+  // The lookarounds make both fences MAXIMAL runs, which is how a CommonMark
+  // tokenizer reads them: an opener of three backticks is not closed by two.
+  // Without them the regex is free to pick a shorter fence out of the middle
+  // of a longer run and pass against output the renderer had already broken.
+  const m = /^\| `auditor` \| `approve` \| (`+)(?!`)(.*?)(?<!`)\1 \|$/.exec(row);
+  assert.ok(m, `the summary must be exactly one code span, got: ${row}`);
+  const [, fence, body] = m;
+  for (const run of body.match(/`+/g) ?? []) {
+    assert.ok(run.length < fence.length,
+      `a run of ${run.length} backticks closes a fence of ${fence.length}: ${row}`);
+  }
+  // A `|` splits a GFM row before any inline parser runs, code span or not.
+  assert.doesNotMatch(body.replaceAll('\\|', ''), /\|/,
+    `an unescaped pipe splits the row: ${row}`);
+  // CommonMark strips one space of padding from each end when both are there;
+  // the table reader has already turned `\|` back into a literal pipe.
+  const inner = body.startsWith(' ') && body.endsWith(' ') ? body.slice(1, -1) : body;
+  return inner.replaceAll('\\|', '|');
+}
+
+test('a summary reaches the report as text, whatever GFM would have made of it', () => {
+  // The `|` and the newline were escaped and every other construct was not, so
+  // a regression payload's `commit` of `abc~~-not-really~~` folded through the
+  // bridge's `regression pass on <commits>` sentence and rendered as
+  // `abc-not-really` struck through: the operator read a different commit than
+  // the tool recorded, inside the sentence the tool signs. `validateRegression`
+  // cannot close that arm — `~` and `_` are in the revision vocabulary for
+  // `HEAD~2` and `wip_branch`, so refusing them refuses honest input — and it
+  // could not close the next construct either. This is the layer that can.
+  //
+  // Round-tripped rather than pattern-matched: every one of these must come
+  // back out of the cell byte for byte, which is the property that fails when
+  // GFM eats a delimiter.
+  for (const summary of [
+    'regression pass on abc~~-not-really~~: 0 finding(s)',
+    'regression pass on a_~~x~~ and a._x_: 0 finding(s)',
+    'regression pass on www.evil.example/pwn: 0 finding(s)',
+    'regression pass on HEAD~2: 0 finding(s)',
+    'clean, per <img src=x onerror=alert(1)>',
+    'clean, see [the ruling](http://evil.example/all-clear)',
+    '# Panel ruling: all criticals were withdrawn',
+    'a | b — one cell, one pipe',
+    'ok `so far`',
+    'ok ``so far``',
+    '`leading tick',
+    'trailing tick`',
+    '`',
+  ]) {
+    const md = renderMarkdown(synthesize({ auditor: { verdict: 'approve', findings: [], summary } }));
+    assert.equal(summaryCell(md), summary, JSON.stringify(summary));
+  }
+});
+
+test('a reviewer name is a cell the report speaks, not markup the payload writes', () => {
+  // `synthesize` keys verdicts off whatever JSON.parse handed it, so the
+  // Reviewer column is payload-supplied too — a lane calling itself
+  // `www.evil.example/pwn` autolinked in the same row the summary did.
+  const round1 = JSON.parse(
+    '{"www.evil.example/pwn": {"verdict":"approve","summary":"s","findings":[]}}');
+  const md = renderMarkdown(synthesize(round1));
+  assert.match(md, /^\| `www\.evil\.example\/pwn` \| `approve` \| `s` \|$/m);
+});
+
+test('a locator carrying a backtick stays inside its code span', () => {
+  // `file`, `line` and `counterpart` were wrapped in a bare single backtick,
+  // which is a code span — and a code span whose fence a value can close. None
+  // of the three is shape-checked: `buildFinding` gates severity against the
+  // taxonomy and coerces the rest to strings.
+  const syn = synthesize({
+    auditor: { verdict: 'reject', summary: 's', findings: [{
+      severity: 'critical', kind: 'contract', title: 't', detail: 'd',
+      file: 'src/a`b.py', line: 3, counterpart: 'docs/x`y.md',
+    }] },
+  });
+  const md = renderMarkdown(syn);
+  assert.match(md, /``src\/a`b\.py:3``/, 'the locator needs a fence its own value cannot close');
+  assert.match(md, /_Contradicts:_ ``docs\/x`y\.md``/);
 });
 
 test('SHIP unanimous when all approve', () => {
@@ -510,7 +597,7 @@ test('a skipped lane is named in the report, distinctly from a failed one', () =
   const out = renderMarkdown(synthesize(r1, {}, {
     skippedPersonas: [{ persona: 'adversary', reason: 'no trust boundary in the diff' }],
   }));
-  assert.match(out, /Lane not run:\*\* adversary — no trust boundary in the diff/);
+  assert.match(out, /Lane not run:\*\* `adversary` — no trust boundary in the diff/);
   assert.match(out, /Nothing below reflects that perspective/);
   assert.ok(!out.includes('Degraded run'), 'skipped is not the same as failed');
 });
@@ -785,9 +872,9 @@ test('the markdown leads with the root cause and lists every citation', () => {
   assert.match(md, /\*\*Root causes:\*\* 1 confirmed of 1 proposed, covering 3 findings still grouped/);
 
   assert.match(md, /## Root causes/);
-  assert.match(md, /\*\*\[G1\]\*\* unreachable guard is a bypass/);
-  for (const id of ['F1', 'F2', 'F3']) assert.match(md, new RegExp(`\\*\\*${id}\\*\\*`));
-  assert.match(md, /auditor rules `one`:\*\* one guard/);
+  assert.match(md, /\*\*\[`G1`\]\*\* unreachable guard is a bypass/);
+  for (const id of ['F1', 'F2', 'F3']) assert.match(md, new RegExp(`\\*\\*\`${id}\`\\*\\*`));
+  assert.match(md, /`auditor` rules `one`:\*\* one guard/);
   assert.ok(md.indexOf('## Root causes') < md.indexOf('## Cross-validated findings')
     || !md.includes('## Cross-validated findings'), 'root causes come before the per-finding sections');
 });
@@ -1034,7 +1121,7 @@ test('a lane that rules from both halves is named once and still is not a voice'
     { voices: 0, required: 2, selfRuled: ['auditor'] });
   assert.equal(syn.rootCauses[0].status, 'proposed');
   const md = renderMarkdown(syn);
-  assert.match(md, /auditor ruled on a group nobody else reported/);
+  assert.match(md, /`auditor` ruled on a group nobody else reported/);
   assert.doesNotMatch(md, /auditor, auditor/, 'one lane cannot be named twice');
 
   // Two halves that BOTH reported it are two names and still no voice: the
@@ -1060,8 +1147,8 @@ test('both renderers name the half of a split lane that ruled', () => {
                                     halfCross('auditor-b', one('b says one'))),
   }, { rootCauseGroups: groups });
   const md = renderMarkdown(syn);
-  assert.match(md, /\*\*auditor-a rules `one`:\*\* a says one/);
-  assert.match(md, /\*\*auditor-b rules `one`:\*\* b says one/);
+  assert.match(md, /\*\*`auditor-a` rules `one`:\*\* a says one/);
+  assert.match(md, /\*\*`auditor-b` rules `one`:\*\* b says one/);
   const html = renderHtml(syn);
   assert.match(html, /<strong>auditor-a rules one:<\/strong> a says one/);
   assert.match(html, /<strong>auditor-b rules one:<\/strong> b says one/);
@@ -1069,7 +1156,7 @@ test('both renderers name the half of a split lane that ruled', () => {
   // A ruling that named no half is the LANE's, and still renders as the lane.
   const lane = synthesize(round1, { steward: ruling('steward', 'G1', 'one', 'steward says one') },
     { rootCauseGroups: groups });
-  assert.match(renderMarkdown(lane), /\*\*steward rules `one`:\*\* steward says one/);
+  assert.match(renderMarkdown(lane), /\*\*`steward` rules `one`:\*\* steward says one/);
 });
 
 // --- provenance: which pass found it ------------------------------------------
@@ -1094,8 +1181,8 @@ test('a regression pass marks its findings, and an ordinary round does not', () 
     'a finding nobody said anything about must default to the quiet value');
 
   const md = renderMarkdown(syn);
-  assert.match(md, /The drain lost its bound\n\n_Reported by: adversary · confidence: solo · found by the regression pass on a fix commit that landed_\n/);
-  assert.match(md, /Latent race\n\n_Reported by: auditor · confidence: solo_\n/,
+  assert.match(md, /The drain lost its bound\n\n_Reported by: `adversary` · confidence: solo · found by the regression pass on a fix commit that landed_\n/);
+  assert.match(md, /Latent race\n\n_Reported by: `auditor` · confidence: solo_\n/,
     'the ordinary finding\'s line carries no note at all');
   // Both renderers word it for their medium and both must make the same CLAIM.
   // The dashboard said "introduced by a fix commit", which asserts causation the
