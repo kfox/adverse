@@ -942,13 +942,51 @@ test('provenance rides on the entry too — a merged payload has one header for 
   // mergeSplitReviews unions two payloads' findings under one header, so a
   // marker that lived only on the header would be dropped by exactly the merge
   // a split lane needs. Same read order as `claimedAgent`: entry, then payload.
+  //
+  // The regression half goes FIRST, which is the order combine.mjs gets from a
+  // plain glob (`round1-auditor.regression.json` sorts before `.verified.json`)
+  // and the only order in which the header assertion below can fail.
   const merged = mergeSplitReviews(
-    { persona: 'auditor', verdict: 'approve', summary: 'a', findings: [] },
     regressionPass('auditor', [{ ...f('Second writer to the cache', 'warning'),
-                                 provenance: 'regression' }]));
+                                 provenance: 'regression' }]),
+    { persona: 'auditor', verdict: 'approve', summary: 'a', findings: [] });
   assert.ok(!('provenance' in merged), 'the merged header speaks for neither half');
   const [finding] = synthesize({ auditor: merged }, {}).findings;
   assert.equal(finding.provenance, 'regression');
+});
+
+test('a merged lane header speaks for neither half, in either argument order', () => {
+  // The assertion above was the whole test once, with the ordinary payload
+  // passed first — true of that fixture and not of the code: `mergedLane`
+  // spread half A's header, so the same call with the arguments swapped kept
+  // `provenance` and `provenanceOf`'s payload fallback stamped half B's
+  // ordinary findings "found by the regression pass on a fix commit that
+  // landed". `verified` (verify.mjs) and `passes` (regression.mjs) are the same
+  // shape of per-half fact and were riding along beside it.
+  const ordinary = { persona: 'auditor', agent: 'auditor-a', verdict: 'approve', summary: 'a',
+                     verified: [{ id: 'F1', status: 'closed', why: 'the guard is back' }],
+                     findings: [f('An ordinary finding')] };
+  const pass = { ...regressionPass('auditor', [{ ...f('Second writer to the cache'),
+                                                 provenance: 'regression' }]),
+                 agent: 'auditor-b', passes: [{ commit: 'deadbee', checked: [] }] };
+
+  for (const [first, second] of [[pass, ordinary], [ordinary, pass]]) {
+    const order = `${first.agent} first`;
+    const merged = mergeSplitReviews(first, second);
+    for (const field of ['agent', 'provenance', 'verified', 'passes']) {
+      assert.ok(!(field in merged), `${order}: the merged header must not carry \`${field}\``);
+    }
+    // What a lane header may still say: its own name. combine.mjs keys
+    // round1.json by it and a row that cannot name itself is unreadable, so
+    // the rule is "only what is true of both halves", not "nothing".
+    assert.equal(merged.persona, 'auditor', `${order}: the lane still names itself`);
+    const stamped = Object.fromEntries(
+      synthesize({ auditor: merged }, {}).findings.map((x) => [x.title, x.provenance]));
+    assert.equal(stamped['Second writer to the cache'], 'regression',
+      `${order}: the pass's own finding keeps its stamp`);
+    assert.equal(stamped['An ordinary finding'], 'review',
+      `${order}: the other half's findings are not the regression pass's`);
+  }
 });
 
 test('regression provenance survives a second reporter, whichever order they merge in', () => {

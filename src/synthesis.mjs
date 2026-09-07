@@ -162,13 +162,33 @@ function stampAgent(payload, key) {
     : e));
 }
 
-// The merged object describes a LANE, so it carries no single agent: half A's
-// id left on it would label half B's verdict, summary and findings with half
-// A's name, which is the same misattribution the two-summary join above exists
-// to prevent. The identity survives per entry instead.
+// The merged object describes a LANE, so every field on its header has to be
+// true of the whole lane. The header is BUILT from the fields that are, rather
+// than inherited from half A with subtractions, because the subtracting form
+// was wrong within one commit of being written: it deleted `agent` — half A's
+// id left there labels half B's verdict, summary and findings with half A's
+// name — and then `provenance` arrived on a payload header, rode the `{ ...a }`
+// spread onto the merged lane, and `provenanceOf`'s payload fallback stamped
+// half B's ordinary findings "found by the regression pass on a fix commit that
+// landed", which is the one label that points a human at a revert.
+//
+// Two more per-half fields were already riding along by then: `verified`
+// (verify.mjs) and `passes` (regression.mjs), each a record of what ONE half
+// checked, presented on the merged header as the lane's. They are dropped here
+// with the rest, and nothing is lost that is not still on disk: the
+// `round1-<persona>.verified.json` and `.regression.json` halves combine.mjs
+// read keep those lists beside their own persona, correctly attributed.
+//
+// A denylist has to be edited every time a payload grows a field, and a field
+// nobody remembered fails toward a lie about the other half. This way it fails
+// toward a missing line.
+const LANE_HEADER_KEYS = ['persona'];
+
 function mergedLane(a) {
-  const lane = { ...a };
-  delete lane.agent;
+  const lane = {};
+  for (const key of LANE_HEADER_KEYS) {
+    if (a?.[key] !== undefined) lane[key] = a[key];
+  }
   return lane;
 }
 
