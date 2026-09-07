@@ -8,7 +8,7 @@
 // exit 1 is a claim about a review, and this run could not read one" — so a
 // script that never got as far as reading its input exits 2, everywhere.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { constants, readFileSync, writeFileSync } from 'node:fs';
 
 import { importFromSrc } from './package-root.mjs';
 
@@ -105,7 +105,14 @@ export function makeWriteQueue(prefix) {
       const done = [];
       for (const { dest, src, body } of queued) {
         try {
-          writeFileSync(dest, body, 'utf-8');
+          // The run directory is writable by every agent in the run, so a
+          // symlink can be planted after any pre-write check. O_NOFOLLOW fails
+          // the open itself (ELOOP) instead of narrowing that window.
+          writeFileSync(dest, body, {
+            encoding: 'utf-8',
+            flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC
+              | constants.O_NOFOLLOW,
+          });
         } catch (e) {
           process.stderr.write(`${prefix}: ${dest}: cannot be written (${e.message.trim()})\n`
             + (done.length
