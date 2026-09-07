@@ -54,7 +54,7 @@
 // no way out but deleting the file.
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 
@@ -115,6 +115,14 @@ if (payloads.length) {
 // the fold.
 function loadBoundLedger(ledgerPath, repo) {
   let ledger = emptyLedger();
+  // loadLedger treats a missing file as an empty ledger, which is right for
+  // iteration 1 of a loop and wrong here: an explicit --ledger names a file
+  // the operator believes exists, and binding an empty one turns the
+  // annotation defense off with exit 0 and no message.
+  if (!existsSync(ledgerPath)) {
+    process.stderr.write(`regression: --ledger ${ledgerPath}: no such file\n`);
+    process.exit(2);
+  }
   try {
     ledger = loadLedger(ledgerPath);
   } catch (e) {
@@ -434,7 +442,10 @@ function foldPayloads(sources, outdir, bound) {
     // single header, so a marker living only on the header is a marker the
     // merge drops. The header carries it too, for whoever reads this file.
     lane.findings.push(
-      ...payload.added.map((f) => ({ ...f, provenance: PROVENANCE.regression })));
+      // Only a ledger entry may write `adjudicated` — annotate() enforces that
+      // on the bound path, and the unbound path must not be the way around it.
+      ...payload.added.map(({ adjudicated: _selfDeclared, ...f }) =>
+        ({ ...f, provenance: PROVENANCE.regression })));
     // The four answers ride along, unread by anything downstream, exactly as
     // verify.mjs carries `verified`: "silence is a claim" is only inspectable
     // if what the pass says it checked survives the reshape.
@@ -454,8 +465,12 @@ function foldPayloads(sources, outdir, bound) {
   // were failing to honor.
   const writes = makeWriteQueue('regression');
   let findings = 0;
+  let adjudicated = 0;
   for (const [persona, lane] of byPersona) {
-    if (bound) lane.findings = annotate(lane.findings, bound.ledger, bound.traceFor);
+    if (bound) {
+      lane.findings = annotate(lane.findings, bound.ledger, bound.traceFor);
+      adjudicated += lane.findings.filter((f) => f.adjudicated).length;
+    }
     const commits = lane.passes.map((p) => p.commit).join(', ');
     const out = {
       persona,
@@ -479,7 +494,10 @@ function foldPayloads(sources, outdir, bound) {
   // last was introduced in the sense a reader takes from that word. Same
   // correction src/html.mjs's REGRESSION_NOTE already carries; this line and
   // the report cell are the two an operator reads, so they make one claim.
+  // The ledger clause prints whenever the flag was passed, zero included: a
+  // consulted ledger that matched nothing must read differently from a ledger
+  // that was never consulted, or a wrong path is invisible.
   process.stdout.write(`${sources.length} pass(es) from ${byPersona.size} lane(s):`
     + ` ${findings} finding(s), stamped so the report can say a fix commit's regression`
-    + ' pass found them\n');
+    + ` pass found them${bound ? `; ${adjudicated} carrying a recorded decision` : ''}\n`);
 }

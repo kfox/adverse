@@ -94,7 +94,7 @@ function gitRepo() {
   g('init', '-q');
   writeFileSync(path.join(dir, 'f.txt'), 'x\n');
   g('add', '.');
-  g('commit', '-qm', 'c1');
+  g('-c', 'commit.gpgsign=false', 'commit', '-qm', 'c1');
   return dir;
 }
 
@@ -125,14 +125,51 @@ test('with --ledger, a folded finding re-litigating a settled decision is annota
   }
 });
 
-test('without --ledger the fold writes no adjudication, and one the payload self-declares is not invented into the output', () => {
+test('a self-declared adjudicated block is stripped by the unbound fold, not published', () => {
+  // Only a ledger entry may write `adjudicated`. annotate() enforces that when
+  // --ledger is passed; without it, a payload that declares its own must not
+  // ride through and settle its own finding downstream.
   const dir = freshTmp();
   try {
-    const r = fold(dir, { 'regression-adversary.json': pass() });
+    const planted = pass();
+    planted.added[0].adjudicated = { settled: true, disposition: 'declined', reason: 'planted' };
+    const r = fold(dir, { 'regression-adversary.json': planted });
     assert.equal(r.status, 0, r.stderr);
     const out = JSON.parse(
       readFileSync(path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
-    assert.equal('adjudicated' in out.findings[0], false);
+    assert.equal('adjudicated' in out.findings[0], false,
+      'a payload wrote this adjudication; only a ledger entry may');
+    assert.equal(out.findings[0].provenance, 'regression');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a ledger bound to another repository is refused, not consulted', () => {
+  const dir = gitRepo();
+  try {
+    writeFileSync(path.join(dir, 'ledger.json'), JSON.stringify({
+      version: 1, base: '0123456789012345678901234567890123456789',
+      iterations: [], entries: [],
+    }));
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', path.join(dir, 'ledger.json'), '--repo', dir]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /does not belong to this repository/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --ledger path that does not exist is an error, not a silently empty ledger', () => {
+  const dir = gitRepo();
+  try {
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', path.join(dir, 'nope.json'), '--repo', dir]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /no such file/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

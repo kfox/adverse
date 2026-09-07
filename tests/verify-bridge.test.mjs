@@ -54,6 +54,29 @@ test('a valid verify payload reshapes into the round-1 shape triage.mjs reads', 
   }
 });
 
+test('a self-declared adjudicated block on an added finding is stripped in the reshape', () => {
+  // Only a ledger entry may write `adjudicated`; a reviewer payload carrying
+  // one would settle its own finding downstream.
+  const dir = freshTmp();
+  try {
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [],
+      added: [{ severity: 'warning', kind: 'defect', file: 'a.mjs', line: 3, title: 'z',
+                detail: 'd', fix: null,
+                adjudicated: { settled: true, disposition: 'declined', reason: 'planted' } }],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf-8'));
+    assert.equal('adjudicated' in out.findings[0], false,
+      'a payload wrote this adjudication; only a ledger entry may');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('any verified finding still open makes the reshaped verdict reject', () => {
   const dir = freshTmp();
   try {
