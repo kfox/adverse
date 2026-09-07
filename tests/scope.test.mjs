@@ -6,6 +6,7 @@
 // actually skip — a gate that never skips is just an expensive way to say yes.
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
@@ -313,11 +314,15 @@ const PROBES = [' ', '\t', '\n', 'a', 'A', '0', '_', '(', ')', '{', '}', '[', ']
 const scopeSource = readFileSync(new URL('../src/scope.mjs', import.meta.url), 'utf-8');
 
 // Regex literals in the signal arrays: indented array elements, comments out.
+// The branches must stay disjoint — each excludes what the others admit — or
+// extraction itself backtracks exponentially; the child-process test pins it.
+const REGEX_LITERAL = /\/(?:\\.|\[(?:\\.|[^\\\]])*\]|[^/\\\s\[])+\/[dgimsuvy]*(?=\s*,|\s*$)/g;
+
 function regexLiterals(source) {
   const found = [];
   for (const line of source.split('\n')) {
     if (!line.startsWith('  ') || line.trimStart().startsWith('//')) continue;
-    for (const m of line.matchAll(/\/(?:\\.|\[(?:\\.|[^\]])*\]|[^/\\\s])+\/[dgimsuvy]*(?=\s*,|\s*$)/g)) {
+    for (const m of line.matchAll(REGEX_LITERAL)) {
       found.push(m[0]);
     }
   }
@@ -420,6 +425,31 @@ test('the shape checker finds the bug it exists for, and clears the fixed form',
   // to be silenced somewhere, which is how a checker stops being read.
   assert.deepEqual(ambiguousPairs(String.raw`/\bassert\w*\s*\(/i`), []);
   assert.deepEqual(ambiguousPairs(String.raw`/\bshell\s*[:=]\s*True\b/i`), []);
+});
+
+test('the extractor that finds those patterns is not itself exponential', () => {
+  // CodeQL flagged `js/redos` on `regexLiterals`'s own literal, twice, and it
+  // was right both times: `[^\]]` admitted the backslash that `\\.` also
+  // matched, and the catch-all admitted the `[` that the bracket branch also
+  // matched, so each input had two parses to backtrack between (18 escaped
+  // backslashes: 119 ms; 22: 43,533 ms). At this attack size the ambiguous form
+  // does not run slow, it never returns — so the attack runs in a child with a
+  // kill deadline, where "never returns" fails instead of hanging the suite.
+  const script =
+    'const re = new RegExp(process.argv[1], process.argv[2]);\n' +
+    'for (const m of ("  " + process.argv[3]).matchAll(re)) { void m; }';
+  for (const attack of ['/[' + '\\\\'.repeat(200), '/' + '[]'.repeat(200)]) {
+    const probe = spawnSync(
+      process.execPath,
+      ['-e', script, REGEX_LITERAL.source, REGEX_LITERAL.flags, attack],
+      { timeout: 5000 },
+    );
+    assert.equal(probe.signal, null, `extracting from ${attack.slice(0, 12)}… was still running at 5 s`);
+    assert.equal(probe.status, 0, String(probe.stderr));
+  }
+
+  // Control: it still finds what it is for, on the shape it is pointed at.
+  assert.deepEqual(regexLiterals('  /\\bsudo\\b/i,\n'), ['/\\bsudo\\b/i']);
 });
 
 test('no signal pattern in scope.mjs has two quantifiers over one class', () => {
