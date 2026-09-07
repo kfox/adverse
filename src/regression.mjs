@@ -20,7 +20,7 @@
 // commit, never whether the commit is safe.
 
 import { DEFAULT_PERSONAS, advisoryOnlyLane, isLaneAgent } from './personas.mjs';
-import { assessScope } from './scope.mjs';
+import { SCOPE_TRIGGER, assessScope } from './scope.mjs';
 
 // The candidate order, best lens first — and the tail matters as much as the
 // head, because the first choice is routinely excluded and the second is then
@@ -35,6 +35,10 @@ import { assessScope } from './scope.mjs';
 // changelog that now lies) is exactly the middle category this pass exists to
 // give a channel to.
 //
+// Which of these two an assessment selects is `LENS` below, not `recommend`
+// alone: the gate has more than one reason to recommend running, and only one
+// of them is a boundary.
+//
 // The Pragmatist appears in neither, and that is the point rather than an
 // oversight: it owns only `design`, every design finding is advisory, and a
 // pass that can only produce findings which cannot block is a pass that cannot
@@ -43,6 +47,74 @@ const CANDIDATE_ORDER = Object.freeze({
   boundary: Object.freeze(['adversary', 'auditor', 'steward']),
   routine: Object.freeze(['auditor', 'steward', 'adversary']),
 });
+
+// What the scope gate's answer means here: which order it selects, and the
+// clause the artifact prints. One table, because the two used to be derived
+// separately from `scope.recommend === 'run'` and that one boolean now stands
+// for three different findings.
+//
+// `boundary` is the only one that may say a boundary was crossed. It used to
+// say it for all three, and for the span-limit backstop both halves were
+// false: a README-only fix commit whose one added line was 211 characters of
+// prose read back as "the fix diff crosses a trust boundary (trust-boundary
+// signals present (0 in paths, 1 in added code, 0 in removed code))".
+//
+// `unreadable` keeps the ROUTINE order, and that is a decision rather than a
+// leftover. The boundary order's head position is earned by a positive fact —
+// "this change touches a control plane, where the Adversary is the most
+// valuable reviewer on the panel". A line too long for a bounded span
+// establishes only that the gate could not read it, which is an absence of
+// knowledge, and leading with the Adversary on an absence inverts the very
+// rationale the order is built on. Two things follow from that:
+//
+//   - The population is prose. 57 lines of this repository's own tracked files
+//     run past the limit, 39 of them in one README, and a signal that fires on
+//     most documentation commits carries no information about boundaries — the
+//     failure src/scope.mjs's PATH_SIGNALS list was pruned to avoid.
+//   - "Noisy" is not additive here. In `planReview` an Adversary that runs on a
+//     hunch costs two model calls and takes nothing away. This pass runs ONE
+//     lane, so choosing the Adversary is choosing to lose the Steward's read —
+//     and the Steward goes from second to LAST. A documentation-only fix commit
+//     is the archetype of the middle category the comment above says the
+//     Steward is placed ahead of the Adversary to catch.
+//
+// The Adversary is not excluded, only third, and the clause names the
+// unreadable line out loud rather than hiding the demotion. Any genuine signal
+// on the same diff still reports `boundary`, unreadable lines merely appended
+// to its reason — so the only diffs this moves to `routine` are the ones where
+// the gate found no boundary signal at all.
+//
+// `no-file-list` stays on the boundary order: nothing was read, not even a
+// path, so there is no basis for calling the commit routine. Only its wording
+// changes, from asserting a boundary to admitting it could not look.
+const LENS = Object.freeze({
+  [SCOPE_TRIGGER.boundary]: Object.freeze({
+    order: 'boundary', clause: 'the fix diff crosses a trust boundary',
+  }),
+  [SCOPE_TRIGGER.unreadable]: Object.freeze({
+    order: 'routine', clause: 'the fix diff holds lines no signal could read',
+  }),
+  [SCOPE_TRIGGER.noFileList]: Object.freeze({
+    order: 'boundary', clause: 'the fix diff could not be assessed for a trust boundary',
+  }),
+  [SCOPE_TRIGGER.none]: Object.freeze({
+    order: 'routine', clause: 'the fix diff crosses no trust boundary',
+  }),
+});
+
+// A trigger the gate can return and this table does not word would fall
+// through to a sentence that says nothing, or to `undefined` in the middle of
+// the artifact. Checked at module load for the same reason CANDIDATE_ORDER is
+// below: the unmatched classifier input that silently does nothing is the shape
+// every convergence leak in this project has had.
+for (const trigger of Object.values(SCOPE_TRIGGER)) {
+  const lens = LENS[trigger];
+  /* c8 ignore next 4 */
+  if (!lens || !CANDIDATE_ORDER[lens.order]) {
+    throw new Error(`regression: scope trigger '${trigger}' has no lens`
+      + `${lens ? ` order (CANDIDATE_ORDER.${lens.order} does not exist)` : ''}`);
+  }
+}
 
 // The lanes that can hold a regression, read off the registry.
 const ELIGIBLE = DEFAULT_PERSONAS.filter((p) => !advisoryOnlyLane(p));
@@ -237,11 +309,22 @@ export function chooseRegressionLane(
   const names = closedBy ?? [];
   const scope = assessScope(
     { files: requireArray(files, 'files'), diff: requireString(diff, 'diff') });
-  const boundary = scope.recommend === 'run';
-  const order = boundary ? CANDIDATE_ORDER.boundary : CANDIDATE_ORDER.routine;
-  const lens = boundary
-    ? `the fix diff crosses a trust boundary (${scope.reason})`
-    : `the fix diff crosses no trust boundary (${scope.reason})`;
+  // Read off the trigger, never off `recommend`: three of the gate's four
+  // answers recommend running and only one of them is a boundary.
+  //
+  // A trigger with no lens is refused rather than defaulted. The module-load
+  // check above covers every value SCOPE_TRIGGER names, so reaching here means
+  // the gate answered something this file has never heard of — and every
+  // available default would put a sentence about a boundary into an artifact
+  // on the strength of an assessment nobody in this file can read.
+  const lensFor = LENS[scope.trigger];
+  if (!lensFor) {
+    throw new TypeError('regression: the scope gate answered with trigger'
+      + ` ${JSON.stringify(scope.trigger)}, which names no lens; refusing to word a`
+      + ' trust-boundary claim off an assessment this module cannot read');
+  }
+  const order = CANDIDATE_ORDER[lensFor.order];
+  const lens = `${lensFor.clause} (${scope.reason})`;
 
   const reported = new Set();
   for (const agent of names) {

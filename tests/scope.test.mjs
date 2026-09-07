@@ -466,7 +466,12 @@ test('a guard whose span outruns the bound reaches run as an unreadable line', (
   assert.deepEqual(r.evidence.map((e) => e.signal), [
     'line over 200 chars — longer than any bounded span can read end to end',
   ]);
-  assert.equal(r.evidence[0].kind, 'content-removed');
+  // `unreadable-removed`, not `content-removed`. It used to be filed under the
+  // same kind as a real signal, which counted it into "N in removed code" and
+  // let src/regression.mjs print "the fix diff crosses a trust boundary" over
+  // a line whose only property is its length.
+  assert.equal(r.evidence[0].kind, 'unreadable-removed');
+  assert.doesNotMatch(r.reason, /trust-boundary signals present/);
 });
 
 test('the unreadable-line backstop decides on length, and 200 characters is the line', () => {
@@ -481,6 +486,70 @@ test('the backstop covers added lines too — SELECT and os.path.join are bounde
   const added = `--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n+${'y'.repeat(400)}\n`;
   const r = assessScope({ files: ['src/render/widget.js'], diff: added });
   assert.equal(r.recommend, 'run', JSON.stringify(r.evidence));
-  assert.equal(r.evidence[0].kind, 'content');
-  assert.match(r.reason, /1 in added code/);
+  assert.equal(r.evidence[0].kind, 'unreadable');
+  // Was `/1 in added code/` — the assertion that pinned the laundering. The
+  // backstop must still reach `run` on an added line, and must not be reported
+  // as a trust-boundary signal to get there.
+  assert.match(r.reason, /1 line\(s\) ran past the 200-character span limit/);
+  assert.doesNotMatch(r.reason, /in added code/);
+});
+
+// The length backstop is not a boundary signal. It recommends `run` — that is
+// the point of it — but the reason it hands its consumers has to say which of
+// the gate's two claims it is, because src/regression.mjs prints one of them to
+// an operator as a sentence about a trust boundary.
+
+test('a length-only trigger says so, and does not report a trust-boundary signal', () => {
+  // The reviewer's own fixture: 224 characters of ordinary README prose, with
+  // no signal from any list anywhere in it. Before this, `reason` read
+  // "trust-boundary signals present (0 in paths, 1 in added code, 0 in removed
+  // code)" — a sentence in which every clause is false.
+  const prose = `Amend the scope gate description so that it says what is true of the length `
+    + 'backstop, because the sentence it replaces described a gate that only ever matched '
+    + 'patterns and that is no longer the gate this repository ships to anybody at all.';
+  assert.ok(prose.length > 200 && prose.length < 240, `fixture is ${prose.length} chars`);
+  const r = assessScope({ files: ['README.md'], diff: diffOf(prose) });
+
+  assert.equal(r.recommend, 'run', 'an unreadable line is still evidence in its own right');
+  assert.equal(r.trigger, 'unreadable');
+  assert.doesNotMatch(r.reason, /trust-boundary signals present/);
+  assert.match(r.reason, /^no trust-boundary signal, but 1 line\(s\) ran past the 200-character/);
+  assert.deepEqual(r.evidence.map((e) => e.kind), ['unreadable']);
+});
+
+test('a real signal beside a long line still reports the boundary, and does not count the line', () => {
+  // Both at once. The boundary claim is true here and has to survive, but the
+  // counts in it are counts of boundary signals: reporting "2 in added code"
+  // for one signal and one long line is the same laundering one step along.
+  const diff = diffOf('const password = load();', 'x'.repeat(300));
+  const r = assessScope({ files: ['src/render/widget.js'], diff });
+
+  assert.equal(r.trigger, 'boundary');
+  assert.match(r.reason, /^trust-boundary signals present \(0 in paths, 1 in added code, 0 in removed code\)/);
+  assert.match(r.reason, /1 line\(s\) also ran past the 200-character span limit/);
+  assert.equal(r.evidence.filter((e) => e.kind === 'unreadable').length, 1);
+});
+
+test('every line past the limit is counted, not just the first one recorded', () => {
+  // `record` deduplicates on the signal, so `evidence` holds one unreadable
+  // entry however many long lines there are. A count read off `evidence` could
+  // therefore only ever say "1", which would understate a minified diff.
+  const r = assessScope({
+    files: ['bundle.js'],
+    diff: `--- a/bundle.js\n+++ b/bundle.js\n@@ -1 +3 @@\n+${'a'.repeat(260)}\n`
+      + `+${'b'.repeat(260)}\n-${'c'.repeat(260)}\n`,
+  });
+
+  assert.equal(r.trigger, 'unreadable');
+  assert.match(r.reason, /but 3 line\(s\) ran past the 200-character span limit/);
+});
+
+test('the skip and no-file-list answers carry a trigger too, so no consumer has to guess', () => {
+  // Every return path names its trigger. One that did not would read as
+  // `undefined` in src/regression.mjs, which refuses a trigger it cannot word
+  // rather than defaulting to a sentence about a boundary.
+  assert.equal(assessScope({ files: ['src/render/x.js'], diff: diffOf('const a = 1;') }).trigger,
+    'none');
+  assert.equal(assessScope({ files: [], diff: '' }).trigger, 'no-file-list');
+  assert.equal(assessScope({ files: ['src/auth/session.js'], diff: '' }).trigger, 'boundary');
 });

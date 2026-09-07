@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -508,4 +508,37 @@ test('neither mode selected is a usage error', () => {
   const r = run(['--repo', ROOT]);
   assert.equal(r.status, 2);
   assert.match(r.stderr, /Usage: regression\.mjs/);
+});
+
+test('the printed sentence does not accuse a documentation fix of crossing a boundary', () => {
+  // The operator surface the finding names: this bridge prints `choice.reason`
+  // verbatim, so the sentence it shows is the one src/regression.mjs builds.
+  // A scratch repo rather than this one's HEAD, because the property under test
+  // is the length of one added line.
+  const prose = 'Amend the scope gate description so that it says what is true of the length '
+    + 'backstop, because the sentence it replaces described a gate that only ever matched '
+    + 'patterns and that is no longer the gate this repository ships to anybody at all.';
+  assert.ok(prose.length > 200, `fixture is ${prose.length} chars`);
+  const dir = freshTmp();
+  try {
+    const git = (...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf-8' });
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@test');
+    git('config', 'user.name', 'test');
+    writeFileSync(path.join(dir, 'README.md'), 'short line\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    writeFileSync(path.join(dir, 'README.md'), `short line\n${prose}\n`);
+    git('add', '-A');
+    git('commit', '-q', '-m', 'docs: say what the gate does');
+
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by', 'pragmatist']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /crosses a trust boundary/);
+    assert.match(r.stdout, /holds lines no signal could read/);
+    // And the Steward is not demoted past the Adversary on a docs-only fix.
+    assert.match(r.stdout, /^regression lane for HEAD: auditor$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

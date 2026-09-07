@@ -155,9 +155,16 @@ test('no file list at all fails toward the Adversary, the way assessScope does',
   // An unread diff is not a diff with nothing in it. Both callers of this
   // module hand over whatever git gave them, and a commit nobody could read
   // must not read as a commit with no boundary in it.
+  //
+  // The ROUTING is what this test is about, and it is unchanged. The sentence
+  // is not: this used to assert `/crosses a trust boundary/`, which is a claim
+  // about a commit whose file list was empty and whose diff nobody scanned.
+  // Failing toward the Adversary and asserting a boundary was crossed are two
+  // different things, and only the first one is honest here.
   const chosen = chooseRegressionLane({ closesNothing: true, files: [], diff: '' });
   assert.equal(chosen.persona, 'adversary');
-  assert.match(chosen.reason, /crosses a trust boundary/);
+  assert.match(chosen.reason, /could not be assessed for a trust boundary/);
+  assert.doesNotMatch(chosen.reason, /crosses a trust boundary/);
 });
 
 test('called with no exclusion input at all, it refuses to answer', () => {
@@ -208,4 +215,97 @@ test('a commit description this module cannot read is refused, not assessed', ()
   assert.throws(() => chooseRegressionLane(
     { closedBy: ['auditor'], files: FILES, diff: { added: 'el.innerHTML = q' } }),
   /diff must be a string, got object/);
+});
+
+// --- the length backstop is a routing input, not a boundary claim ------------
+//
+// These come in the pair this file's header asks for: the same README-only
+// commit, once with a line long enough to defeat every bounded span and once
+// with the same prose wrapped under the limit. Only the length differs, so a
+// difference in the chosen lane or the printed sentence can only have come from
+// it — and a rule reading "the Adversary, always, once anything is unreadable"
+// is distinguishable from the one under test.
+
+const PROSE = 'Amend the scope gate description so that it says what is true of the length '
+  + 'backstop, because the sentence it replaces described a gate that only ever matched '
+  + 'patterns and that is no longer the gate this repository ships to anybody at all.';
+
+test('a length-only trigger does not claim a boundary was crossed', () => {
+  assert.ok(PROSE.length > 200, `fixture is ${PROSE.length} chars`);
+  const long = chooseRegressionLane(
+    { closedBy: ['pragmatist'], files: ['README.md'], diff: diffOf(PROSE) });
+  const short = chooseRegressionLane(
+    { closedBy: ['pragmatist'], files: ['README.md'], diff: diffOf(PROSE.slice(0, 200)) });
+
+  // The sentence an operator reads. It used to be "the fix diff crosses a
+  // trust boundary (trust-boundary signals present (0 in paths, 1 in added
+  // code, 0 in removed code))" for 224 characters of ordinary prose.
+  assert.match(long.reason, /holds lines no signal could read/);
+  assert.doesNotMatch(long.reason, /crosses a trust boundary/);
+  assert.doesNotMatch(long.reason, /trust-boundary signals present/);
+  assert.match(long.reason, /ran past the 200-character span limit/);
+
+  // And the shorter twin still reaches the other answer, so the assertion
+  // above is about the length and not about README.md.
+  assert.match(short.reason, /crosses no trust boundary/);
+});
+
+test('a length-only trigger keeps the routine order, so the Steward is not demoted to last', () => {
+  // The decision the finding turns on. A documentation-only fix commit is the
+  // archetype of the middle category src/regression.mjs places the Steward
+  // ahead of the Adversary to catch, and the backstop fires on 39 lines of
+  // this repository's own README — so routing on it moved the Steward from
+  // second to last on exactly the commits it was second for.
+  const chosen = chooseRegressionLane(
+    { closedBy: ['pragmatist'], files: ['README.md'], diff: diffOf(PROSE) });
+  assert.equal(chosen.persona, 'auditor');
+
+  // Second, not last: exclude the auditor and the Steward is next, which is
+  // what `boundary` order would not do (it would hand this to the adversary).
+  const excluded = chooseRegressionLane(
+    { closedBy: ['auditor'], files: ['README.md'], diff: diffOf(PROSE) });
+  assert.equal(excluded.persona, 'steward');
+
+  // Not excluded, only third. Whichever order runs, the Adversary is still in it.
+  const emptied = chooseRegressionLane(
+    { closedBy: ['auditor', 'steward'], files: ['README.md'], diff: diffOf(PROSE) });
+  assert.equal(emptied.persona, 'adversary');
+});
+
+test('a real signal on the same long-lined diff still leads with the Adversary', () => {
+  // The fix must not be reachable by weakening the gate: a genuine signal
+  // beside an unreadable line is still a boundary, still the boundary order,
+  // and still says so.
+  const diff = diffOf('el.innerHTML = req.query.name;', PROSE);
+  const chosen = chooseRegressionLane({ closedBy: ['pragmatist'], files: ['README.md'], diff });
+  assert.equal(chosen.persona, 'adversary');
+  assert.match(chosen.reason, /crosses a trust boundary/);
+  assert.match(chosen.reason, /also ran past the 200-character span limit/);
+});
+
+test('each of the gate\'s four answers gets its own sentence, and no two share one', () => {
+  // The lens table is a classifier, and the shape every convergence leak in
+  // this project has had is the unmatched input that silently does nothing. All
+  // four of `assessScope`'s triggers are reachable from here, so all four are
+  // checked: an entry missing from the table would put `undefined` into the
+  // middle of the artifact, and two entries sharing a sentence would be the
+  // laundering this change removed, re-introduced one row over.
+  const clauseOf = (args) => chooseRegressionLane({ closesNothing: true, ...args })
+    .reason.replace(/^\w+: /, '').replace(/ \(.*$/s, '');
+  const clauses = {
+    boundary: clauseOf(BOUNDARY),
+    none: clauseOf(ROUTINE),
+    unreadable: clauseOf({ files: ['README.md'], diff: diffOf(PROSE) }),
+    noFileList: clauseOf({ files: [], diff: '' }),
+  };
+
+  for (const [trigger, clause] of Object.entries(clauses)) {
+    assert.ok(clause && clause.length > 10, `${trigger} has no sentence: ${JSON.stringify(clause)}`);
+  }
+  assert.equal(new Set(Object.values(clauses)).size, 4,
+    `two triggers share a sentence: ${JSON.stringify(clauses)}`);
+  // And only one of the four may say a boundary was crossed.
+  assert.deepEqual(
+    Object.entries(clauses).filter(([, c]) => /crosses a trust boundary/.test(c)).map(([t]) => t),
+    ['boundary']);
 });
