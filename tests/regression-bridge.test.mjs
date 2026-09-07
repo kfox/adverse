@@ -538,14 +538,22 @@ test('an unreadable payload is exit 2 — this run never read its input', () => 
 });
 
 test('choosing a lane reads the commit itself and reports its reasoning', () => {
-  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by', 'auditor', '--json']);
-  assert.equal(r.status, 0, r.stderr);
-  const choice = JSON.parse(r.stdout);
-  assert.notEqual(choice.persona, 'auditor', 'the lane that reported it does not review it');
-  assert.notEqual(choice.persona, 'pragmatist');
-  assert.equal(choice.commit, 'HEAD');
-  assert.equal(choice.conflicted, false);
-  assert.ok(choice.reason.includes(choice.persona));
+  // A scratch repo, not this checkout's HEAD: verifying a release archive runs
+  // this suite where no .git exists, and the property under test is the
+  // bridge's reasoning, not this repository's latest commit.
+  const dir = gitRepo();
+  try {
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by', 'auditor', '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    const choice = JSON.parse(r.stdout);
+    assert.notEqual(choice.persona, 'auditor', 'the lane that reported it does not review it');
+    assert.notEqual(choice.persona, 'pragmatist');
+    assert.equal(choice.commit, 'HEAD');
+    assert.equal(choice.conflicted, false);
+    assert.ok(choice.reason.includes(choice.persona));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a commit nobody can read still names a lane, loudly', () => {
@@ -605,9 +613,14 @@ test('a split lane\'s half is a --closed-by name the bridge accepts', () => {
   // The discriminating case: refusing everything that is not a bare persona
   // would refuse `auditor-a`, which is exactly the id `agentNames` emits and
   // the one `laneOf` exists to resolve.
-  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by', 'auditor-a', '--json']);
-  assert.equal(r.status, 0, r.stderr);
-  assert.notEqual(JSON.parse(r.stdout).persona, 'auditor');
+  const dir = gitRepo();
+  try {
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by', 'auditor-a', '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.notEqual(JSON.parse(r.stdout).persona, 'auditor');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('no --closed-by at all is refused, and nothing is printed about a lane', () => {
@@ -629,12 +642,17 @@ test('--closed-by-none runs the pass and says on whose word nobody was excluded'
   // the omission must not make the pass unrunnable on a commit that closes no
   // reported finding. What it must not do is produce the same sentence a
   // checked exclusion earns.
-  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by-none', '--json']);
-  assert.equal(r.status, 0, r.stderr);
-  const choice = JSON.parse(r.stdout);
-  assert.match(choice.reason, /the caller declared that this commit closes no finding/);
-  assert.doesNotMatch(choice.reason, /it reported none of the findings/);
-  assert.deepEqual(choice.unresolved, []);
+  const dir = gitRepo();
+  try {
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-none', '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    const choice = JSON.parse(r.stdout);
+    assert.match(choice.reason, /the caller declared that this commit closes no finding/);
+    assert.doesNotMatch(choice.reason, /it reported none of the findings/);
+    assert.deepEqual(choice.unresolved, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('--closed-by-none beside a --closed-by name is refused, not merged', () => {
