@@ -455,9 +455,6 @@ function refuseKnownFolds(byPersona, outdir, { refold, repo }) {
   }
 }
 
-// One file per LANE, not one per pass. An iteration lands several fix commits
-// and each gets its own pass, so one lane routinely runs more than one — and a
-// file per pass would either collide on the name or arrive at triage as a lane
 // A lane choice the choose mode printed, read back so the fold can stamp it on
 // the pass it covers. Nothing else records HOW the reviewing lane was picked,
 // and a fold produced after --closed-by-none used to be byte-identical to one
@@ -468,7 +465,12 @@ function readChoices(files) {
   return files.map((src) => {
     const c = readJson(src, 'regression');
     requireKnownPersona(c?.persona, { prefix: 'regression', file: src, personas: DEFAULT_PERSONAS });
+    // No control characters in the commit: it is interpolated verbatim into
+    // this bridge's own stderr diagnostics, where an embedded escape or \r
+    // could rewrite what the operator sees on that line. No honest rev
+    // spelling contains one.
     const ok = typeof c.commit === 'string' && c.commit && !c.commit.startsWith('-')
+      && !/[\x00-\x1f\x7f]/.test(c.commit)
       && typeof c.reason === 'string' && typeof c.conflicted === 'boolean'
       && ['declared-list', 'declared-none'].includes(c.disinterest);
     if (!ok) {
@@ -480,6 +482,9 @@ function readChoices(files) {
   });
 }
 
+// One file per LANE, not one per pass. An iteration lands several fix commits
+// and each gets its own pass, so one lane routinely runs more than one — and a
+// file per pass would either collide on the name or arrive at triage as a lane
 // claiming three payloads, which `checkRoster` refuses (a split lane is exactly
 // two). Unioning here keeps the pass per commit, which is the doctrine, without
 // inventing a lane per commit, which is not.
@@ -538,11 +543,27 @@ function foldPayloads(sources, outdir, bound) {
   // routing, which is exactly what must not pass silently — warned, and the
   // pass stays unrecorded.
   const choices = readChoices(values.choice ?? []);
-  const sameCommit = makeCommitMatcher(values.repo ?? null);
+  // NOT makeCommitMatcher's repo-less fallback: staleness and stamping fail in
+  // opposite directions. There a loose prefix match refuses a fold, which is
+  // noisy; here it signs the wrong pass with another commit's audit record,
+  // which is silent — a 4-char spelling matched an unrelated pass outright.
+  // Without a repository to resolve spellings, two different strings are not
+  // provably one commit, so the fallback is exact equality, and a pass left
+  // unstamped says so in the lane summary.
+  const sameCommit = values.repo
+    ? makeCommitMatcher(values.repo)
+    : (priors, commit) => priors.has(commit);
   for (const [persona, lane] of byPersona) {
     for (const pass of lane.passes) {
-      const match = choices.find((c) => sameCommit(new Set([c.commit]), pass.commit));
-      if (!match) continue;
+      const matches = choices.filter((c) => sameCommit(new Set([c.commit]), pass.commit));
+      if (!matches.length) continue;
+      if (matches.length > 1) {
+        process.stderr.write(`regression: ${matches.length} lane choices`
+          + ` (${matches.map((c) => c.src).join(', ')}) match the ${persona} pass on`
+          + ` ${pass.commit}, so stamping would guess which is on record — none stamped\n`);
+        continue;
+      }
+      const [match] = matches;
       if (match.persona !== persona) {
         process.stderr.write(`regression: lane choice ${match.src} picked ${match.persona}`
           + ` for ${pass.commit}, but this pass was run by ${persona} — the routing was`

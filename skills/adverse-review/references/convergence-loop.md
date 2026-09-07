@@ -416,8 +416,14 @@ node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/*/regre
 
 node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/*/regression-*.json \
     --outdir "$ADVERSE_RUN" --choice "$ADVERSE_RUN"/lane-choice-*.json \
-    ${LEDGER:+--ledger "$LEDGER" --repo .}
+    --repo . ${LEDGER:+--ledger "$LEDGER"}
 ```
+
+`--repo` is unconditional: it is what lets the fold resolve two spellings of
+one commit to one identity, for the staleness check and for matching each
+lane choice to its pass. Without it the fold falls back to exact string
+equality — safe, but a choice recorded under an abbreviated sha then goes
+unstamped, and the lane summary reports it unrecorded.
 
 Pass `--ledger` whenever the run has one. The fold then annotates any finding
 that re-litigates a settled decision with the recorded disposition and reason —

@@ -419,6 +419,75 @@ test('an overridden routing is warned about and never stamped', () => {
   }
 });
 
+test('without a repo, a prefix spelling is not identity for stamping', () => {
+  // Staleness and stamping fail in opposite directions: a loose prefix match
+  // there refuses a fold (noisy), here it signs the wrong pass with another
+  // commit's audit record (silent). A 4-char spelling matched an unrelated
+  // pass outright, so the repo-less fallback is exact equality, and the pass
+  // stays noisily unstamped instead.
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'lane-choice.json'), JSON.stringify({
+      persona: 'adversary', commit: 'abc1', conflicted: false,
+      disinterest: 'declared-none', reason: 'nobody excluded',
+    }));
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /matches no pass in this fold/);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    assert.equal('laneChoice' in out.passes[0], false);
+    assert.match(out.summary, /lane choice unrecorded/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two choices matching one pass are refused as ambiguous, not first-won', () => {
+  const dir = freshTmp();
+  try {
+    for (const [name, reason] of [['choice-1.json', 'first'], ['choice-2.json', 'second']]) {
+      writeFileSync(path.join(dir, name), JSON.stringify({
+        persona: 'adversary', commit: 'abc1234', conflicted: false,
+        disinterest: 'declared-none', reason,
+      }));
+    }
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'choice-1.json'),
+                   '--choice', path.join(dir, 'choice-2.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /2 lane choices .* stamping would guess/);
+    const out = JSON.parse(readFileSync(
+      path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    assert.equal('laneChoice' in out.passes[0], false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a choice commit carrying control characters is not a lane choice', () => {
+  // The commit is interpolated verbatim into this bridge's stderr diagnostics,
+  // where an embedded escape could rewrite what the operator sees. No honest
+  // rev spelling contains one.
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'lane-choice.json'), JSON.stringify({
+      persona: 'adversary', commit: 'abc1234\u001b[2K\rall clear', conflicted: false,
+      disinterest: 'declared-none', reason: 'r',
+    }));
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
+                   '--choice', path.join(dir, 'lane-choice.json')]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /not a lane choice/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a file that is not a lane choice is refused, not stamped', () => {
   const dir = freshTmp();
   try {
