@@ -308,8 +308,10 @@ export function scoreMatch(entry, finding, traced = null) {
     return { score: 2, why: `same code/counterpart pair at ${entryFile}:${entryLine} (drift ${cdrift})` };
   }
 
-  // An advisory kind never blocks, so a positional match buys nothing and a
-  // wrong one buries real feedback. Title equality above is its only path.
+  // Contract, though advisory, matched above: its code/counterpart anchor is
+  // checkable. For the rest of the advisory set a positional match buys
+  // nothing and a wrong one buries real feedback — title equality above is
+  // the only path.
   if (ADVISORY_KINDS.has(entry.kind)) return null;
 
   if (entryLine === null || findingLine === null) {

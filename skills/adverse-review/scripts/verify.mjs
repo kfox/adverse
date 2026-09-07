@@ -263,7 +263,9 @@ for (const src of values.verify) {
     persona: payload.persona,
     verdict,
     summary: `verify: ${closed} closed, ${open} open, ${moot} moot; ${payload.added.length} new finding(s)`,
-    findings: [...reopened, ...payload.added],
+    // Only a ledger entry may write `adjudicated`; a reviewer payload carrying
+    // one would settle its own finding downstream.
+    findings: [...reopened, ...payload.added.map(({ adjudicated: _selfDeclared, ...f }) => f)],
     verified: payload.verified,
   };
 

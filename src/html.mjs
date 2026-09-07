@@ -107,7 +107,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
   if (advisory.length) {
     sections.push(`
       <section class="findings-group">
-        <h2>Advisory (design — recorded, never blocking)</h2>
+        <h2>Advisory (${[...ADVISORY_KINDS].join(', ')} — recorded, never blocking)</h2>
         ${advisory.map(renderCard).join('\n')}
       </section>`);
   }

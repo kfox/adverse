@@ -187,6 +187,7 @@ than for emphasis:
                  docstring, an architecture note, a schema, a changelog, a
                  config default, a documented project rule. Requires `file`
                  (the code) AND `counterpart` (the path that disagrees).
+                 ADVISORY: recorded and ranked, but it never blocks the change.
 - `design`     — structure, coupling, complexity, API shape, naming.
                  ADVISORY: recorded and ranked, but it never blocks the change.
 

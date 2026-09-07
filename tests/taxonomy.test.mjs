@@ -10,6 +10,11 @@ test('every advisory kind is a real kind', () => {
   for (const k of ADVISORY_KINDS) assert.ok(KINDS.includes(k), `${k} is not in KINDS`);
 });
 
+test('design and contract are advisory; defect and behavioral block', () => {
+  assert.deepEqual([...ADVISORY_KINDS].sort(), ['contract', 'design']);
+  assert.deepEqual(KINDS.filter((k) => !ADVISORY_KINDS.has(k)), ['defect', 'behavioral']);
+});
+
 test('severity rank has exactly one entry per severity, and it is a total order', () => {
   assert.deepEqual(Object.keys(SEVERITY_RANK).sort(), [...SEVERITIES].sort());
   const ranks = Object.values(SEVERITY_RANK);

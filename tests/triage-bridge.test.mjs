@@ -191,7 +191,7 @@ test('the summary line reports every tally, and reports the run the file describ
   assert.match(stdout, /co-citations \(.*max \d+\/finding\): 1 \(F4->F2\)/);
   assert.match(stdout, /candidate root causes \(proposed, for round 2 to confirm or split\): 1 \(G1=/);
   assert.match(stdout, /under-anchored for their kind \(annotated, not rejected\): 2 \(F6, F7\)/);
-  assert.match(stdout, /advisory \(design — cannot block\): 1 \(F5\)/);
+  assert.match(stdout, /advisory \(design, contract — cannot block\): 2 \(F2, F5\)/);
   assert.match(stdout, /already settled in an earlier iteration: 0\n/);
   assert.match(stdout, /REGRESSED \(recorded fixed, reported again\): 0\n/);
 

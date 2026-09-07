@@ -530,6 +530,7 @@ test('isOpenBlocking: blocking and cross-validated or consensus, nothing else', 
   assert.equal(isOpenBlocking({ ...base, confidence: 'solo' }), false);
   assert.equal(isOpenBlocking({ ...base, confidence: 'disputed' }), false);
   assert.equal(isOpenBlocking({ ...base, kind: 'design', confidence: 'cross-validated' }), false);
+  assert.equal(isOpenBlocking({ ...base, kind: 'contract', confidence: 'cross-validated' }), false);
   assert.equal(isOpenBlocking({ ...base, severity: 'info', confidence: 'cross-validated' }), false);
 });
 
@@ -538,6 +539,14 @@ test('kind: merging two reporters keeps the blocking kind over the advisory one'
                          adversary: v('reject', [k('Same', 'defect', 'warning')]) }, {});
   assert.equal(s.findings.length, 1);
   assert.equal(s.findings[0].kind, 'defect');
+  assert.equal(s.openBlocking.length, 1);
+});
+
+test('kind: a steward+auditor shared finding lands on the blocking kind, not contract', () => {
+  const s = synthesize({ steward: v('conditional', [k('Same', 'contract', 'warning')]),
+                         auditor: v('reject', [k('Same', 'behavioral', 'warning')]) }, {});
+  assert.equal(s.findings.length, 1);
+  assert.equal(s.findings[0].kind, 'behavioral');
   assert.equal(s.openBlocking.length, 1);
 });
 
@@ -551,7 +560,7 @@ test('render: design findings go under the advisory heading, not a confidence on
   const r1 = { auditor: v('conditional', [k('Shape', 'design', 'critical')]),
                adversary: v('reject', [k('Shape', 'design', 'critical')]) };
   const out = renderMarkdown(synthesize(r1, {}));
-  assert.match(out, /## Advisory \(design — recorded, never blocking\)/);
+  assert.match(out, /## Advisory \(design, contract — recorded, never blocking\)/);
   assert.ok(!out.includes('Cross-validated findings'),
     'an advisory-only run has no blocking confidence section');
   assert.match(out, /\*\*Open blocking:\*\* 0/);

@@ -873,13 +873,14 @@ const SECTION_TITLES = {
 const CONFIDENCE_ORDER = ['cross-validated', 'consensus', 'disputed', 'solo'];
 
 const ADVISORY_SECTION =
-  '## Advisory (design — recorded, never blocking)';
+  `## Advisory (${[...ADVISORY_KINDS].join(', ')} — recorded, never blocking)`;
 
 const ADVISORY_PREAMBLE =
-  '_These are design opinions. They are real feedback and worth acting on, but '
-  + 'they cannot hold the change open: a reviewer can always want different '
-  + 'structure, so a loop that waits for them to run out never ends. Take them '
-  + 'or file them; do not let them gate the merge._';
+  '_These are real feedback and worth acting on, but they cannot hold the '
+  + 'change open: a reviewer can always want different structure, and prose '
+  + 'claims never run out, so a loop that waits for either supply to be '
+  + 'exhausted never ends. Take them or file them; do not let them gate the '
+  + 'merge._';
 
 // Keyed off taxonomy's ROOT_CAUSE_STATUSES — checked, not merely asserted in a
 // comment. A status added there without a label here throws at module load

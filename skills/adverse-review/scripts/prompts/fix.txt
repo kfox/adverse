@@ -30,6 +30,15 @@ which is exactly the frame of mind that ships a hasty patch. If reproducing
 shows a finding is wrong, or right and not worth the change, decline it and show
 the reproduction that says so.
 
+**Your argument lives in the commit message, not in code comments.** A comment
+may state only a constraint the code cannot show; everything arguing that the
+change is correct — measurements, the reviewer you are answering, why the
+alternative loses — goes in the commit message, where the regression pass and
+the next reviewer read it. Prose in the diff is not armor: every comment is a
+checkable claim that can drift, and a fix that needs a comment to be believed
+usually needs reshaping instead — often into a well-named helper whose name
+carries the why.
+
 ## 2. Close the class, not the instance — as a section, not an afterthought
 
 This is where a fix pass out-finds the panel, and it only happens if you write
@@ -177,10 +186,11 @@ Anything with a timestamp-keyed build cache at second granularity has this hole.
 The seven shapes above describe tests that cannot fail; this describes a
 mutation that never ran, and it defeats every entry in the catalog at once.
 
-## 6. Your diff gets a regression pass by someone who is not you
+## 6. Your diff can get a regression pass by someone who is not you
 
-Knowing the pass is coming is what makes the section below honest, so here are
-the questions it will ask:
+Whether the pass runs on your commit is the orchestrator's call, not yours, so
+write as if it will. Knowing that is what makes the section below honest; here
+are the questions it asks:
 
 1. **What got stricter?** Something that used to be accepted now is not. Who was
    relying on it?
@@ -248,6 +258,7 @@ than for emphasis:
                  docstring, an architecture note, a schema, a changelog, a
                  config default, a documented project rule. Requires `file`
                  (the code) AND `counterpart` (the path that disagrees).
+                 ADVISORY: recorded and ranked, but it never blocks the change.
 - `design`     — structure, coupling, complexity, API shape, naming.
                  ADVISORY: recorded and ranked, but it never blocks the change.
 
@@ -267,8 +278,8 @@ them from the briefing rather than retyping them.
   `named_not_fixed` may each be empty; a batch where every finding was declined
   legitimately commits nothing. `commits` may be empty only then — if
   `fixed` names a fix, `commits` must name the commit that made it, because
-  the regression pass runs once per fix commit and cannot run against a commit
-  nobody named. Blank strings are refused, here as everywhere. Each entry is
+  nothing downstream — the composed replay, a regression pass — can run against
+  a commit nobody named. Blank strings are refused, here as everywhere. Each entry is
   ONE revision and nothing else — a sha, or a symbolic rev like `HEAD~2` —
   checked against `/^[0-9A-Za-z][0-9A-Za-z._/~^{}-]{0,63}$/`,
   because that string is handed to `git` as an argument and printed in this

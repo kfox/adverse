@@ -82,6 +82,114 @@ test('a pass reshapes into the round-1 shape triage.mjs reads, stamped', () => {
   }
 });
 
+// --- the ledger ---------------------------------------------------------------
+
+// annotate() needs a repository to bind the ledger and trace its anchors, so
+// the fold's --ledger requires --repo the same way the chooseLane mode does.
+function gitRepo() {
+  const dir = freshTmp();
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@b',
+                GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@b' };
+  const g = (...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf-8', env });
+  g('init', '-q');
+  writeFileSync(path.join(dir, 'f.txt'), 'x\n');
+  g('add', '.');
+  g('-c', 'commit.gpgsign=false', 'commit', '-qm', 'c1');
+  return dir;
+}
+
+test('with --ledger, a folded finding re-litigating a settled decision is annotated', () => {
+  const dir = gitRepo();
+  try {
+    const entry = {
+      id: 'F9', title: 'the bounded drain lost its bound', kind: 'behavioral',
+      severity: 'critical', file: 'src/asid.py', line: 243, counterpart: null,
+      citedLine: null, disposition: 'declined', reason: 'the bound is intentional',
+      iteration: 2, atCommit: 'HEAD',
+    };
+    writeFileSync(path.join(dir, 'ledger.json'),
+      JSON.stringify({ version: 1, base: null, iterations: [{ n: 2 }], entries: [entry] }));
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', path.join(dir, 'ledger.json'), '--repo', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(
+      readFileSync(path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    const f = out.findings[0];
+    assert.equal(f.adjudicated.settled, true);
+    assert.equal(f.adjudicated.disposition, 'declined');
+    assert.equal(f.adjudicated.reason, 'the bound is intentional');
+    assert.equal(f.provenance, 'regression', 'the stamp must survive annotation');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a self-declared adjudicated block is stripped by the unbound fold, not published', () => {
+  // Only a ledger entry may write `adjudicated`. annotate() enforces that when
+  // --ledger is passed; without it, a payload that declares its own must not
+  // ride through and settle its own finding downstream.
+  const dir = freshTmp();
+  try {
+    const planted = pass();
+    planted.added[0].adjudicated = { settled: true, disposition: 'declined', reason: 'planted' };
+    const r = fold(dir, { 'regression-adversary.json': planted });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(
+      readFileSync(path.join(dir, 'round1-adversary.regression.json'), 'utf-8'));
+    assert.equal('adjudicated' in out.findings[0], false,
+      'a payload wrote this adjudication; only a ledger entry may');
+    assert.equal(out.findings[0].provenance, 'regression');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a ledger bound to another repository is refused, not consulted', () => {
+  const dir = gitRepo();
+  try {
+    writeFileSync(path.join(dir, 'ledger.json'), JSON.stringify({
+      version: 1, base: '0123456789012345678901234567890123456789',
+      iterations: [], entries: [],
+    }));
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', path.join(dir, 'ledger.json'), '--repo', dir]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /does not belong to this repository/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --ledger path that does not exist is an error, not a silently empty ledger', () => {
+  const dir = gitRepo();
+  try {
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', path.join(dir, 'nope.json'), '--repo', dir]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /no such file/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--ledger without --repo is a usage error — the binding check needs the repository', () => {
+  const dir = freshTmp();
+  try {
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    writeFileSync(path.join(dir, 'ledger.json'),
+      JSON.stringify({ version: 1, base: null, iterations: [], entries: [] }));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', path.join(dir, 'ledger.json')]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /Usage/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a pass that found nothing is an approval, not a rejection', () => {
   const dir = freshTmp();
   try {
