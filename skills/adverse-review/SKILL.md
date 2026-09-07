@@ -320,9 +320,15 @@ unlabeled half, and refuses a half id in a file whose name names no half. What
 that buys is that a payload cannot disagree with its own path — it is **not**
 an unforgeable identity, and this section used to say it was. The authority
 holds only for an agent that writes the one path it was given, and every
-reviewer has a Write tool and a shared `$ADVERSE_RUN`. Closing it is the
-harness's job, not this check's: give each subagent a directory only it can
-write (Phase 0), and the filename becomes an identity again. `combine.mjs --plan`
+reviewer has a Write tool and a shared `$ADVERSE_RUN`. One author writing three
+files still renders `confidence: consensus`.
+
+Nothing in this Skill can close that, and Phase 0 does not: the run directory is
+shared **on purpose**, because the bridges glob it. Closing it needs a harness
+that can give each subagent a write sandbox of its own — then the filename is an
+identity again, and this check is the thing that enforces it. Until then, treat
+these guards as what they are: they stop a payload contradicting its own path,
+and they do not authenticate its author. `combine.mjs --plan`
 refuses a lane whose two halves claim one id or an id the plan never spawned.
 A half declaring its sibling's id would rule on its own finding as if it were
 the other half's — two characters, and consensus is counterfeit.
