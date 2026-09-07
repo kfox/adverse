@@ -738,3 +738,28 @@ test('a round-2 split lane is held to the same two ids', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a lane merged for the Phase 9 fold is not asked for split-half ids', () => {
+  const dir = freshTmp();
+  try {
+    // `--merge-personas` is also how SKILL.md Phase 9 folds one lane's verify
+    // and regression payloads, and neither verify.mjs nor regression.mjs writes
+    // an `agent` field. Driving the id check off `roster.merged` — which unions
+    // the plan's split lanes with the raw flag values — demanded
+    // `'auditor-<letter>'` from both legs and exited 1 on the documented flow,
+    // with a message calling a lane the plan declares `agents: 1` "a declared
+    // split lane". Only the plan can tell a missing half from a leg.
+    const a = reviewAs(dir, 'round1-auditor.verified.json',
+      { persona: 'auditor', verdict: 'conditional', summary: 'the verify leg', findings: [] });
+    const b = reviewAs(dir, 'round1-auditor.regression.json',
+      { persona: 'auditor', verdict: 'approve', summary: 'the regression leg', findings: [] });
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--merge-personas', 'auditor',
+      '--plan', splitPlan(dir, 1), '--out', out]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(personasIn(out), ['auditor']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

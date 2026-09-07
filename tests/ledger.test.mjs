@@ -1063,3 +1063,64 @@ test('a root-cause fix from an EARLIER report still says the fix left a symptom 
   assert.equal(a.adjudicated.sameReport, false);
   assert.match(a.adjudicated.note, /did not close every symptom/);
 });
+
+// --- the note ladder reads the disposition rather than inferring it ----------
+// Three rungs used to be selected by `disposition !== 'fixed'`, so every
+// disposition that was not `fixed` made whatever claim the rung it landed on
+// made. Narrowing the first symptom (a footnote announced as a failed fix) left
+// the shape in place one rung down: `noted` claimed identity at any match
+// strength, and an entry whose disposition is missing or unrecognized — which
+// `validateLedger` tolerates by design — claimed to be a fix agent's footnote.
+
+test('a weak noted match hedges instead of claiming it is this finding', () => {
+  // A `named_not_fixed` item may legitimately carry `line: null` (its schema
+  // says so), which matches every same-kind finding in the file at score 1.
+  // The identical `declined` entry hedges; this one used to say "NOTED this".
+  const noted = entry({ disposition: 'noted', line: null, severity: null,
+    title: 'the retry loop is unbounded', reason: 'out of scope for this batch' });
+  const elsewhere = finding({ line: 400, title: 'a completely different defect' });
+  const [f] = annotate([elsewhere], ledgerWith(noted));
+
+  assert.ok(f.adjudicated.matchScore < SETTLING_SCORE, 'a file-wide match, not an identity');
+  assert.equal(f.adjudicated.settled, false);
+  assert.match(f.adjudicated.note, /too weak to say it was THIS finding/);
+  assert.doesNotMatch(f.adjudicated.note, /NOTED this/);
+});
+
+test('a strong noted match still names the finding outright', () => {
+  const noted = entry({ disposition: 'noted', severity: null, reason: 'out of scope' });
+  const [f] = annotate([finding()], ledgerWith(noted));
+
+  assert.equal(f.adjudicated.matchScore, SETTLING_SCORE);
+  assert.match(f.adjudicated.note, /NOTED this and left it undecided/);
+});
+
+test('an entry with an unrecognized disposition claims no provenance', () => {
+  // `validateLedger` tests `!== undefined` before it tests membership, so an
+  // entry like this reaches `annotate`. It used to be announced as "a fix agent
+  // named it outside its own scope" — provenance invented for an entry whose
+  // provenance is exactly what is unknown. This is also the rung a fifth
+  // disposition lands on before it is given one of its own.
+  for (const disposition of ['bogus', undefined]) {
+    const [f] = annotate([finding()], ledgerWith(entry({ disposition })));
+    assert.equal(f.adjudicated.settled, false, `disposition ${disposition}`);
+    assert.match(f.adjudicated.note, /no disposition this tool recognizes/);
+    assert.doesNotMatch(f.adjudicated.note, /fix agent named it/);
+    assert.doesNotMatch(f.adjudicated.note, /recorded FIXED/i);
+  }
+});
+
+test('a noted entry carrying a group is called a note, not a decision', () => {
+  // `groupNote` selected its non-fixed branch the same way, so the group
+  // sentence said "That decision was taken on ..." immediately after the note
+  // beside it said the entry is not an adjudication and settles nothing.
+  const noted = entry({ disposition: 'noted', severity: null,
+    reason: 'out of scope', group: group() });
+  const [f] = annotate([finding()], ledgerWith(noted));
+
+  assert.match(f.adjudicated.note, /That note was made about root cause "G1"/);
+  assert.doesNotMatch(f.adjudicated.note, /That decision was taken on/);
+  // The settling dispositions keep the word they earned.
+  const [g] = annotate([finding()], ledgerWith(entry({ group: group() })));
+  assert.match(g.adjudicated.note, /That decision was taken on root cause "G1"/);
+});

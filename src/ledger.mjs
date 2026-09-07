@@ -426,8 +426,18 @@ function groupNote(group, disposition, { sameReport = false } = {}) {
   const where = `root cause ${JSON.stringify(group.id ?? '(unnamed)')} `
     + `(${JSON.stringify(group.title ?? '')}), covering ${group.citationCount} citation(s)`;
 
-  if (disposition !== 'fixed') {
+  if (isSettled(disposition)) {
     return ` That decision was taken on ${where}, not on this finding alone.`;
+  }
+  // A `noted` entry is a fix agent's footnote, not a ruling, and calling it
+  // "That decision" contradicted the sentence it is appended to — which says in
+  // as many words that it settles nothing. Same inference-from-`!== 'fixed'`
+  // shape as the rung below, one function apart.
+  if (disposition === 'noted') {
+    return ` That note was made about ${where}, not about this finding alone.`;
+  }
+  if (disposition !== 'fixed') {
+    return ` That entry covers ${where}, not this finding alone.`;
   }
   // A fix recorded against THIS report has not been re-observed — the report
   // predates it. The note this is appended to says exactly that, and appending
@@ -476,11 +486,34 @@ function matchNote(m, { settled, tooWeak, sameReport }) {
   // the channel — the measured alternative is two round-1 reviewers spending a
   // lane-pair's attention next iteration re-deriving a conclusion that was
   // already written down.
+  //
+  // Match strength is tested HERE and not by `tooWeak` above, which only ever
+  // sees a settling disposition. A `noted` item may legitimately carry
+  // `line: null` (the schema says so), so one footnote naming a file matched
+  // every same-kind finding in it at score 1 — and said "NOTED this" about all
+  // of them, where the identical `declined` entry hedges. An identity claim
+  // needs the same score the settling rungs demand before it may be made.
+  if (m.entry.disposition === 'noted') {
+    return m.score >= SETTLING_SCORE
+      ? 'An earlier pass NOTED this and left it undecided — a fix agent named it '
+        + 'outside its own scope. That is not an adjudication and settles nothing: '
+        + 'this finding is still open. The reasoning below is that agent\'s, shown '
+        + 'so you do not re-derive it; judge the finding on its merits.'
+      : 'An earlier pass NOTED something in this file and left it undecided, but '
+        + 'the match is too weak to say it was THIS finding — it may have been a '
+        + 'different one in the same file. Nothing is settled either way; the '
+        + 'reasoning below is shown only as context, and may not be about this.';
+  }
+  // Neither settled, nor noted, nor fixed. `validateLedger` tolerates an entry
+  // whose disposition is missing or unrecognized (it tests `!== undefined`
+  // first), and every such entry used to fall through to the NOTED rung and be
+  // announced as "a fix agent named it outside its own scope" — provenance
+  // invented for an entry whose provenance is precisely what is unknown. This
+  // is the rung a fifth disposition lands on until it is given one of its own.
   if (m.entry.disposition !== 'fixed') {
-    return 'An earlier pass NOTED this and left it undecided — a fix agent named it '
-      + 'outside its own scope. That is not an adjudication and settles nothing: '
-      + 'this finding is still open. The reasoning below is that agent\'s, shown '
-      + 'so you do not re-derive it; judge the finding on its merits.';
+    return 'An earlier entry matches this finding, but it records no disposition '
+      + 'this tool recognizes, so nothing can be inferred about what was decided '
+      + 'or by whom. Nothing is settled. Judge the finding on its merits.';
   }
   if (sameReport) {
     return 'Recorded FIXED against THIS report, which was produced before the '
