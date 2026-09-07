@@ -79,7 +79,7 @@ const MAX_FOLD_COMMITS = 64;
 const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
   + ' (--closed-by <persona>… | --closed-by-none) [--json]\n'
   + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
-  + ' [--refold] [--repo <dir>] [--ledger <ledger.json>]';
+  + ' [--refold] [--choice <lane-choice.json>]… [--repo <dir>] [--ledger <ledger.json>]';
 
 const { values, positionals } = parseBridgeArgs({
   prefix: 'regression',
@@ -91,6 +91,7 @@ const { values, positionals } = parseBridgeArgs({
     'closed-by-none': { type: 'boolean' },
     payload:          { type: 'string', multiple: true },
     outdir:           { type: 'string' },
+    choice:           { type: 'string', multiple: true },
     ledger:           { type: 'string' },
     refold:           { type: 'boolean' },
     json:             { type: 'boolean' },
@@ -454,6 +455,33 @@ function refuseKnownFolds(byPersona, outdir, { refold, repo }) {
   }
 }
 
+// A lane choice the choose mode printed, read back so the fold can stamp it on
+// the pass it covers. Nothing else records HOW the reviewing lane was picked,
+// and a fold produced after --closed-by-none used to be byte-identical to one
+// produced after a named exclusion list — the report could not say which.
+// The shape is this bridge's own --json output; a file that is not one is a
+// wrong path, not a variant.
+function readChoices(files) {
+  return files.map((src) => {
+    const c = readJson(src, 'regression');
+    requireKnownPersona(c?.persona, { prefix: 'regression', file: src, personas: DEFAULT_PERSONAS });
+    // No control characters in the commit: it is interpolated verbatim into
+    // this bridge's own stderr diagnostics, where an embedded escape or \r
+    // could rewrite what the operator sees on that line. No honest rev
+    // spelling contains one.
+    const ok = typeof c.commit === 'string' && c.commit && !c.commit.startsWith('-')
+      && !/[\x00-\x1f\x7f]/.test(c.commit)
+      && typeof c.reason === 'string' && typeof c.conflicted === 'boolean'
+      && ['declared-list', 'declared-none'].includes(c.disinterest);
+    if (!ok) {
+      process.stderr.write(`regression: ${src}: not a lane choice (expected the --json output`
+        + ' of the choose mode: commit, reason, conflicted, disinterest)\n');
+      process.exit(1);
+    }
+    return { ...c, src, matched: false };
+  });
+}
+
 // One file per LANE, not one per pass. An iteration lands several fix commits
 // and each gets its own pass, so one lane routinely runs more than one — and a
 // file per pass would either collide on the name or arrive at triage as a lane
@@ -507,6 +535,52 @@ function foldPayloads(sources, outdir, bound) {
   refuseKnownFolds(byPersona, outdir,
     { refold: values.refold === true, repo: values.repo ?? null });
 
+  // The lane choices, matched to passes by persona and (canonicalized) commit.
+  // Stamped by this bridge, never by the payload: the pass says what was found,
+  // the choice says who was picked to look and on whose word, and a pass with
+  // no choice on file says so rather than saying nothing. A choice whose lane
+  // does not match the pass's is the orchestrator having overridden the
+  // routing, which is exactly what must not pass silently — warned, and the
+  // pass stays unrecorded.
+  const choices = readChoices(values.choice ?? []);
+  // NOT makeCommitMatcher's repo-less fallback: staleness and stamping fail in
+  // opposite directions. There a loose prefix match refuses a fold, which is
+  // noisy; here it signs the wrong pass with another commit's audit record,
+  // which is silent — a 4-char spelling matched an unrelated pass outright.
+  // Without a repository to resolve spellings, two different strings are not
+  // provably one commit, so the fallback is exact equality, and a pass left
+  // unstamped says so in the lane summary.
+  const sameCommit = values.repo
+    ? makeCommitMatcher(values.repo)
+    : (priors, commit) => priors.has(commit);
+  for (const [persona, lane] of byPersona) {
+    for (const pass of lane.passes) {
+      const matches = choices.filter((c) => sameCommit(new Set([c.commit]), pass.commit));
+      if (!matches.length) continue;
+      if (matches.length > 1) {
+        process.stderr.write(`regression: ${matches.length} lane choices`
+          + ` (${matches.map((c) => c.src).join(', ')}) match the ${persona} pass on`
+          + ` ${pass.commit}, so stamping would guess which is on record — none stamped\n`);
+        continue;
+      }
+      const [match] = matches;
+      if (match.persona !== persona) {
+        process.stderr.write(`regression: lane choice ${match.src} picked ${match.persona}`
+          + ` for ${pass.commit}, but this pass was run by ${persona} — the routing was`
+          + ' overridden, so the choice is not stamped\n');
+        continue;
+      }
+      match.matched = true;
+      pass.laneChoice = {
+        disinterest: match.disinterest, conflicted: match.conflicted, reason: match.reason,
+      };
+    }
+  }
+  for (const c of choices.filter((x) => !x.matched)) {
+    process.stderr.write(`regression: lane choice ${c.src} (${c.persona}, ${c.commit})`
+      + ' matches no pass in this fold\n');
+  }
+
   // Queued, not written, for the same reason the refusal above is one decision
   // over all lanes: the publish is one event. bridge-io.mjs holds that ordering
   // for verify.mjs and repair.mjs too, and this is the fold whose comment they
@@ -520,13 +594,20 @@ function foldPayloads(sources, outdir, bound) {
       adjudicated += lane.findings.filter((f) => f.adjudicated).length;
     }
     const commits = lane.passes.map((p) => p.commit).join(', ');
+    // The choice state rides in the SUMMARY because the summary is the one
+    // string synthesize copies into the report — a field beside it would be a
+    // record nothing renders.
+    const unrecorded = lane.passes.filter((pass) => !pass.laneChoice).length;
+    const choiceNote = unrecorded === 0
+      ? ` (lane choice on record: ${[...new Set(lane.passes.map((pass) => pass.laneChoice.disinterest))].join(', ')})`
+      : ` (lane choice unrecorded for ${unrecorded} of ${lane.passes.length} pass(es))`;
     const out = {
       persona,
       // Derived, never judged — see the header. `conditional` and `approve` are
       // the only two reachable, the same pair verify.mjs derives when nothing
       // it verified is still open.
       verdict: lane.findings.length ? 'conditional' : 'approve',
-      summary: `regression pass on ${commits}: ${lane.findings.length} finding(s)`,
+      summary: `regression pass on ${commits}: ${lane.findings.length} finding(s)${choiceNote}`,
       provenance: PROVENANCE.regression,
       findings: lane.findings,
       passes: lane.passes,

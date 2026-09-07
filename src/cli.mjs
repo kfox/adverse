@@ -14,6 +14,7 @@ import {
   validatePhase2,
 } from './prompts.mjs';
 import { AgentRunner, runParallel } from './runner.mjs';
+import { agentNames, parsePlan, runLanes } from './scaling.mjs';
 import { renderMarkdown, synthesize, toJsonReport } from './synthesis.mjs';
 
 const HELP = `Usage: adverse <command> [options]
@@ -54,6 +55,9 @@ Options for 'synthesize':
   --skipped <persona=reason>  A lane deliberately not run (repeatable).
   --degraded <persona>     A lane that was tried and failed, not skipped (repeatable).
   --round2-skipped <reason>   Declare that round 2 did not run, and why.
+  --plan <path>            plan.mjs's plan.json. Every lane it ran must be
+                           accounted for by a payload, --skipped, or --degraded,
+                           or synthesize refuses. Optional.
 
 Exit codes:
   0  approve / conditional / hold
@@ -280,6 +284,7 @@ async function cmdSynthesize(rest) {
       skipped:    { type: 'string', multiple: true },
       degraded:   { type: 'string', multiple: true },
       'round2-skipped': { type: 'string' },
+      plan:       { type: 'string' },
       help:       { type: 'boolean', short: 'h' },
     },
     strict: true,
@@ -324,6 +329,39 @@ async function cmdSynthesize(rest) {
   // --degraded adversary records a lane that was TRIED and FAILED, which is not
   // the same as one deliberately skipped and must not be spelled the same way.
   const failedPersonas = (values.degraded ?? []).map((spec) => spec.split('=')[0]);
+
+  // --plan closes the gap between the run the plan describes and the run the
+  // payloads prove: a planned lane with no payload reviewed nothing, and
+  // "reviewed and found nothing" is the same input downstream as "never
+  // looked". The set subtraction is arithmetic the orchestrator was trusted to
+  // do by hand through --skipped/--degraded; with the plan on disk it is
+  // checked instead.
+  if (values.plan) {
+    let planned;
+    try {
+      planned = runLanes(parsePlan(readJsonArg(values.plan)).lanes);
+    } catch (e) {
+      die(`synthesize: --plan ${values.plan}: ${e.message}`);
+    }
+    const accounted = new Set([
+      ...Object.keys(round1),
+      ...skippedPersonas.map((s) => s.persona),
+      ...failedPersonas,
+    ]);
+    // A split lane is accounted under either spelling: combine.mjs unions its
+    // halves under the bare persona, while raw per-agent payloads and the
+    // --skipped/--degraded flags speak agentNames' persona-a/-b. Requiring one
+    // spelling false-refuses the other's fully reported lane.
+    const unaccounted = planned.flatMap((lane) => {
+      if (accounted.has(lane.persona)) return [];
+      return agentNames([lane]).filter((name) => !accounted.has(name));
+    });
+    if (unaccounted.length) {
+      die(`synthesize: the plan ran ${unaccounted.join(', ')} but no payload, --skipped, or`
+        + ' --degraded accounts for it — a lane that failed did not find nothing, it did not'
+        + ' look');
+    }
+  }
 
   // An EMPTY --round2-skipped value is a silent undeclared skip wearing a
   // declaration's clothes (an unset shell var expands to ""), so it is a

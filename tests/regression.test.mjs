@@ -187,17 +187,22 @@ test('called with no exclusion input at all, it refuses to answer', () => {
   'a caller that says both has not decided which');
 });
 
-test('the only way to exclude nobody is to say so, and the artifact says who said it', () => {
-  // The escape hatch has to stay distinguishable from the fail-open it
-  // replaced. A pass with nothing excluded may not print the sentence a
-  // CHECKED exclusion earns, because the two read identically in a report.
+test('both exclusion inputs are attributed to the caller, and the artifact says which', () => {
+  // A `closedBy` list is exactly as unchecked as `closesNothing` — nothing
+  // verifies the names against what was reported — so neither arm may print an
+  // asserted disinterest. The replaced sentence ("it reported none of the
+  // findings this commit closed") claimed a verification nothing ran: one
+  // wrong-but-well-formed name bought it.
   const declared = chooseRegressionLane({ ...ROUTINE, closesNothing: true });
-  const checked = chooseRegressionLane({ ...ROUTINE, closedBy: ['steward'] });
+  const named = chooseRegressionLane({ ...ROUTINE, closedBy: ['steward'] });
 
   assert.match(declared.reason, /the caller declared that this commit closes no finding/);
   assert.doesNotMatch(declared.reason, /it reported none of the findings/);
-  assert.match(checked.reason, /it reported none of the findings this commit closed/);
-  assert.doesNotMatch(checked.reason, /the caller declared/);
+  assert.equal(declared.disinterest, 'declared-none');
+  assert.match(named.reason, /the caller named 1 lane\(s\) as having reported into this commit/);
+  assert.doesNotMatch(named.reason, /it reported none of the findings/);
+  assert.doesNotMatch(named.reason, /the caller declared/);
+  assert.equal(named.disinterest, 'declared-list');
   assert.equal(declared.conflicted, false);
   assert.deepEqual(declared.unresolved, []);
 });
