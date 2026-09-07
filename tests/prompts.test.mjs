@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AUDITOR, PERSONAS } from '../src/personas.mjs';
 import {
   PHASE1_INSTRUCTIONS,
+  PHASE2_BRIEFING_INSTRUCTIONS,
   validateFix,
   validateRegression,
   validateVerify,
@@ -281,6 +282,17 @@ test('skill prompt files match their generators', async () => {
   const onDisk = readdirSync(skillPrompts).filter((n) => n.endsWith('.txt')).sort();
   assert.deepEqual(onDisk, [...expected.keys()].sort(),
     'prompts/ has a file no generator writes (or is missing one)');
+});
+
+test('round 2 is told an adjudicated finding is not always a decided one', () => {
+  // The block said "matches one already decided in an earlier iteration", which
+  // stopped being true when `noted` arrived: a fix agent's footnote is annotated
+  // exactly like a decision and adjudicates nothing. `settled` is the field
+  // that answers the question, so the prompt has to point at it.
+  assert.match(PHASE2_BRIEFING_INSTRUCTIONS,
+    /`adjudicated\.settled` is what tells you the question was actually decided/);
+  assert.match(PHASE2_BRIEFING_INSTRUCTIONS, /a `noted` one is\s+a fix agent's own footnote/);
+  assert.match(PHASE2_BRIEFING_INSTRUCTIONS, /the finding is still open/);
 });
 
 test('round-1 schema documents every kind', () => {

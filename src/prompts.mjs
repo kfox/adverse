@@ -216,10 +216,16 @@ your edge.
   with no line, a \`contract\` with no counterpart. That is a claim the reporter
   did not finish making. Judge the claim, not the label: if the finding is real,
   validate it and say what the missing anchor should be.
-- \`adjudicated\` marks a finding that matches one already decided in an earlier
-  iteration of this review, with the decision and its reason. Do not re-open a
+- \`adjudicated\` marks a finding that matches a ledger entry from an earlier
+  iteration of this review, with that entry and its reason. Do not re-open a
   settled question. Challenge it only if the fix that closed it did not actually
   close it, and say why.
+
+  \`adjudicated.settled\` is what tells you the question was actually decided,
+  and \`note\` says what to do. Not every entry is a decision: a \`noted\` one is
+  a fix agent's own footnote about something it left alone, which nobody
+  triaged and nobody adjudicated. It carries that agent's reasoning so you do
+  not re-derive it, and the finding is still open — judge it on its merits.
 
   \`adjudicated.group\` means the decision was taken on a **root cause**, not on
   this finding alone, and it names the other citations that decision covered.
