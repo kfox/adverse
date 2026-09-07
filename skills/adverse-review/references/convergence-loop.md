@@ -481,7 +481,10 @@ whose own verdict was `reject`.
 Pass `--briefing` (the previous iteration's, still on disk at this point) so a
 reopened finding keeps the severity, kind and anchor it was first reported
 with. Without it each one falls back to a blocking `warning`/`behavioral`:
-noisy rather than silent, and recoverable by passing the flag.
+noisy rather than silent, and recoverable by passing the flag. The inherited
+anchor also makes the reopened finding matchable by the ledger — a prior
+`declined` can settle it and a prior `fixed` flags it REGRESSED — both
+consequences of the anchor, not of the severity alone.
 
 The bridge binds by id and then by title, and the second route is not a
 convenience. `briefing.mjs` re-mints finding ids **positionally on every triage

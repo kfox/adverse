@@ -116,10 +116,12 @@ function rulingAgent(persona, payload, entry) {
 
 // ---------- Provenance ------------------------------------------------------
 //
-// "The fix introduced this" and "round 2 noticed this" are different facts, and
-// an operator reading a ranked list cannot act on the first without knowing
-// which it is. Both arrive as `added` findings — a regression found against a
-// commit that already landed IS the `added` shape, and giving it a parallel
+// "A fix commit's regression pass found this" and "round 2 noticed this" are
+// different facts, and an operator reading a ranked list cannot act on the
+// first without knowing which it is — the stamp records which pass found the
+// finding, never that the fix caused it; causation lives in the
+// classification. Both arrive as `added` findings — a regression found against
+// a commit that already landed IS the `added` shape, and giving it a parallel
 // channel would mean every consumer of `findings` had to learn about a second
 // one — so the distinction rides on the finding instead.
 //

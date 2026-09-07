@@ -254,21 +254,25 @@ export function assessScope({ files = [], diff = '' } = {}) {
   }
 
   const seen = new Set();
-  const record = (kind, signal, line) => {
-    if (seen.has(signal)) return;
-    seen.add(signal);
+  const record = (kind, signal, line, key = signal) => {
+    if (seen.has(key)) return;
+    seen.add(key);
     evidence.push({ kind, signal, sample: line.trim().slice(0, 120) });
   };
   // Every line over the limit is counted, not just the first — `record`
-  // deduplicates on the signal, so `evidence` holds at most one unreadable
-  // entry and a reason built from its length could only ever say "1 line".
-  // The comparison is already made per line, so the count is free.
+  // deduplicates on the key, so `evidence` holds at most one unreadable
+  // entry per scan and a reason built from its length could only ever say
+  // "1 line". The comparison is already made per line, so the count is free.
+  // The length signal keys per KIND where the patterns key globally: a removed
+  // over-long line is the bulk-deletion case the backstop exists for, and an
+  // added one earlier in the diff must not swallow it.
   let unreadable = 0;
   const scan = (lines, { kind, unreadableKind, signals }) => {
     for (const line of lines) {
       if (line.length > SPAN_LIMIT_CHARS) {
         unreadable += 1;
-        record(unreadableKind, UNREADABLE_LINE_SIGNAL, line);
+        record(unreadableKind, UNREADABLE_LINE_SIGNAL, line,
+          `${unreadableKind}:${UNREADABLE_LINE_SIGNAL}`);
       }
       for (const re of signals) {
         // A pattern that already fired cannot add evidence, and re-running it

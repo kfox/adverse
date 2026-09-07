@@ -352,6 +352,45 @@ test('--refold is how a deliberate re-read of the same commit says so', () => {
   }
 });
 
+test('two abbreviations of one commit are one staleness key', () => {
+  // The commit is supplied by the pass payload and REVISION admits any
+  // abbreviation length, so re-running the same commit under a longer sha used
+  // to slip the guard and re-sign the leftover as this iteration's evidence.
+  const dir = freshTmp();
+  try {
+    const files = { 'regression-adversary-1.json': pass({ commit: 'abc1234' }) };
+    assert.equal(fold(dir, files).status, 0);
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'),
+      JSON.stringify(pass({ commit: 'abc1234def5678abc1234def5678abc1234def56' })));
+    const again = run(['--payload', path.join(dir, 'regression-adversary-1.json'),
+                       '--outdir', dir]);
+    assert.equal(again.status, 2, again.stdout);
+    assert.match(again.stderr, /already folded/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with --repo, two spellings of one commit resolve to one staleness key', () => {
+  // The prefix fallback above cannot see that HEAD and its sha are one commit;
+  // the repository can.
+  const dir = gitRepo();
+  try {
+    const sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'],
+      { encoding: 'utf-8' }).trim();
+    const files = { 'regression-adversary-1.json': pass({ commit: 'HEAD' }) };
+    assert.equal(fold(dir, files).status, 0);
+    writeFileSync(path.join(dir, 'regression-adversary-1.json'),
+      JSON.stringify(pass({ commit: sha })));
+    const again = run(['--payload', path.join(dir, 'regression-adversary-1.json'),
+                       '--outdir', dir, '--repo', dir]);
+    assert.equal(again.status, 2, again.stdout);
+    assert.match(again.stderr, /already folded/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a lane file this fold cannot read is refused, rather than overwritten blind', () => {
   // The fold cannot tell which passes it would re-sign, which is the same
   // question the guard above answers — so it refuses in the same direction

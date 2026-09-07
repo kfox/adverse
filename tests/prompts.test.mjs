@@ -940,6 +940,22 @@ test('an enum value containing `$&` splices nothing into the classified schema',
   );
 });
 
+test('a schema the splice cannot reach is refused, not returned unchanged', () => {
+  // The replace pattern is anchored to end-of-string, so a schema shaped even
+  // slightly differently used to come back byte-identical — a schema with no
+  // classification member and no error, found by whoever cannot parse the
+  // payload it was asking for.
+  assert.throws(
+    () => PROMPTS.withClassification('{"a":1}', ['x']),
+    /does not end in the object close/,
+  );
+  assert.throws(
+    () => PROMPTS.withClassification('    {\n      "a": 1\n    }\n', ['x']),
+    /does not end in the object close/,
+    'a single trailing newline already puts the close out of reach',
+  );
+});
+
 // --- subagent definitions ----------------------------------------------------
 // `.claude/agents/<persona>.md` is what makes the agent list show "steward"
 // instead of a fourth indistinguishable "general-purpose" row. It embeds the

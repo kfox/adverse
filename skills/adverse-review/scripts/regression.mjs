@@ -76,7 +76,7 @@ const { PROVENANCE } = await importFromSrc('taxonomy.mjs');
 const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
   + ' (--closed-by <persona>… | --closed-by-none) [--json]\n'
   + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
-  + ' [--refold] [--ledger <ledger.json> --repo <dir>]';
+  + ' [--refold] [--repo <dir>] [--ledger <ledger.json>]';
 
 const { values, positionals } = parseBridgeArgs({
   prefix: 'regression',
@@ -339,14 +339,45 @@ function priorFold(dest) {
   }
 }
 
-function staleSources(byPersona, outdir) {
+// Two spellings of one commit must be one staleness key. REVISION admits any
+// abbreviation length and the commit is supplied by the pass payload, so the
+// one input this check keys on is chosen by the checked party: a re-run of the
+// same commit under a longer sha slipped past the guard and re-signed the
+// leftover as this iteration's evidence. With --repo, every spelling resolves
+// through the repository; without one, a hex prefix relationship is identity
+// and a symbolic rev can only match itself.
+function makeCommitMatcher(repo) {
+  if (!repo) {
+    const HEX = /^[0-9a-f]{4,40}$/;
+    return (priors, commit) => priors.has(commit)
+      || (HEX.test(commit) && [...priors].some((p) => HEX.test(p)
+        && (p.startsWith(commit) || commit.startsWith(p))));
+  }
+  const keys = new Map();
+  const canon = (rev) => {
+    if (!keys.has(rev)) {
+      try {
+        keys.set(rev, execFileSync('git',
+          ['-C', repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`],
+          { encoding: 'utf-8' }).trim());
+      } catch {
+        keys.set(rev, rev);
+      }
+    }
+    return keys.get(rev);
+  };
+  return (priors, commit) => [...priors].some((p) => canon(p) === canon(commit));
+}
+
+function staleSources(byPersona, outdir, repo) {
   const stale = [], unreadable = [], unwritable = [];
+  const sameCommit = makeCommitMatcher(repo);
   for (const [persona, lane] of byPersona) {
     const prior = priorFold(`${outdir}/round1-${persona}.regression.json`);
     if (prior.unreadable) unreadable.push(prior.unreadable);
     if (prior.unwritable) unwritable.push(prior.unwritable);
     lane.passes.forEach((pass, i) => {
-      if (prior.commits.has(pass.commit)) stale.push(`${lane.sources[i]} (${pass.commit})`);
+      if (sameCommit(prior.commits, pass.commit)) stale.push(`${lane.sources[i]} (${pass.commit})`);
     });
   }
   return { stale, unreadable, unwritable };
@@ -389,8 +420,8 @@ function plural(items, one, many) {
 // makes the stale list incomplete: a lane whose prior fold could not be parsed
 // has an empty folded-commit set, so its own passes cannot be recognized as
 // stale, and refusing on that list would present a subset as the whole.
-function refuseKnownFolds(byPersona, outdir, refold) {
-  const { stale, unreadable, unwritable } = staleSources(byPersona, outdir);
+function refuseKnownFolds(byPersona, outdir, { refold, repo }) {
+  const { stale, unreadable, unwritable } = staleSources(byPersona, outdir, repo);
 
   if (unwritable.length) {
     process.stderr.write(`regression: ${unwritable.join(', ')} `
@@ -458,7 +489,8 @@ function foldPayloads(sources, outdir, bound) {
   // Before anything is written, and for EVERY lane: a fold that refuses one
   // lane's stale pass after overwriting another lane's file has already
   // published half of what it refused.
-  refuseKnownFolds(byPersona, outdir, values.refold === true);
+  refuseKnownFolds(byPersona, outdir,
+    { refold: values.refold === true, repo: values.repo ?? null });
 
   // Queued, not written, for the same reason the refusal above is one decision
   // over all lanes: the publish is one event. bridge-io.mjs holds that ordering
