@@ -95,7 +95,17 @@ const REMOVED_LINE_SIGNALS = [
   // negated conditionals with no `!`/`not` token to match. `(?!=)` keeps a
   // plain `if (a != b)` comparison from reading as a negated guard; the
   // paren-required version alone missed the Python and Go guards verbatim.
-  /\bif\s*\(?\s*(!(?!=)|not\b)/,
+  //
+  // ONE bounded class where this read `\s*\(?\s*`. Two adjacent `\s*` over the
+  // same characters is the "three adjacent quantifiers over overlapping
+  // classes" the SQL signal above was rewritten for, and it was the worst
+  // instance in this file rather than an edge of it: a removed line of `if`
+  // plus padding cost 0.4 s at 16 KB, 1.7 s at 32 KB, 6.7 s at 64 KB and
+  // 26.9 s at 128 KB — 4x per doubling, and 16x the per-byte cost of the
+  // `if (…) throw` span below. A single class has one greedy path, so the
+  // bound is the only ceiling it needs. 16 is far past any real indentation
+  // between `if` and its negation, and past it the line is padding.
+  /\bif[\s(]{0,16}(!(?!=)|not\b)/,
   /\bunless\b/,
   // Bounded spans, for the reason the SQL signal above gives and by the same
   // shape: an unanchored `.*` before a required literal retries from every

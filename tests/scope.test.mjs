@@ -212,6 +212,11 @@ test('the removed-guard spans do not backtrack catastrophically', () => {
     ['if (…) return', 'if ('],          // the reporter's input, verbatim
     ['guard … else', 'guard x '],
     ['os.path.join(…)', 'os.path.join('],
+    // Not a `.*` span but the same class and the worst of them: `\s*\(?\s*`
+    // put two quantifiers over the same characters side by side, and a removed
+    // line of `if` plus padding cost 26.9 s at 128 KB — 16x the per-byte cost
+    // of the `if (…) throw` span, and 439 s for the pattern alone at 512 KB.
+    ['if + padding', 'if' + ' '.repeat(4095)],
   ]) {
     const body = unit.repeat((512 * 1024) / unit.length);
     const started = Date.now();
@@ -219,6 +224,23 @@ test('the removed-guard spans do not backtrack catastrophically', () => {
     const elapsed = Date.now() - started;
     assert.ok(elapsed < 1000, `${name}: 512 KB took ${elapsed}ms — the span is unbounded again`);
   }
+});
+
+test('the negated-condition signal still reads every spelling it was written for', () => {
+  // The bound replaced `\s*\(?\s*` with one class, so the shapes it has to keep
+  // matching are worth naming rather than trusting: C family, C family with no
+  // space, Go with no parens, Python's keyword, and an indented paren form.
+  for (const line of ['if (!ok)', 'if(!ok)', 'if !ok {', 'if not ok:', 'if   (   !ok)']) {
+    const r = assessScope({ files: ['src/render/widget.js'], diff: removedLine(line) });
+    assert.equal(r.recommend, 'run', line);
+    assert.ok(r.evidence.some((e) => e.signal.includes('!(?!=)|not')), line);
+  }
+  // And still not a plain comparison — `(?!=)` is what makes that hold, and a
+  // fixture without it cannot tell this pattern from `/\bif\s*\(/`.
+  const plain = assessScope({
+    files: ['src/render/widget.js'], diff: removedLine('if (a != b) recompute(a);'),
+  });
+  assert.equal(plain.recommend, 'skip', JSON.stringify(plain.evidence));
 });
 
 test('each bounded span still fires on the guard it was written for, alone', () => {

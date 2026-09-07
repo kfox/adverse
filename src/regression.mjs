@@ -68,9 +68,9 @@ for (const [name, order] of Object.entries(CANDIDATE_ORDER)) {
 // namespace would exclude the wrong lane, silently. Checked at module load for
 // the same reason CANDIDATE_ORDER is: a new lane should be a loud failure at
 // import, not a misrouted pass a month later.
-/* c8 ignore next 6 */
 for (const persona of DEFAULT_PERSONAS) {
   const shadowed = DEFAULT_PERSONAS.filter((p) => p !== persona && p.startsWith(`${persona}-`));
+  /* c8 ignore next 4 */
   if (shadowed.length) {
     throw new Error(`regression: persona '${persona}' prefixes ${shadowed.join(', ')},`
       + " so an agent id cannot say which lane it belongs to");
