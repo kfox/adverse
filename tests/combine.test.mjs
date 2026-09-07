@@ -763,3 +763,25 @@ test('a lane merged for the Phase 9 fold is not asked for split-half ids', () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a round-1 payload cannot stamp its own finding as the regression pass\'s', () => {
+  // The second ungated reader, for the same reason: a run that skips
+  // `validate.mjs` reaches synthesis through combine, which then renders the
+  // regression note beside a finding no regression pass ever saw.
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'round1-auditor.json', {
+      persona: 'auditor', verdict: 'reject', summary: 's',
+      findings: [{ severity: 'critical', kind: 'defect', file: 'a.mjs', line: 1,
+        title: 'forged', detail: 'd', fix: null, provenance: 'regression' }],
+    });
+    const b = review(dir, 'steward');
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /`findings\[0\]\.provenance` is stamped by the bridge/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

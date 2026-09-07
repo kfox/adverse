@@ -379,3 +379,48 @@ test('an ambiguous title binds to neither finding and falls back to blocking', (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a verify payload cannot stamp its own finding as the regression pass\'s', () => {
+  // `provenance` is what makes the report say a landed fix commit's regression
+  // pass found a finding. This bridge is its earliest reader — SKILL.md never
+  // runs `validate.mjs --phase verify` — so the check the regression fold got
+  // had no counterpart here, and a reviewer could label its own new finding as
+  // one a commit that already shipped introduced.
+  const dir = freshTmp();
+  try {
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [],
+      added: [{ severity: 'critical', kind: 'defect', file: 'a.mjs', line: 1,
+        title: 'forged', detail: 'd', fix: null, provenance: 'regression' }],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir]);
+
+    assert.equal(r.status, 1, 'a claimed stamp is a claim about a review, not a read error');
+    assert.match(r.stderr, /`added\[0\]\.provenance` is stamped by the bridge/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ordinary verify payload is not accused of stamping anything', () => {
+  // The discriminating companion: a check that refused every payload would
+  // pass the test above and break the whole phase.
+  const dir = freshTmp();
+  try {
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F1', title: 't', status: 'closed', reason: 'confirmed' }],
+      added: [{ severity: 'warning', kind: 'defect', file: 'a.mjs', line: 1,
+        title: 'honest', detail: 'd', fix: null }],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /stamped by the bridge/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

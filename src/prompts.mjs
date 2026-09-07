@@ -153,9 +153,8 @@ be told from the whole lane. If the filename names no half, or you were given
 no path to write to at all, then omit the key — or write your bare persona
 name, which asserts the same thing and is accepted too. Nothing else is: the
 validator derives the expected id from the filename and refuses a payload that
-disagrees with it, because the filename is the one part of your identity you
-did not write, and an id naming a lane you are not is a reviewer who does not
-exist.
+disagrees with it. Write the one path you were given, and nothing else: an id
+naming a lane you are not is a reviewer who does not exist.
 
 \`verdict\` rubric:
 - \`approve\` — nothing in your lane warrants blocking the change.
@@ -1082,8 +1081,10 @@ function validateFinding(f, label) {
 
 // `agent` must be the id the CALLER can prove this payload has, which is
 // `expected`: the identity read off the filename the orchestrator gave the
-// agent (skills/adverse-review/scripts/validate.mjs), the one string in a
-// payload's identity that no model wrote. With no expected id supplied the
+// agent (skills/adverse-review/scripts/validate.mjs), which binds the payload
+// to the path it landed under. Not an unforgeable identity — see that file's
+// header for what the authority does and does not cover, and why closing the
+// rest is the harness's job. With no expected id supplied the
 // persona IS the expectation — the unsplit lane, and the in-process runner in
 // src/cli.mjs, where one agent per persona means a half id is a claim about a
 // split that never happened.

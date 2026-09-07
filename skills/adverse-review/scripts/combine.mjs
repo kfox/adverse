@@ -34,8 +34,8 @@ import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 
 import { importFromSrc } from './package-root.mjs';
 
-const { mergeSplitCrossReviews, mergeSplitReviews, normalizeVerdict } =
-  await importFromSrc('synthesis.mjs');
+const { mergeSplitCrossReviews, mergeSplitReviews, normalizeVerdict,
+        stampedFieldClaim } = await importFromSrc('synthesis.mjs');
 const { checkRoster } = await importFromSrc('roster.mjs');
 const { isLaneAgent } = await importFromSrc('personas.mjs');
 const { agentNames } = await importFromSrc('scaling.mjs');
@@ -67,6 +67,21 @@ if (hasRound1 === hasRound2) {
 const inputs = [...(values.round1 ?? values.round2), ...positionals];
 const planLanes = values.plan ? readPlanLanes(values.plan, 'combine') : null;
 const payloads = inputs.map((src) => ({ src, payload: readJson(src, 'combine') }));
+
+// The second ungated reader of `provenance`, for the same reason verify.mjs was
+// the first: a run that skips `validate.mjs` reaches synthesis through here.
+// Measured: a `round1-<persona>.json` whose finding carried
+// `provenance: "regression"` combined clean and rendered the regression note.
+// Exit 1, not 2 — the file read fine and fails a claim about a review.
+const stampProblems = payloads
+  .map(({ src, payload }) => [src, stampedFieldClaim(payload)])
+  .filter(([, claim]) => claim);
+if (stampProblems.length) {
+  for (const [src, claim] of stampProblems) {
+    process.stderr.write(`combine: ${src}: ${claim}\n`);
+  }
+  process.exit(1);
+}
 
 // Who counts as a reviewer — src/roster.mjs, the same rules triage.mjs applies
 // to the same payloads one phase earlier.

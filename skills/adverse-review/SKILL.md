@@ -314,10 +314,15 @@ other's, so that a half's judgment on its sibling's work counts as the
 independent review it is. Both are needed and neither substitutes for the
 other. Omit `agent` on any lane that was not split.
 
-The id is checked against the **filename**, which is the only identity in a
-payload that no model wrote: `validate.mjs` refuses `round1-auditor-a.json`
-unless its `agent` is exactly `auditor-a`, refuses an unlabeled half, and
-refuses a half id in a file whose name names no half. `combine.mjs --plan`
+The id is checked against the **filename**: `validate.mjs` refuses
+`round1-auditor-a.json` unless its `agent` is exactly `auditor-a`, refuses an
+unlabeled half, and refuses a half id in a file whose name names no half. What
+that buys is that a payload cannot disagree with its own path — it is **not**
+an unforgeable identity, and this section used to say it was. The authority
+holds only for an agent that writes the one path it was given, and every
+reviewer has a Write tool and a shared `$ADVERSE_RUN`. Closing it is the
+harness's job, not this check's: give each subagent a directory only it can
+write (Phase 0), and the filename becomes an identity again. `combine.mjs --plan`
 refuses a lane whose two halves claim one id or an id the plan never spawned.
 A half declaring its sibling's id would rule on its own finding as if it were
 the other half's — two characters, and consensus is counterfeit.
@@ -1135,8 +1140,8 @@ stripped, so `regression-auditor-1.json` and `regression-auditor-2.json` both
 validate as the `auditor` lane, and a payload declaring a different `persona`
 than its filename is refused. That stripping is only done for this phase: a
 `-1` on a round-1 or round-2 file still implies a persona named `auditor-1` and
-is refused as an unknown lane, because there the basename is the agent's only
-unforgeable id. **Letters after the persona are halves, digits are passes** —
+is refused as an unknown lane, because there the basename is the only thing
+holding a payload to the path it was written to. **Letters after the persona are halves, digits are passes** —
 `regression-auditor-c.json` validates as half `c`, not as pass three.
 
 The reshape stamps each finding `provenance: "regression"`, and both renderers
@@ -1173,6 +1178,11 @@ Drop the second `--round1` line when no regression pass ran. If a lane both
 verified its own findings and ran a regression pass on someone else's fix
 commit, it arrives twice — add `--merge-personas <persona>`, which unions the
 findings and keeps the worse verdict, exactly as it does for a split lane.
+
+`regression.mjs --payload` refuses to fold a lane whose `round1-<persona>.regression.json`
+already names commits these passes do not, because that file is an earlier
+iteration's and re-folding it re-signs stale passes as this iteration's
+evidence. Pass `--refold` when re-reading the same passes is what you meant.
 
 `verify.mjs` validates each payload against the schema before anything trusts
 it — the same discipline every other leg of this flow already has — then

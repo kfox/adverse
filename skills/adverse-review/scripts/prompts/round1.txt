@@ -53,9 +53,8 @@ be told from the whole lane. If the filename names no half, or you were given
 no path to write to at all, then omit the key — or write your bare persona
 name, which asserts the same thing and is accepted too. Nothing else is: the
 validator derives the expected id from the filename and refuses a payload that
-disagrees with it, because the filename is the one part of your identity you
-did not write, and an id naming a lane you are not is a reviewer who does not
-exist.
+disagrees with it. Write the one path you were given, and nothing else: an id
+naming a lane you are not is a reviewer who does not exist.
 
 `verdict` rubric:
 - `approve` — nothing in your lane warrants blocking the change.

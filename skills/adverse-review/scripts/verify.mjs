@@ -52,6 +52,7 @@ import { makeWriteGuard, readJson, requireKnownPersona, usage } from './bridge-i
 import { importFromSrc } from './package-root.mjs';
 
 const { validateVerify } = await importFromSrc('prompts.mjs');
+const { stampedFieldClaim } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 const { KINDS, SEVERITIES } = await importFromSrc('taxonomy.mjs');
 
@@ -211,7 +212,16 @@ for (const src of values.verify) {
   // verdicts map — a re-cased or invented name would mint a phantom reviewer.
   requireKnownPersona(payload?.persona, { prefix: 'verify', file: src, personas: DEFAULT_PERSONAS });
 
-  const err = validateVerify(payload, payload.persona);
+  const err = validateVerify(payload, payload.persona)
+    // `provenance` is what makes the report say a fix commit's regression pass
+    // found a finding, and this bridge is its EARLIEST reader: SKILL.md never
+    // runs `validate.mjs --phase verify`, so the check the regression fold got
+    // has no counterpart on this path. Measured before this line existed: an
+    // `added` entry carrying `provenance: "regression"` validated clean, exit
+    // 0, and the key rode into `round1-<persona>.verified.json` verbatim — a
+    // reviewer labelling its own new finding as one a landed commit
+    // introduced, in the tool's own voice.
+    ?? stampedFieldClaim(payload);
   if (err) {
     process.stderr.write(`verify: ${src}: ${err}\n`);
     process.exit(1);
