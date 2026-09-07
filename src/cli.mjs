@@ -113,10 +113,16 @@ async function cmdReview(rest) {
       'single-round':  { type: 'boolean' },
       'save-artifacts': { type: 'string' },
       verbose:         { type: 'boolean', short: 'v' },
+      help:            { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
     strict: true,
   });
+
+  if (values.help) {
+    process.stdout.write(HELP);
+    return 0;
+  }
 
   const target = path.resolve(positionals[0] ?? '.');
   const agentCmd = values.agent ?? process.env.ADVERSE_AGENT ?? 'claude -p';
@@ -274,9 +280,14 @@ async function cmdSynthesize(rest) {
       skipped:    { type: 'string', multiple: true },
       degraded:   { type: 'string', multiple: true },
       'round2-skipped': { type: 'string' },
+      help:       { type: 'boolean', short: 'h' },
     },
     strict: true,
   });
+  if (values.help) {
+    process.stdout.write(HELP);
+    return 0;
+  }
   if (!values.round1) die('synthesize: --round1 is required');
   const round1 = readJsonArg(values.round1);
   const round2 = values.round2 ? readJsonArg(values.round2) : {};
@@ -350,8 +361,7 @@ function cmdPersonas() {
 export async function main(argv = process.argv.slice(2)) {
   const cmd = argv[0];
   const rest = argv.slice(1);
-  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h'
-      || rest.includes('--help') || rest.includes('-h')) {
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
     process.stdout.write(HELP);
     return cmd ? 0 : 2;
   }

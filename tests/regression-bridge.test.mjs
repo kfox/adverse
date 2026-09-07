@@ -352,6 +352,27 @@ test('--refold is how a deliberate re-read of the same commit says so', () => {
   }
 });
 
+test('a fold naming more distinct commits than one run produces is refused', () => {
+  // The staleness check resolves each distinct commit spelling through git and
+  // the payload-file count is the one input nothing else bounds, so a glob over
+  // more than one run's files became a subprocess-per-file loop before it
+  // became a wrong answer. One iteration's passes name a handful of commits.
+  const dir = freshTmp();
+  try {
+    const files = {};
+    for (let i = 0; i < 65; i++) {
+      files[`regression-adversary-${i + 1}.json`] =
+        pass({ commit: `abc${String(i).padStart(4, '0')}` });
+    }
+    const r = fold(dir, files);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /65 distinct commits/);
+    assert.match(r.stderr, /more than one run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('two abbreviations of one commit are one staleness key', () => {
   // The commit is supplied by the pass payload and REVISION admits any
   // abbreviation length, so re-running the same commit under a longer sha used

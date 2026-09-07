@@ -28,9 +28,11 @@ export const SEVERITIES = Object.freeze(['critical', 'warning', 'info']);
 // Which pass produced a finding. `review` is an ordinary review round;
 // `regression` is the read-only pass a lane that did not report the finding
 // runs over a fix commit that already landed (src/regression.mjs). The axis
-// exists because "the fix introduced this" and "round 2 noticed this" are
-// different facts and an operator reading a ranked list cannot act on the first
-// without knowing which it is.
+// exists because "a fix commit's regression pass found this" and "round 2
+// noticed this" are different facts and an operator reading a ranked list
+// cannot act on the first without knowing which it is — the stamp records
+// which pass found the finding, never that the fix caused it; causation lives
+// in the classification.
 //
 // Here rather than in synthesis.mjs for the same reason ADVISORY_KINDS is here:
 // both renderers have to ask the question, and neither should learn the answer

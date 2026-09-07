@@ -16,9 +16,10 @@
 //
 // The reshape stamps `provenance: "regression"` on every finding it emits.
 // Synthesis reads that off the entry (src/synthesis.mjs) and both renderers
-// print it, because "the fix introduced this" is a different fact from "round 2
-// noticed this" and an operator working a ranked list cannot act on the first
-// without knowing which it is.
+// print it, because "a fix commit's regression pass found this" is a different
+// fact from "round 2 noticed this" and an operator working a ranked list cannot
+// act on the first without knowing which it is. The stamp never claims the fix
+// CAUSED the finding — causation lives in the classification.
 //
 // The verdict is DERIVED, never judged. This pass casts no vote on the change —
 // it answers one question about one commit — but every downstream consumer
@@ -69,6 +70,8 @@ const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 const { stampedFieldClaim } = await importFromSrc('synthesis.mjs');
 const { PROVENANCE } = await importFromSrc('taxonomy.mjs');
 
+const MAX_FOLD_COMMITS = 64;
+
 // Positionals are payloads, so `--payload run/regression-*.json` works — the
 // same reason triage.mjs and verify.mjs accept them: strict parsing without
 // this throws on the second path the shell expands, and the glob is the obvious
@@ -100,7 +103,9 @@ const payloads = [...(values.payload ?? []), ...positionals];
 
 if (payloads.length) {
   if (!values.outdir) usage(USAGE);
-  if (values.ledger && !values.repo) usage(USAGE);
+  if (values.ledger && !values.repo) {
+    usage(`regression: --ledger requires --repo, the repository the ledger is bound to\n${USAGE}`);
+  }
   foldPayloads(payloads, values.outdir, values.ledger
     ? loadBoundLedger(values.ledger, path.resolve(values.repo)) : null);
 } else if (values.commit) {
@@ -353,17 +358,13 @@ function makeCommitMatcher(repo) {
       || (HEX.test(commit) && [...priors].some((p) => HEX.test(p)
         && (p.startsWith(commit) || commit.startsWith(p))));
   }
+  // resolveRef owns the invocation and its SAFE_REF gate; the memo here only
+  // keeps this one-shot fold from re-spawning for a spelling it already asked
+  // about, unresolvable ones included — the repository does not change under a
+  // single fold.
   const keys = new Map();
   const canon = (rev) => {
-    if (!keys.has(rev)) {
-      try {
-        keys.set(rev, execFileSync('git',
-          ['-C', repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`],
-          { encoding: 'utf-8' }).trim());
-      } catch {
-        keys.set(rev, rev);
-      }
-    }
+    if (!keys.has(rev)) keys.set(rev, resolveRef(repo, rev) ?? rev);
     return keys.get(rev);
   };
   return (priors, commit) => [...priors].some((p) => canon(p) === canon(commit));
@@ -484,6 +485,20 @@ function foldPayloads(sources, outdir, bound) {
     lane.passes.push({ commit: payload.commit, checked: payload.checked });
     lane.sources.push(src);
     byPersona.set(payload.persona, lane);
+  }
+
+  // The staleness check resolves each distinct commit spelling through git, and
+  // the number of payload files is the one input nothing else bounds — each
+  // spelling is model-written. An iteration's passes name a handful of fix
+  // commits, so a fold naming more than this is a glob over more than one run's
+  // files, refused before it becomes a subprocess-per-file loop.
+  const distinctCommits = new Set(
+    [...byPersona.values()].flatMap((lane) => lane.passes.map((p) => p.commit)));
+  if (distinctCommits.size > MAX_FOLD_COMMITS) {
+    process.stderr.write(`regression: these payloads name ${distinctCommits.size} distinct`
+      + ` commits; one iteration's passes name a handful (limit ${MAX_FOLD_COMMITS}), so this`
+      + ' glob is reading more than one run\'s files — narrow it or clean the outdir\n');
+    process.exit(2);
   }
 
   // Before anything is written, and for EVERY lane: a fold that refuses one

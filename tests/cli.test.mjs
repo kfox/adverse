@@ -332,3 +332,21 @@ test('--help on a subcommand prints usage at exit 0, and a parse refusal is exit
   assert.match(refusal.stderr, /Usage: adverse/);
   assert.doesNotMatch(refusal.stderr, /at .*parse_args/);
 });
+
+test('help is an option the parser owns, not a substring scanned out of argv', () => {
+  // The first cut scanned the raw argv for --help/-h, so any option VALUE equal
+  // to -h silently skipped the run and exited 0 — on a CI gate whose exit-code
+  // contract reads 0 as "reviewed, clean". Each shape below must refuse loudly
+  // or run; none may print help and exit 0.
+  const value = runCli(['synthesize', '--round1', '/nonexistent', '--out', '-h']);
+  assert.equal(value.status, 2, `${value.stdout}${value.stderr}`);
+  assert.doesNotMatch(value.stdout, /^Usage: adverse/);
+
+  const diff = runCli(['review', '--diff', '-h']);
+  assert.equal(diff.status, 2, `${diff.stdout}${diff.stderr}`);
+  assert.doesNotMatch(diff.stdout, /^Usage: adverse/);
+
+  const unknown = runCli(['bogus', '--help']);
+  assert.equal(unknown.status, 2, unknown.stdout);
+  assert.match(unknown.stderr, /unknown command: bogus/);
+});
