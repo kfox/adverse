@@ -20,8 +20,12 @@ const SCRIPTS = path.join('skills', 'adverse-review', 'scripts');
 const { isProcessEntry, runInstead } = await import(
   pathToFileURL(path.join(ROOT, 'src', 'entryGuard.mjs')).href);
 
+// Recursive: the rule is about every module in the tree, and a plain
+// readdirSync stops at the top level — so the first module anyone files under a
+// src/ subdirectory would be exempt from a test whose whole promise is that it
+// covers modules written after it.
 function mjsIn(dir) {
-  return readdirSync(path.join(ROOT, dir))
+  return readdirSync(path.join(ROOT, dir), { recursive: true })
     .filter((name) => name.endsWith('.mjs'))
     .map((name) => path.join(dir, name));
 }
@@ -55,7 +59,7 @@ test('the refusal names the entry point the caller meant', () => {
   // nothing.
   assert.match(run(path.join('src', 'cli.mjs')).stderr, /node bin\/adverse\.mjs/);
   assert.match(run(path.join('src', 'triage.mjs')).stderr,
-    /node skills\/adverse-review\/scripts\/triage\.mjs/);
+    /Did you mean skills\/adverse-review\/scripts\/triage\.mjs\?/);
   assert.match(run(path.join('src', 'taxonomy.mjs')).stderr,
     /entry points are bin\/adverse\.mjs and skills\/adverse-review\/scripts/);
   assert.match(run(path.join(SCRIPTS, 'package-root.mjs')).stderr,
@@ -81,15 +85,12 @@ test('the guard does not fire when a library is imported', () => {
   assert.match(r.stdout, /auditor/);
 });
 
-test('a suggestion is only made for a sibling that is runnable', () => {
-  // `runInstead` answers from the filesystem, not from a list of bridge names
-  // kept in step by hand. Two of the four cases are why it tests for a shebang
-  // rather than for existence: the bridge directory holds two LIBRARIES, so a
-  // src/ module named after one of them would be answered with a path that
-  // refuses in exactly the same way, and bridge-io.mjs run directly would be
-  // answered with itself.
-  assert.match(runInstead(path.join(ROOT, 'src', 'collect.mjs')), /scripts\/collect\.mjs/);
-  assert.match(runInstead(path.join(ROOT, 'src', 'package-root.mjs')), /^The entry points/);
+test('a sibling is suggested only when there is one, and never the file itself', () => {
+  // `runInstead` answers from the filesystem rather than from a list of bridge
+  // names kept in step by hand. The middle case is the one that needs the
+  // self-comparison: bridge-io.mjs is a library that lives among the bridges,
+  // and a bare existence test answers a direct run of it with itself.
+  assert.match(runInstead(path.join(ROOT, 'src', 'collect.mjs')), /scripts\/collect\.mjs\?/);
   assert.match(runInstead(path.join(ROOT, SCRIPTS, 'bridge-io.mjs')), /^The entry points/);
   assert.match(runInstead(path.join(ROOT, 'src', 'no-such-bridge.mjs')), /^The entry points/);
 });

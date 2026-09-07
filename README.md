@@ -143,7 +143,7 @@ The `--agent` flag accepts any command that reads a prompt from stdin and writes
 |---|---|
 | 0 | Review completed; verdict was approve, conditional, or hold |
 | 1 | Review completed; verdict was reject |
-| 2 | Bad arguments (target missing, unknown persona, etc.) |
+| 2 | Bad arguments (target missing, unknown persona, etc.), or a library module under `src/` was run directly |
 | 3 | Fewer than 2 reviewers produced valid output — synthesis aborted |
 
 Code 1 is what you wire into a CI gate.

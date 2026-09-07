@@ -35,8 +35,9 @@ export function importFromSrc(moduleFile) {
 // the same silent no-op src/entryGuard.mjs refuses for every module under src/
 // (kfox/adverse#71). It cannot use that guard: importing it means resolving a
 // path through the very `src/` this file exists to locate, which is the
-// MODULE_NOT_FOUND failure it was written to replace. Same message shape, and
-// the test probes this file through the same rule as the other libraries.
+// MODULE_NOT_FOUND failure it was written to replace. Same message shape, same
+// exit code (entryGuard.mjs's NOT_AN_ENTRY_POINT, which it cannot import
+// either), and the test probes this file through the same rule as the others.
 //
 // `process.argv[1]` is the string the caller typed — normally through the
 // installed symlink — while `import.meta.url` is already canonical, so the

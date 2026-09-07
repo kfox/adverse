@@ -17,7 +17,7 @@
 // would resolve its promise and exit 0 on a BLOCK verdict unless it duplicated
 // that wiring. One place knows how this program exits.
 
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -53,31 +53,27 @@ export function isProcessEntry(moduleUrl) {
   return !!entry && realOrSelf(entry) === realOrSelf(fileURLToPath(moduleUrl));
 }
 
-// A shebang is what makes a file an entry point here, so the suggestion is
-// checked against one rather than against a list of bridge names kept in step
-// by hand. bridge-io.mjs and package-root.mjs are libraries sitting IN the
-// bridge directory: an existence test alone sends the caller back to the file
-// they just ran.
-function isRunnable(filePath) {
-  try {
-    return readFileSync(filePath, 'utf-8').startsWith('#!');
-  } catch {
-    return false;
-  }
-}
-
 // What the caller meant. A src/ module sharing a basename with a bridge is the
 // likely miss; cli.mjs is the one the binary wraps; anything else gets the
-// general rule rather than a guess.
+// general rule rather than a guess. The sibling is offered as a question and
+// the rule is stated after it, so the message stays true even for a name that
+// belongs to one of the two LIBRARIES living in the bridge directory.
+//
+// `existsSync` is a stat and is deliberately not a read. This path is derived
+// from the caller's argv and points into an installed package tree; opening it
+// would block forever on a FIFO planted there, which is worse than the silent
+// exit 0 this whole guard replaces — src/fsSafe.mjs's header records that
+// happening to the triage bridge. Nothing here needs the bytes.
 export function runInstead(modulePath) {
   const name = path.basename(modulePath);
   if (name === 'cli.mjs') {
     return 'Run `node bin/adverse.mjs <command>` instead (or the installed `adverse`).';
   }
   const bridge = path.join(BRIDGE_DIR, name);
-  if (bridge !== modulePath && isRunnable(bridge)) {
-    return `Run \`node skills/adverse-review/scripts/${name}\` instead`
-      + ' — the runnable bridge of the same name.';
+  if (bridge !== modulePath && existsSync(bridge)) {
+    return `Did you mean skills/adverse-review/scripts/${name}?`
+      + ' The entry points are bin/adverse.mjs and the shebang scripts under'
+      + ' skills/adverse-review/scripts/.';
   }
   return 'The entry points are bin/adverse.mjs and skills/adverse-review/scripts/*.mjs.';
 }
