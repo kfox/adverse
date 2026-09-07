@@ -1223,6 +1223,55 @@ test('the stamp a bridge applies is refused from a payload, wherever it is writt
   assert.equal(stampedFieldClaim(null), null, 'an unreadable payload is the schema\'s to refuse');
 });
 
+test('a payload-chosen key is bounded before it reaches the operator', () => {
+  // The sink is not only a terminal: SKILL.md tells the orchestrator to append
+  // this line to the retry prompt it sends the agent. Measured before the
+  // bound: a 2.16 MB key produced a single 2,160,328-byte stderr message.
+  const key = 'k'.repeat(2_000_000);
+  const claim = stampedFieldClaim({ persona: 'auditor', [key]: [{ provenance: 'regression' }] });
+
+  assert.ok(claim.length < 1000, `the claim is ${claim.length} bytes`);
+  assert.match(claim, /\[clipped\]/, 'and it says it was clipped rather than just ending');
+
+  // Control: an honest key is named in full and not clipped, which is the
+  // property the existing messages pin.
+  const honest = stampedFieldClaim({ persona: 'auditor', findings: [{ provenance: 'x' }] });
+  assert.match(honest, /findings\[0\]\.provenance/);
+  assert.doesNotMatch(honest, /clipped/);
+});
+
+test('an off-vocabulary kind cannot open markup in the tool\'s own headline', () => {
+  // `coerceKind` only trims and defaults — an unrecognized kind is preserved on
+  // purpose so it still blocks — so the field carries arbitrary payload text
+  // into a `###` heading, where `]**` can be closed and markup opened after it.
+  const hostile = '](http://evil.example)';
+  const report = renderMarkdown(synthesize({
+    auditor: { persona: 'auditor', verdict: 'reject', summary: 's',
+      findings: [{ severity: 'critical', kind: hostile, file: 'a.mjs', line: 1,
+        counterpart: null, title: 'a real finding', detail: 'd', fix: null }] },
+  }, {}));
+
+  // Asserted on the heading line, and asserted as PRESENT-inside-a-code-span
+  // rather than absent: the neutralized form still contains the raw substring,
+  // so a `doesNotMatch` on it fails against the working fix.
+  const heading = report.split('\n').find((l) => l.startsWith('### '));
+  assert.ok(heading, 'no finding heading was rendered');
+  assert.match(heading, /`\]\(http:\/\/evil\.example\)`/,
+    'the link syntax reaches the heading, so it has to arrive inside a code span');
+
+  // Controls, and they are the reason this is not just `verbatim(f.kind)`:
+  // a known kind and the tool's own `unclassified` both render bare, so every
+  // honest report is byte-identical to before.
+  for (const kind of ['defect', 'behavioral', 'contract']) {
+    const r = renderMarkdown(synthesize({
+      auditor: { persona: 'auditor', verdict: 'reject', summary: 's',
+        findings: [{ severity: 'critical', kind, file: 'a.mjs', line: 1,
+          counterpart: null, title: 't', detail: 'd', fix: null }] },
+    }, {}));
+    assert.match(r, new RegExp(`\\*\\*\\[CRITICAL·${kind}\\]\\*\\*`), kind);
+  }
+});
+
 test('provenance rides on the entry too — a merged payload has one header for two lists', () => {
   // mergeSplitReviews unions two payloads' findings under one header, so a
   // marker that lived only on the header would be dropped by exactly the merge

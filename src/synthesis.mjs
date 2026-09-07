@@ -34,7 +34,7 @@
 // enough (not advisory, not `info`) to hold a change open.
 
 import { isLaneAgent } from './personas.mjs';
-import { ADVISORY_KINDS, GROUP_RULINGS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
+import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
          assertCoversStatuses } from './taxonomy.mjs';
 
 // Verdict → score mapping. The natural symmetric choice: approve and reject
@@ -171,8 +171,22 @@ const BRIDGE_STAMPED_FIELD = 'provenance';
 // Quoting only the odd ones on purpose: the message's job is to NAME the field,
 // and the tests pin that (`findings[1].provenance`). Quoting unconditionally
 // made every honest message read `"findings"[1].provenance`.
+//
+// Bounded as well as quoted, because the sink is not only a terminal: SKILL.md
+// tells the orchestrator to append this bridge's stderr line to the retry
+// prompt it sends the agent. Measured before the bound: a 2.16 MB key produced
+// a single 2,160,328-byte stderr message in 0.05 s. `MAX_REASON_CHARS` in
+// src/ledger.mjs bounds ledger text for exactly this reason; the length here is
+// its own constant rather than an import, since a field NAME needs far less
+// room than a sentence and one number serving two purposes is how the next one
+// drifts.
 const PLAIN_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
-const nameKey = (key) => (PLAIN_KEY.test(key) ? key : JSON.stringify(key));
+const MAX_KEY_CHARS = 80;
+const nameKey = (key) => {
+  const clipped = key.length > MAX_KEY_CHARS
+    ? `${key.slice(0, MAX_KEY_CHARS)}… [clipped]` : key;
+  return PLAIN_KEY.test(clipped) ? clipped : JSON.stringify(clipped);
+};
 
 function payloadStampSite(payload) {
   if (BRIDGE_STAMPED_FIELD in payload) return BRIDGE_STAMPED_FIELD;
@@ -757,8 +771,9 @@ function consensusLabel(score, verdicts) {
 // line through them rather than escaping whatever the last incident named:
 //
 //   NAMES A THING -> verbatim. A persona, an agent, a verdict, a finding or
-//   group id, a `file`, a `line`, a `counterpart`, a ruling, and the one-line
-//   `summary` the tool signs. None of these has any legitimate markup in it,
+//   group id, a `file`, a `line`, a `counterpart`, a ruling, an off-vocabulary
+//   `kind`, and the one-line `summary` the tool signs. None of these has any
+//   legitimate markup in it,
 //   and the summary is the position where the tool wraps its OWN sentence
 //   around payload data, so a construct that renders differently than it was
 //   recorded is a lie about the run. `verbatim` below is the whole rule.
@@ -1078,7 +1093,19 @@ function renderFinding(f) {
   const marker = SEVERITY_MARKER[f.severity] ?? '·';
   let loc = '';
   if (f.file) loc = ` — ${verbatim(`${f.file}${f.line !== null ? `:${f.line}` : ''}`)}`;
-  const out = [`### ${marker} **[${f.severity.toUpperCase()}·${f.kind}]** ${f.title}${loc}`];
+  // `kind` was in neither list above, and it is not prose. `coerceKind` only
+  // trims and defaults, deliberately — an unrecognized kind is preserved so it
+  // still blocks (src/taxonomy.mjs) — so the field carries arbitrary payload
+  // text into the tool's own headline, where `]**` can be closed and markup
+  // opened after it. A known kind renders exactly as before, so every honest
+  // report is byte-identical; only the off-vocabulary case is neutralized, and
+  // it is the case that was never supposed to be readable prose anyway.
+  //
+  // `UNCLASSIFIED` counts as known: `coerceKind` MINTS that value, so it is the
+  // tool's own word rather than the payload's. Neutralizing it code-spanned a
+  // string no payload chose, which an existing test caught.
+  const kind = f.kind === UNCLASSIFIED || KINDS.includes(f.kind) ? f.kind : verbatim(f.kind);
+  const out = [`### ${marker} **[${f.severity.toUpperCase()}·${kind}]** ${f.title}${loc}`];
   out.push('');
   out.push(`_Reported by: ${f.reporters.map(verbatim).join(', ')} · confidence: ${f.confidence}${
     f.provenance === PROVENANCE.regression ? ` · ${REGRESSION_NOTE}` : ''}_`);
