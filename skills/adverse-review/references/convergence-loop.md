@@ -192,9 +192,9 @@ someone else would have to be briefed on.
 Then check what landed and fold it, the same way round 1 is checked:
 
 ```bash
-node ${SKILL_DIR}/scripts/validate.mjs --phase fix "$ADVERSE_RUN"/fix-*.json
+node ${SKILL_DIR}/scripts/validate.mjs --phase fix "$ADVERSE_RUN"/*/fix-*.json
 
-node ${SKILL_DIR}/scripts/decisions.mjs --fix "$ADVERSE_RUN"/fix-*.json \
+node ${SKILL_DIR}/scripts/decisions.mjs --fix "$ADVERSE_RUN"/*/fix-*.json \
     --out "$ADVERSE_RUN"/decisions.json
 ```
 
@@ -275,7 +275,7 @@ that persona's system prompt and:
 1. `${SKILL_DIR}/scripts/prompts/verify.txt`
 2. the briefing entries for its own findings, plus the ledger decisions
 3. the fix diff: `git diff <commit before fixes>..HEAD`
-4. the path to write its own JSON object to: `$ADVERSE_RUN/verify-<persona>.json`
+4. the path to write its own JSON object to: `$ADVERSE_RUN/<persona>/verify-<persona>.json`
 
 Verification uses the **original reporter's** persona, not a dedicated
 verifier: judging whether a finding is closed needs the lens that produced it.
@@ -353,7 +353,7 @@ Spawn one subagent, with that persona's system prompt and:
 2. **the repository's own constraint block** — the same one the fix agents got
 3. the fix commit's diff: `git show <fix-sha>`, and what it was written to close
 4. the path to write its own JSON object to:
-   `$ADVERSE_RUN/regression-<persona>-<pass number>.json`
+   `$ADVERSE_RUN/<persona>/regression-<persona>-<pass number>.json`
 
 **The pass number is a digit, and it is not optional when a lane runs more than
 one pass.** This phase is per fix commit and a lane routinely reads several in
@@ -406,9 +406,9 @@ Then fold every pass of the iteration in one call, and feed the result to triage
 beside the verifications:
 
 ```bash
-node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/regression-*.json
+node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/*/regression-*.json
 
-node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/regression-*.json \
+node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/*/regression-*.json \
     --outdir "$ADVERSE_RUN" ${LEDGER:+--ledger "$LEDGER" --repo .}
 ```
 
@@ -449,7 +449,7 @@ Feed `verified` + `added` back through triage → synthesize → Phase 7, with t
 ledger attached, and loop:
 
 ```bash
-node ${SKILL_DIR}/scripts/verify.mjs --verify "$ADVERSE_RUN"/verify-*.json \
+node ${SKILL_DIR}/scripts/verify.mjs --verify "$ADVERSE_RUN"/*/verify-*.json \
     --outdir "$ADVERSE_RUN" --briefing "$ADVERSE_RUN"/briefing.json
 
 node ${SKILL_DIR}/scripts/triage.mjs \

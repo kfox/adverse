@@ -254,8 +254,9 @@ one per persona — two for a lane the plan split. Each gets:
   - the gate summary `$GATE`, with the instruction **not** to report anything
     those tools already prove;
   - the exact path to **write its own JSON object to** with the Write tool —
-    `$ADVERSE_RUN/round1-<persona>.json` (`-a`/`-b` for a split lane) — not to
-    reply with the JSON in chat.
+    `$ADVERSE_RUN/<agent>/round1-<agent>.json`, where `<agent>` is the persona
+    (`-a`/`-b`-suffixed for a split lane's halves) — its own subdirectory, and
+    not a reply with the JSON in chat. The Write tool creates the directory.
 - **Model**: `opus` unless the user asked otherwise. If the user picks a smaller
   model, pass it to every persona — mixing models across personas defeats the
   single-model design. That rule is about the panel, whose whole method is one
@@ -295,21 +296,19 @@ holds only for an agent that writes the one path it was given, and every
 reviewer has a Write tool and a shared `$ADVERSE_RUN`. One author writing three
 files still renders `confidence: consensus`.
 
-What is missing to close it is **enforcement, not layout.** The bridges do not
-require one shared directory — they take the paths you hand them, so
-`combine.mjs --round1 "$ADVERSE_RUN"/*/round1-*.json` works with each agent
-writing into `$ADVERSE_RUN/<agent>/` of its own, and `validate.mjs` still binds
-each payload to its basename. Only the flat globs written in Phase 2 and Phase 5
-assume siblings.
+So each agent writes into `$ADVERSE_RUN/<agent>/`, its own subdirectory, and
+every glob in this file is one segment wider for it. The bridges never required
+siblings — they take the paths you hand them, and `validate.mjs` binds each
+payload to its basename wherever it sits. What the layout closes is the
+**accident** class: one campaign lost payloads three separate times to two
+agents numbering files into the same flat directory, and a lost payload reads
+as a lane that found nothing.
 
-So give each agent its own subdirectory when the harness can make that
-subdirectory the only place it may write, and widen those globs by one segment.
-Absent that enforcement the layout buys nothing — an agent free to write
-anywhere can write into a sibling's directory as easily as into a sibling's
-filename — which is why this is a harness capability and not a Phase 0 step you
-can simply adopt. Until you have it, treat these guards as what they are: they
-stop a payload contradicting its own path, and they do not authenticate its
-author. `combine.mjs --plan`
+What it does not close is authorship (#62). An agent free to write anywhere can
+write into a sibling's directory as easily as into a sibling's filename, so
+until the harness can make an agent's subdirectory the only place it may write,
+these guards remain what they are: they stop a payload contradicting its own
+path, and they do not authenticate its author. `combine.mjs --plan`
 refuses a lane whose two halves claim one id or an id the plan never spawned.
 A half declaring its sibling's id would rule on its own finding as if it were
 the other half's — two characters, and consensus is counterfeit.
@@ -351,7 +350,7 @@ actually been written down. Once each agent has its own path (above) and the
 Write tool, the orchestrator's job is to check what landed, not to produce it:
 
 ```bash
-node ${SKILL_DIR}/scripts/validate.mjs --phase round1 "$ADVERSE_RUN"/round1-*.json
+node ${SKILL_DIR}/scripts/validate.mjs --phase round1 "$ADVERSE_RUN"/*/round1-*.json
 ```
 
 It reports `ok (<persona>)` per file on stdout, or the schema error on stderr —
@@ -386,7 +385,7 @@ This is what makes round 2 cheap and what keeps cross-lane consensus alive:
 
 ```bash
 node ${SKILL_DIR}/scripts/triage.mjs \
-    --round1 "$ADVERSE_RUN"/round1-*.json \
+    --round1 "$ADVERSE_RUN"/*/round1-*.json \
     --repo . --base "$BASE" --gate "$GATE" \
     ${LEDGER:+--ledger "$LEDGER"} \
     --plan "$ADVERSE_RUN/plan.json" \
@@ -446,7 +445,7 @@ unreadable fails closed instead of reading as "found nothing":
 ```bash
 EXPECT=$(node ${SKILL_DIR}/scripts/plan.mjs --expect "$ADVERSE_RUN/plan.json")
 eval "$(node ${SKILL_DIR}/scripts/plan.mjs --escalate --expect "$EXPECT" --sh \
-    "$ADVERSE_RUN"/round1-*.json)"
+    "$ADVERSE_RUN"/*/round1-*.json)"
 ```
 
 One dial moves, deterministically:
@@ -470,7 +469,7 @@ Pragmatist's**, spawn a subagent with the same persona system prompt and:
 1. `${SKILL_DIR}/scripts/prompts/round2.txt`
 2. `$ADVERSE_RUN/briefing.json`
 3. the repo path and `$BASE`
-4. the path to write its own JSON object to: `$ADVERSE_RUN/round2-<agent>.json`
+4. the path to write its own JSON object to: `$ADVERSE_RUN/<agent>/round2-<agent>.json`
 
 **Per agent, not per persona — a split lane spawns two.** `auditor-a` and
 `auditor-b` each get their own round-2 call and each declares its own id in
@@ -529,7 +528,7 @@ Each reviewer writes its own file at the path it was given, same as round 1 —
 the orchestrator does not retype it. Validate before repair:
 
 ```bash
-node ${SKILL_DIR}/scripts/validate.mjs --phase round2 "$ADVERSE_RUN"/round2-*.json
+node ${SKILL_DIR}/scripts/validate.mjs --phase round2 "$ADVERSE_RUN"/*/round2-*.json
 ```
 
 If the user asked for a faster review, skip phases 4–5. The synthesizer treats
@@ -543,15 +542,15 @@ the finding ID, so a paraphrase cannot silently drop the edge:
 ```bash
 node ${SKILL_DIR}/scripts/repair.mjs \
     --briefing "$ADVERSE_RUN"/briefing.json \
-    --round2 "$ADVERSE_RUN"/round2-auditor.json \
-    --round2 "$ADVERSE_RUN"/round2-adversary.json \
-    --round2 "$ADVERSE_RUN"/round2-steward.json \
+    --round2 "$ADVERSE_RUN"/auditor/round2-auditor.json \
+    --round2 "$ADVERSE_RUN"/adversary/round2-adversary.json \
+    --round2 "$ADVERSE_RUN"/steward/round2-steward.json \
     --outdir "$ADVERSE_RUN"
 ```
 
 Pass every round-2 file, including both halves of a split lane
 (`round2-auditor-a.json`, `round2-auditor-b.json`) — `--round2
-"$ADVERSE_RUN"/round2-*.json` expands to exactly that. Each is repaired to
+"$ADVERSE_RUN"/*/round2-*.json` expands to exactly that. Each is repaired to
 `round2-<agent>.repaired.json`, keyed on the agent so two halves land in two
 files rather than one refusing to overwrite the other.
 
@@ -562,7 +561,7 @@ lines; do not ignore the exit code.
 Then combine both rounds:
 
 ```bash
-node ${SKILL_DIR}/scripts/combine.mjs --round1 "$ADVERSE_RUN"/round1-*.json \
+node ${SKILL_DIR}/scripts/combine.mjs --round1 "$ADVERSE_RUN"/*/round1-*.json \
     --plan "$ADVERSE_RUN/plan.json" \
     --out "$ADVERSE_RUN"/round1.json
     # --plan reads the split roster from plan.json, same as Phase 3's triage
@@ -755,7 +754,7 @@ fix agent is a batch of repair work, not a lane) with:
 2. **the repository's own constraint block** — see below
 3. this batch's briefing entries, verbatim, with their `id`, `kind`, `severity`,
    `confidence`, `file`, `line` and `counterpart`
-4. the path to write its own JSON object to: `$ADVERSE_RUN/fix-<batch>.json`
+4. the path to write its own JSON object to: `$ADVERSE_RUN/fix-<batch>/fix-<batch>.json`
 
 **The constraint block is not optional and it is not obvious.** A subagent
 inherits nothing from you: not the rule that a test run prints only pass/fail
