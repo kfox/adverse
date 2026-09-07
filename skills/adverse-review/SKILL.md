@@ -703,6 +703,75 @@ the identity and the whole re-projection layer silently does nothing — the
 no-op it was built to replace. The script warns on stderr when `--at` is
 missing; do not ignore that line.
 
+### Fixing with agents, when the batch outgrows your own hands
+
+Everything above assumes you make the fixes. That holds for a handful of
+findings and stops holding the moment an iteration returns more than one
+context window can carry — at which point repair splits across several agents,
+and the brief each one gets is improvised prose, different every time. **A
+reviewer's improvised brief costs a finding; a fix agent's costs a commit.** So
+the brief is generated, exactly like the reviewers' are.
+
+Partition the findings into batches that touch **disjoint files** wherever the
+findings allow it. Two agents editing one file is a conflict you resolve by
+reading the same code twice.
+
+Spawn one subagent per batch (`general-purpose`; there is no fix persona — a
+fix agent is a batch of repair work, not a lane) with:
+
+1. `${SKILL_DIR}/scripts/prompts/fix.txt`
+2. **the repository's own constraint block** — see below
+3. this batch's briefing entries, verbatim, with their `id`, `kind`, `severity`,
+   `confidence`, `file`, `line` and `counterpart`
+4. the path to write its own JSON object to: `$ADVERSE_RUN/fix-<batch>.json`
+
+**The constraint block is not optional and it is not obvious.** A subagent
+inherits nothing from you: not the rule that a test run prints only pass/fail
+indicators, not the sandbox that decides which tree it may edit, not the
+spelling convention, not the shape this repository's hooks demand of a search
+command, not what the gate is called. Every one of those fails the gate when
+missed, and every one of them is invisible from inside the subagent. Assemble
+it once for the run out of `CLAUDE.md` / `CONTRIBUTING.md` / `AGENTS.md` and
+the gate command from Phase 0, and append the same block to every batch. The
+portable half — reproduce before fixing, close the class, the mutation catalog,
+what to do with something found out of scope — is already in `fix.txt` and is
+versioned with this skill, so it is not retyped per agent: each restatement is
+a place a rule gets silently dropped.
+
+Then check what landed and fold it, the same way round 1 is checked:
+
+```bash
+node ${SKILL_DIR}/scripts/validate.mjs --phase fix "$ADVERSE_RUN"/fix-*.json
+
+node ${SKILL_DIR}/scripts/decisions.mjs --fix "$ADVERSE_RUN"/fix-*.json \
+    --out "$ADVERSE_RUN"/decisions.json
+```
+
+`decisions.mjs` folds every payload of this iteration into the `decisions.json`
+the `--record` command above reads — `fixed` and `declined` become decisions of
+those dispositions carrying the identity fields the payload already holds, so
+you never reassemble them by hand. Fold the whole iteration in one call.
+
+**An item a fix agent names but does not fix is a finding with no ID.** It is
+not in `report.json`, `--record` has nowhere to put it, and it exists only in
+the agent's final report — which you read once and then lose. The measured cost
+of losing one: an agent reported that a preflight step was not budgeted, under a
+heading that said "out of scope, named not fixed"; nothing was recorded, and the
+next iteration two independent round-1 reviewers spent a lane-pair's attention
+re-deriving it. So the payload carries a `named_not_fixed` list, `decisions.mjs`
+mints an id for each entry (`NF-<batch>-<n>`, which cannot collide with triage's
+`F<n>`) and records it `deferred` with the agent's own reasoning. Read the
+block it prints before you record — a channel you forward without reading is
+the same footnote in a new place.
+
+**Do not re-run the panel to look for siblings of a finding you fixed.** The fix
+agent has already done it, better and cheaper: a reviewer is reasoning about a
+diff and the fix agent is holding a working reproduction. Asked for a sibling
+sweep, one found a reserved window seven times the size of the reported one,
+reachable by the same mechanism from the same two attacker-controlled bytes,
+that four reviewers across two rounds had missed. A re-run panel will spend a
+full round rediscovering the parent.
+
 ## Phase 8 — check for convergence
 
 ```bash
@@ -902,7 +971,7 @@ Everywhere else, disk already holds what the loop needs next.
 | `triage.mjs` reports `REGRESSED` | Lead with it. A fix that did not take is more important than any new finding. |
 | `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge or ruling and continue. |
 | `triage.mjs` reports an `OVERSIZED` candidate root cause | The edges chained further than one root cause plausibly reaches. It will not collapse whatever round 2 says; tell round 2 to name the smaller root causes inside it. |
-| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
+| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`/`decisions`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
 | `converge.mjs` exits 3 | The cap, not success. Say plainly what is still open. |
 | Ledger version mismatch | Do not delete it. Tell the user which version it is; the schema changed under them. |
 | `node` not on PATH | Tell the user to install Node 22+. Do not improvise a fallback. |

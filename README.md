@@ -286,7 +286,7 @@ One test is load-bearing rather than incidental: [`tests/prompts.test.mjs`](test
 src/                          # Shared core, used by both CLI and Skill
   personas.mjs                # Four persona system prompts + the lane partition
   taxonomy.mjs                # The kind axis + severity rank, shared with no prompt prose
-  prompts.mjs                 # Round-1/2/verify prompts, validators
+  prompts.mjs                 # Round-1/2/verify/fix prompts, validators
   parse.mjs                   # JSON extraction across every wrapper shape
   collect.mjs                 # Directory walk + git-diff source collection
   runner.mjs                  # Subprocess agent invocation + parallel orchestration
@@ -295,6 +295,7 @@ src/                          # Shared core, used by both CLI and Skill
   triage.mjs                  # Claim/kind checks, clustering, root-cause grouping
   briefing.mjs                # Assembles those into the round-2 prompt
   ledger.mjs                  # Adjudication log + the convergence stop condition
+  decisions.mjs               # Fold fix-agent payloads into ledger decisions
   scope.mjs                   # Does this change have a trust boundary in it?
   scaling.mjs                 # How much review does this change deserve? + reading a plan back
   roster.mjs                  # Who counts as a reviewer: personas, split lanes, silent lanes
@@ -312,17 +313,18 @@ skills/adverse-review/
     collect.mjs               # Skill bridge: source collection
     combine.mjs               # Skill bridge: combine per-persona JSON
     triage.mjs                # Skill bridge: claim/kind checks, grouping, briefing
-    validate.mjs              # Skill bridge: schema-check a reviewer-written round1/round2/verify payload
+    validate.mjs              # Skill bridge: schema-check an agent-written round1/round2/verify/fix payload
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
     plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
     verify.mjs                # Skill bridge: validate a verify payload, reshape for triage
+    decisions.mjs             # Skill bridge: fold fix payloads into decisions.json
     dump-prompts.mjs          # Regenerate prompt files from src/ (a test enforces it)
     prompts/                  # Generated — edit src/, then re-run dump-prompts.mjs
   agents/                     # Generated — subagent definitions, one per persona
       auditor.txt, adversary.txt, steward.txt, pragmatist.txt
-      round1.txt, round2.txt, verify.txt
+      round1.txt, round2.txt, verify.txt, fix.txt
 
 tests/
   *.test.mjs                  # node --test, no Jest/Mocha
