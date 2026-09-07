@@ -339,12 +339,16 @@ export const PERSONAS = Object.freeze({
 export const DEFAULT_PERSONAS = Object.freeze(['auditor', 'adversary', 'steward', 'pragmatist']);
 
 // Does this lane own nothing but ADVISORY kinds? Such a lane can make no claim
-// that blocks anything, and two separate questions turn on that one fact:
-// whether it takes part in round 2 (below), and whether it may run a fix
-// commit's regression pass (src/regression.mjs). One predicate rather than two
-// copies, because those answers must never disagree — a lane with no blocking
-// claim to go on record about in round 2 has none to report a regression with
-// either.
+// that blocks anything, and THREE separate questions turn on that one fact:
+// whether it takes part in round 2 (below), whether it may run a fix commit's
+// regression pass (src/regression.mjs), and whether a small diff may skip it
+// altogether (`sizeSkippable` in src/scaling.mjs). One predicate rather than
+// three copies, because those answers must never disagree — a lane with no
+// blocking claim to go on record about in round 2 has none to report a
+// regression with either, and nothing that could block if it is skipped.
+//
+// Keep this list current. The planner's copy of the rule drifted precisely
+// because a maintainer trusted an enumeration that said two.
 //
 // An UNKNOWN persona is not advisory-only. Both callers fail toward giving a
 // lane work, and a name this registry has never heard of is a roster problem

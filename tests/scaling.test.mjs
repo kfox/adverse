@@ -478,6 +478,12 @@ test('size-skippability is the advisory-only question, asked of the registry', (
   assert.equal(sizeSkippable('advisor', { personas: registry }), true);
   assert.equal(sizeSkippable('reviewer', { personas: registry }), false);
   // Unknown names fail toward giving the lane work rather than throwing on
-  // `undefined.kinds`, which is what indexing the registry directly did.
+  // `undefined.kinds`, which is what indexing the registry directly did. This
+  // is a property of the predicate and NOT of `planReview`: an unknown name
+  // falls through to the always-runs branch, whose reason string reads
+  // `PERSONAS[persona].soloReason` and throws there instead. Unreachable
+  // today — `DEFAULT_PERSONAS` is frozen and matches the registry's keys — so
+  // it is recorded here rather than fixed, and the assertion is deliberately
+  // about the helper alone.
   assert.equal(sizeSkippable('nobody', { personas: registry }), false);
 });

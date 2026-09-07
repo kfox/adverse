@@ -347,7 +347,8 @@ ${KIND_RUBRIC}
 
 - \`persona\`, \`validate\`, \`challenge\` and \`added\` are required; each list may
   be empty. \`groups\` may be omitted when the briefing proposed none. \`agent\`
-  is required only if your lane was split, and must name your own lane.
+  must be the id your output filename names, or omitted when that filename
+  names no half — see above; any other value is refused.
 - Do not re-report your own round-1 findings.
 - \`id\` and \`title\` must both be present and must agree with the briefing.
 - A \`groups\` entry's \`id\` must name a group in the briefing, and \`ruling\` must
@@ -982,8 +983,9 @@ function validateFinding(f, label) {
 function validateAgent(obj, personaName, expectedAgent) {
   const expected = expectedAgent ?? personaName;
   // Absent is legal for exactly one expectation: the persona itself, which is
-  // what an unsplit lane writes (`round1.txt`: "only if your lane was split;
-  // else omit"). When the filename names a half, an unlabeled payload is
+  // what an unsplit lane writes (`round1.txt`, under the `agent` paragraph:
+  // "If it does not, omit the key"). When the filename names a half, an
+  // unlabeled payload is
   // refused rather than defaulted — `stampAgent` would give it the bare
   // persona, and `reportedBy` reads the bare persona as "the whole lane
   // reported this" and discards the sibling's honest ruling with it. Dropping
