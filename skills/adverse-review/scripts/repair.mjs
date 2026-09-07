@@ -20,10 +20,9 @@
 // The real fix belongs upstream in src/synthesis.mjs — join on ID, or on
 // file/line proximity — at which point this script becomes dead weight.
 
-import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { makeWriteGuard, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { DEFAULT_PERSONAS, laneAgentOf } = await importFromSrc('personas.mjs');
@@ -54,7 +53,10 @@ const groupIds = new Set((briefing.groups ?? []).map((g) => g.id));
 
 let repaired = 0, unresolved = 0, checked = 0;
 
-const claimDest = makeWriteGuard('repair');
+// Nothing reaches disk until every payload has been read and judged — see
+// bridge-io.mjs. This loop refuses a payload on four separate grounds, and each
+// of them used to publish every earlier payload's repaired file first.
+const writes = makeWriteQueue('repair');
 
 for (const src of values.round2) {
 
@@ -124,11 +126,11 @@ for (const src of values.round2) {
   // silently replace the half that wrote first, which is the cheapest way to
   // counterfeit the distinct-reviewer count synthesis treats as consensus.
   const agent = laneAgentOf(payload.persona, payload.agent);
-  const dest = claimDest(`${values.outdir}/round2-${agent}.repaired.json`, src);
-  writeFileSync(dest, JSON.stringify(payload, null, 2), 'utf-8');
-
-  process.stdout.write(`repaired ${src} -> ${dest}\n`);
+  writes.queue(`${values.outdir}/round2-${agent}.repaired.json`, src,
+    JSON.stringify(payload, null, 2));
 }
+
+writes.flush('repaired');
 
 process.stdout.write(`${checked} edges checked, ${repaired} titles repaired, ${unresolved} unresolved\n`);
 if (unresolved) process.exitCode = 1;

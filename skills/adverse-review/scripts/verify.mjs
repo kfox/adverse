@@ -44,10 +44,9 @@
 // to reach the arithmetic are the open ones, and those are now findings.
 
 
-import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { makeWriteGuard, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { makeWriteQueue, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
 
 import { importFromSrc } from './package-root.mjs';
 
@@ -77,7 +76,11 @@ if (!values.verify.length || !values.outdir) {
       + ' [--briefing briefing.json]');
 }
 
-const claimDest = makeWriteGuard('verify');
+// Nothing reaches disk until every payload has been read and validated — see
+// bridge-io.mjs. A refusal on payload N used to leave payloads 1..N-1 published
+// as `round1-<persona>.verified.json`, which is the opposite of the standard
+// regression.mjs's fold states two files away.
+const writes = makeWriteQueue('verify');
 
 
 const normalizeTitle = (s) => (typeof s === 'string' ? s.trim().toLowerCase().replace(/\s+/g, ' ') : '');
@@ -266,12 +269,14 @@ for (const src of values.verify) {
 
 
   // The roster check above was here from the start; the collision check was
-  // not, so two payloads for one persona still collapsed onto one file.
-  const dest = claimDest(`${values.outdir}/round1-${payload.persona}.verified.json`, src);
-
-  writeFileSync(dest, JSON.stringify(out, null, 2), 'utf-8');
-  process.stdout.write(`verified ${src} -> ${dest}\n`);
+  // not, so two payloads for one persona still collapsed onto one file. It is
+  // made at QUEUE time, so the collision is refused before the first file is
+  // written rather than after the colliding payload's sibling is on disk.
+  writes.queue(`${values.outdir}/round1-${payload.persona}.verified.json`, src,
+    JSON.stringify(out, null, 2));
 }
+
+writes.flush('verified');
 
 process.stdout.write(`${values.verify.length} persona(s) verified: `
   + `${totalClosed} closed, ${totalOpen} open, ${totalMoot} moot, ${totalAdded} new finding(s) added\n`

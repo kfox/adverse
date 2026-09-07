@@ -8,7 +8,7 @@
 // exit 1 is a claim about a review, and this run could not read one" — so a
 // script that never got as far as reading its input exits 2, everywhere.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 import { importFromSrc } from './package-root.mjs';
 
@@ -53,7 +53,11 @@ export function requireKnownPersona(persona, { prefix, file, personas }) {
 // state — but only WITHIN a run: Phase 9 loops back through the same outdir on
 // purpose, so a file left by an earlier iteration is expected and is not
 // checked for.
-export function makeWriteGuard(prefix) {
+//
+// Not exported: reached only through `makeWriteQueue` below, because a bridge
+// that claims a destination without queuing the write has claimed it at the
+// wrong moment — see there.
+function makeWriteGuard(prefix) {
   const written = new Map();
   return function claimDest(dest, src) {
     if (written.has(dest)) {
@@ -63,6 +67,57 @@ export function makeWriteGuard(prefix) {
     }
     written.set(dest, src);
     return dest;
+  };
+}
+
+// Every output file of one run, written only after every payload has been read
+// and judged. A bridge that writes one file per payload inside the loop that
+// validates them has already published 1..N-1 when it refuses payload N: an
+// outdir holding a partial set of `round1-<persona>.verified.json` files from a
+// run that exited 1, which is indistinguishable from a complete set to the glob
+// that reads them next. Measured on verify.mjs before this existed: an honest
+// auditor payload beside a steward payload that pre-stamped `provenance` exited
+// 1 with `round1-auditor.verified.json` on disk.
+//
+// regression.mjs's fold states the rule — "before anything is written, and for
+// EVERY lane" — and states it as a comment over a hand-ordered pre-check, which
+// is how the two bridges beside it came to disagree with it. Ordering is a
+// property of a structure, so it lives in one.
+//
+// `queue` carries makeWriteGuard's collision refusal, which now fires before the
+// first byte is written rather than after the colliding file's sibling is
+// already on disk.
+export function makeWriteQueue(prefix) {
+  const claim = makeWriteGuard(prefix);
+  const queued = [];
+
+  return {
+    queue(dest, src, body) {
+      queued.push({ dest: claim(dest, src), src, body });
+    },
+    // A write that fails is exit 2 and a sentence, not a stack trace under exit
+    // 1: exit 1 is a claim about a review, and a run that could not write its
+    // output made none. The files already flushed are named, because the outdir
+    // is now partial and only the operator can decide whether to clear it —
+    // there is no atomic multi-file write in the stdlib, so saying so is the
+    // whole remedy.
+    flush(verb) {
+      const done = [];
+      for (const { dest, src, body } of queued) {
+        try {
+          writeFileSync(dest, body, 'utf-8');
+        } catch (e) {
+          process.stderr.write(`${prefix}: ${dest}: cannot be written (${e.message.trim()})\n`
+            + (done.length
+              ? `    ${done.join(', ')} ${done.length === 1 ? 'was' : 'were'} already written,`
+                + ' so this outdir is partial: clear it or fold into a fresh one\n'
+              : '    nothing was written\n'));
+          process.exit(2);
+        }
+        done.push(dest);
+        process.stdout.write(`${verb} ${src} -> ${dest}\n`);
+      }
+    },
   };
 }
 

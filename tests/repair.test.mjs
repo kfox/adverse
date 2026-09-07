@@ -252,6 +252,30 @@ test('two payloads claiming one persona refuse to collide, rather than one overw
     const r = runRepair(['--briefing', briefingAt(dir), '--round2', a, '--round2', b, '--outdir', dir]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /already written this run/);
+    assert.throws(() => readFileSync(path.join(dir, 'round2-auditor.repaired.json')),
+      'the collision is refused before the first file is written, not after');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a refused payload leaves no half-published outdir', () => {
+  // The third bridge with the publish-then-refuse shape: repair validated and
+  // wrote in one loop too, so an invented persona in the second payload exited
+  // 1 with the first payload's `round2-<agent>.repaired.json` already on disk,
+  // where the next glob reads it as a complete set. bridge-io.mjs's write queue
+  // holds all three to the standard regression.mjs's fold states.
+  const dir = freshTmp();
+  try {
+    const good = round2At(dir, 'round2-auditor.json', 'auditor');
+    const bad = round2At(dir, 'round2-referee.json', 'referee');
+    const r = runRepair(['--briefing', briefingAt(dir), '--round2', good,
+                         '--round2', bad, '--outdir', dir]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /unknown persona "referee"/);
+    assert.throws(() => readFileSync(path.join(dir, 'round2-auditor.repaired.json')),
+      'the honest payload repaired cleanly, but publishing it is a claim this run withdrew');
+    assert.equal(r.stdout, '', 'nor may it report a file it did not leave behind');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

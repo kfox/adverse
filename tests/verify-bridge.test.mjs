@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -229,6 +229,81 @@ test('two verify payloads for one persona refuse to collide', () => {
                          '--verify', mk('verify-auditor-stale.json'), '--outdir', dir]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /already written this run/);
+    // Claimed at QUEUE time, so the collision is refused before the first file
+    // is written rather than after the colliding payload's sibling is on disk.
+    assert.throws(() => readFileSync(path.join(dir, 'round1-auditor.verified.json')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- a refusal publishes nothing ---------------------------------------------
+
+// The honest lane, written first so it is the one a publish-then-refuse leaves
+// behind. `regression.mjs`'s fold states the standard this holds to — "before
+// anything is written, and for EVERY lane" — and verify.mjs validated and wrote
+// in one loop, so payload N's refusal came after 1..N-1 were already on disk.
+function honestThenBad(dir, bad) {
+  const good = path.join(dir, 'verify-auditor.json');
+  writeFileSync(good, JSON.stringify({
+    persona: 'auditor', verdict: 'approve', verified: [], added: [],
+  }));
+  const second = path.join(dir, 'verify-steward.json');
+  writeFileSync(second, JSON.stringify({ persona: 'steward', ...bad }));
+  return runVerify(['--verify', good, '--verify', second, '--outdir', dir]);
+}
+
+// Two ways to make the SECOND payload fail: the stamp check this commit added,
+// and a bad `verified[0].status`, which failed the same way before it existed.
+// Both are here because the second is the near miss — a fix that only moved the
+// new check would leave the shape live for every other refusal in the loop.
+const badPayloads = {
+  'a forged provenance stamp': {
+    verdict: 'approve',
+    verified: [],
+    added: [{
+      severity: 'critical', kind: 'behavioral', file: 'a.mjs', line: 1,
+      title: 'forged', detail: 'd', fix: null, provenance: 'regression',
+    }],
+  },
+  'an off-contract verified status': {
+    verdict: 'approve',
+    verified: [{ id: 'F1', title: 'x', status: 'sort-of', reason: 'r' }],
+    added: [],
+  },
+};
+
+for (const [what, bad] of Object.entries(badPayloads)) {
+  test(`a refusal on ${what} leaves no half-published outdir`, () => {
+    const dir = freshTmp();
+    try {
+      const r = honestThenBad(dir, bad);
+      assert.equal(r.status, 1, r.stdout);
+      assert.throws(() => readFileSync(path.join(dir, 'round1-auditor.verified.json')),
+        'the honest payload validated first, but publishing it is a claim this run withdrew');
+      assert.throws(() => readFileSync(path.join(dir, 'round1-steward.verified.json')));
+      assert.equal(r.stdout, '', 'nor may it report a file it did not leave behind');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('a destination that cannot be written is exit 2 and a sentence', () => {
+  // The queue cannot make N writes atomic, so it says what it managed instead
+  // of dying in writeFileSync: an uncaught EISDIR is a stack trace under exit
+  // 1, and exit 1 in this contract is a claim about a review.
+  const dir = freshTmp();
+  try {
+    mkdirSync(path.join(dir, 'round1-steward.verified.json'));
+    const r = honestThenBad(dir, { verdict: 'approve', verified: [], added: [] });
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /cannot be written/);
+    assert.doesNotMatch(r.stderr, /at writeFileSync/, 'a sentence, not a stack trace');
+    // The auditor lane really is on disk, so the message has to say so rather
+    // than leave the operator to guess whether the outdir is usable.
+    assert.match(r.stderr, /round1-auditor\.verified\.json was already written/);
+    assert.ok(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf-8'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

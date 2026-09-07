@@ -1124,6 +1124,20 @@ it: a pass file naming a commit this outdir already folded is exit 2, naming
 the file and the commit. Delete the leftovers, fold into a fresh `--outdir`, or
 pass `--refold` when re-reading the same commit is what you meant.
 
+A `round1-<persona>.regression.json` the fold cannot parse is exit 2 for the
+same reason — it cannot tell which passes it would re-sign — and the same three
+remedies apply, `--refold` included: the flag skips the prior folds rather than
+overruling them, so it clears this refusal as well as the stale one. That
+matters because the path is derived from a persona name, so any agent, or a
+fold killed mid-write, can leave a byte there; while `--refold` did not clear
+it, one such byte wedged every lane of the fold and only deleting the file got
+past it.
+
+Two of the three remedies apply when that path is not a regular file at all.
+`--refold` escapes by overwriting the file, and a directory does not take an
+overwrite, so the fold says so and exits 2 with or without the flag: remove the
+path, or fold into a fresh `--outdir`.
+
 Digits, never letters. `regression-auditor-c.json` is a well-formed *split-lane
 half* id everywhere else in this skill, and round 2's independence signal keys
 on that distinction — a pass numbered `-c` would be counted as a third half of
@@ -1239,6 +1253,10 @@ record in Phase 7. It is not carried into `report.json`: the dispositions that
 have to reach the arithmetic are the open ones, and those are findings now.
 Its exit codes follow the same contract as every other bridge:
 2 means it never read a payload, 1 means it read one that failed the schema.
+Either way it publishes nothing: every payload is read and validated before the
+first `round1-<persona>.verified.json` is written, so a refusal on the last
+payload does not leave the earlier ones on disk for the next glob to read as a
+complete set. `repair.mjs` and `regression.mjs --payload` hold to the same rule.
 
 
 Findings the ledger records as settled will not be re-litigated; anything
