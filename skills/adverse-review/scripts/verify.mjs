@@ -113,19 +113,29 @@ const REOPENED_FALLBACK = { severity: 'warning', kind: 'behavioral' };
 // motivated that check — name an `info` id to make a critical come back
 // non-blocking — is not reachable through a title, because matching a
 // finding's title IS naming that finding.
+// First writer wins, and an ambiguous title indexes null: two findings
+// sharing one title cannot be told apart by it, and guessing which is
+// meant is how a severity gets copied off the wrong finding. The null is a
+// sentinel, not a miss — a consumer must ask `has()` before falling back to
+// any other source, or the refusal it encodes silently becomes a guess.
+function indexByTitle(doc) {
+  const byTitle = new Map();
+  for (const f of doc?.findings ?? []) {
+    if (!f) continue;
+    const key = normalizeTitle(f.title);
+    if (key) byTitle.set(key, byTitle.has(key) ? null : f);
+  }
+  return byTitle;
+}
+
 const briefed = new Map();
-const briefedByTitle = new Map();
+let briefedByTitle = new Map();
 if (values.briefing) {
   const doc = readJson(values.briefing, 'verify');
   for (const f of doc?.findings ?? []) {
-    if (!f) continue;
-    if (typeof f.id === 'string') briefed.set(f.id, f);
-    const key = normalizeTitle(f.title);
-    // First writer wins, and an ambiguous title indexes nothing: two findings
-    // sharing one title cannot be told apart by it, and guessing which is
-    // meant is how a severity gets copied off the wrong finding.
-    if (key) briefedByTitle.set(key, briefedByTitle.has(key) ? null : f);
+    if (f && typeof f.id === 'string') briefed.set(f.id, f);
   }
+  briefedByTitle = indexByTitle(doc);
 }
 
 // The previous iteration's report.json, as the anchor source of last resort:
@@ -134,15 +144,9 @@ if (values.briefing) {
 // all. Title-bound with the same ambiguity rule as the briefing index, and
 // consulted after both briefing routes — a briefed finding is this iteration's
 // statement of the same finding and wins.
-const reportedByTitle = new Map();
-if (values.report) {
-  const doc = readJson(values.report, 'verify');
-  for (const f of doc?.findings ?? []) {
-    if (!f) continue;
-    const key = normalizeTitle(f.title);
-    if (key) reportedByTitle.set(key, reportedByTitle.has(key) ? null : f);
-  }
-}
+const reportedByTitle = values.report
+  ? indexByTitle(readJson(values.report, 'verify'))
+  : new Map();
 
 
 // The briefing entry a verification is actually ABOUT, or null.
@@ -176,9 +180,21 @@ function bindToBriefing(v, src) {
     // exists for: the previous report.json is the one file that holds it.
     // Without that flag its verification lands on REOPENED_FALLBACK with a
     // null anchor: noisy rather than silent, which is the safe direction.
-    const byTitle = briefedByTitle.get(normalizeTitle(v.title))
-      ?? reportedByTitle.get(normalizeTitle(v.title));
+    // `has` before `get`, in each index: an ambiguous title is stored as a
+    // null SENTINEL, and `??` reads that refusal as a miss — which is how an
+    // ambiguous briefing title fell through to an unrelated report.json entry
+    // and inherited its severity at exit 0.
+    const key = normalizeTitle(v.title);
+    const byTitle = briefedByTitle.has(key)
+      ? briefedByTitle.get(key)
+      : reportedByTitle.get(key);
     if (byTitle) return byTitle;
+    if (briefedByTitle.has(key) || reportedByTitle.has(key)) {
+      process.stderr.write(`  ! verify: ${src}: title ${JSON.stringify(v.title)} matches more`
+        + ' than one finding, so binding it would guess — anchor not inherited\n');
+      process.exitCode = 1;
+      return null;
+    }
     process.stderr.write(`  ! verify: ${src}: unresolvable id ${JSON.stringify(v.id)}`
       + ` and no briefed or reported finding titled ${JSON.stringify(v.title)}`
       + ' — anchor not inherited\n');

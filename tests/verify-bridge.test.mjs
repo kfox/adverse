@@ -575,9 +575,48 @@ test('an ambiguous title binds to neither finding and falls back to blocking', (
     const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
 
     assert.equal(r.status, 1, 'an unbindable verification is reported, not silent');
-    assert.match(r.stderr, /no briefed or reported finding titled "same title"/);
+    assert.match(r.stderr, /"same title" matches more than one finding/);
     const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
     assert.equal(f.kind, 'behavioral', 'the blocking fallback, not a guess');
+    assert.equal(f.severity, 'warning');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ambiguous briefing title does not fall through to a --report entry', () => {
+  // The ambiguous-title refusal is stored as a null sentinel in the briefing
+  // index. A fallback that reads that null as a miss inherits the anchor from
+  // an unrelated report.json entry instead — measured: two critical/defect
+  // findings sharing a briefed title plus a same-titled info/design report
+  // entry came back info/design at exit 0, silently defeating the guard.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: [
+      { id: 'F1', severity: 'critical', kind: 'defect', file: 'a.mjs', line: 5,
+        counterpart: null, title: 'same title', fix: null },
+      { id: 'F2', severity: 'critical', kind: 'defect', file: 'b.mjs', line: 9,
+        counterpart: null, title: 'same title', fix: null },
+    ] }));
+    const report = path.join(dir, 'report.json');
+    writeFileSync(report, JSON.stringify({ findings: [
+      { severity: 'info', kind: 'design', file: 'c.mjs', line: 3, title: 'same title' },
+    ] }));
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'nope', title: 'same title', status: 'open', reason: 'r' }],
+      added: [],
+    }));
+    const r = runVerify(
+      ['--verify', src, '--outdir', dir, '--briefing', briefing, '--report', report]);
+
+    assert.equal(r.status, 1, 'an ambiguous title is refused, not resolved elsewhere');
+    assert.match(r.stderr, /"same title" matches more than one finding/);
+    const [f] = JSON.parse(
+      readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
+    assert.equal(f.kind, 'behavioral', 'the blocking fallback, not the report entry');
     assert.equal(f.severity, 'warning');
   } finally {
     rmSync(dir, { recursive: true, force: true });
