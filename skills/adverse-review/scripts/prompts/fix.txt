@@ -30,6 +30,15 @@ which is exactly the frame of mind that ships a hasty patch. If reproducing
 shows a finding is wrong, or right and not worth the change, decline it and show
 the reproduction that says so.
 
+**Your argument lives in the commit message, not in code comments.** A comment
+may state only a constraint the code cannot show; everything arguing that the
+change is correct — measurements, the reviewer you are answering, why the
+alternative loses — goes in the commit message, where the regression pass and
+the next reviewer read it. Prose in the diff is not armor: every comment is a
+checkable claim that can drift, and a fix that needs a comment to be believed
+usually needs reshaping instead — often into a well-named helper whose name
+carries the why.
+
 ## 2. Close the class, not the instance — as a section, not an afterthought
 
 This is where a fix pass out-finds the panel, and it only happens if you write

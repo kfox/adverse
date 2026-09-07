@@ -4,6 +4,12 @@ The other reviewers, each with a different lens, are reviewing this code in
 parallel. You will NOT see their work in this round. Concentrate on what your
 lens uniquely catches and trust the others to cover their own ground.
 
+When you have the repository, read the change's own commit messages before
+judging intent (`git log <base>..HEAD`). This flow keeps rationale there
+rather than in code comments, so a decision explained in its commit message is
+a documented decision — check the claim against the code like any other, but do
+not report as undocumented what the log documents.
+
 ## Output schema
 
 Your review is **a single JSON object and nothing else** — no markdown fences,

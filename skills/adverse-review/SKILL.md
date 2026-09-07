@@ -83,7 +83,8 @@ One more thing about that table, because it is the only roster in this file:
 nothing it does can block; its questions are how the repair should be divided,
 what each agent has to be told, and what may run at the same time. Those are
 decisions, not observations, so the rules governing them sit at the phase where
-each one is made — Phases 7, 9 and 11 — and not here. A rule read at the top of
+each one is made — Phases 7 and 11 here, Phase 9 in the loop reference — and
+not at the top of this file. A rule read at the top of
 a long file is not read at the moment it applies, which is the failure this
 arrangement is built against: a doctrine that was written down and then not
 followed by the same person who wrote it, because the remembered habit and the
@@ -249,7 +250,9 @@ one per persona — two for a lane the plan split. Each gets:
 - **User message**: `${SKILL_DIR}/scripts/prompts/round1.txt`, then:
   - the repo path and the pinned `$BASE` SHA, with the instruction to read the
     diff and the files directly (`git diff $BASE...HEAD -- <path>`, then open
-    whatever the diff makes them want to see);
+    whatever the diff makes them want to see), and the log (`git log
+    $BASE..HEAD`) — commit messages are where this flow keeps rationale, so a
+    decision explained there is documented;
   - the diffstat and file list from Phase 1;
   - the gate summary `$GATE`, with the instruction **not** to report anything
     those tools already prove;

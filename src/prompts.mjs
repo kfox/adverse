@@ -114,6 +114,12 @@ The other reviewers, each with a different lens, are reviewing this code in
 parallel. You will NOT see their work in this round. Concentrate on what your
 lens uniquely catches and trust the others to cover their own ground.
 
+When you have the repository, read the change's own commit messages before
+judging intent (\`git log <base>..HEAD\`). This flow keeps rationale there
+rather than in code comments, so a decision explained in its commit message is
+a documented decision — check the claim against the code like any other, but do
+not report as undocumented what the log documents.
+
 ## Output schema
 
 Your review is **a single JSON object and nothing else** — no markdown fences,
@@ -599,6 +605,15 @@ unreviewed code written by whoever was most convinced the finding was real,
 which is exactly the frame of mind that ships a hasty patch. If reproducing
 shows a finding is wrong, or right and not worth the change, decline it and show
 the reproduction that says so.
+
+**Your argument lives in the commit message, not in code comments.** A comment
+may state only a constraint the code cannot show; everything arguing that the
+change is correct — measurements, the reviewer you are answering, why the
+alternative loses — goes in the commit message, where the regression pass and
+the next reviewer read it. Prose in the diff is not armor: every comment is a
+checkable claim that can drift, and a fix that needs a comment to be believed
+usually needs reshaping instead — often into a well-named helper whose name
+carries the why.
 
 ## 2. Close the class, not the instance — as a section, not an afterthought
 
