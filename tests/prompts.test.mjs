@@ -2,9 +2,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { AUDITOR, PERSONAS } from '../src/personas.mjs';
 import {
@@ -524,4 +525,38 @@ test('an agent definition is parseable frontmatter', async () => {
     assert.ok(lines.slice(close + 1).join('\n').includes(p.title),
       `${p.name}: body must be the persona system prompt`);
   }
+});
+
+// The two tests above import the generator for `agentDefinition`, and while its
+// writes ran at module scope that import regenerated every file the drift test
+// compares. So the drift test repaired the tree it was checking: editing a
+// prompt constant without regenerating failed the suite on the first run and
+// passed on the second with nothing done in between, which teaches "re-run it"
+// rather than "regenerate". Run in a child process on purpose — inside this one
+// the module is already cached, so an in-process check would pass whether or
+// not the guard exists, which is a test that cannot fail.
+test('importing the generator writes nothing — the drift check must not repair the tree it checks', () => {
+  const scripts = path.join(here, '..', 'skills', 'adverse-review', 'scripts');
+  const generated = [
+    ...readdirSync(path.join(scripts, 'prompts')).map((n) => path.join(scripts, 'prompts', n)),
+    ...readdirSync(path.join(here, '..', 'skills', 'adverse-review', 'agents'))
+      .map((n) => path.join(here, '..', 'skills', 'adverse-review', 'agents', n)),
+  ];
+  const snapshot = () => generated.map((f) => {
+    const s = statSync(f);
+    return `${path.basename(f)} ${s.mtimeMs} ${s.size}`;
+  });
+
+  const before = snapshot();
+  const url = pathToFileURL(path.join(scripts, 'dump-prompts.mjs')).href;
+  const r = spawnSync(process.execPath,
+    ['--input-type=module', '-e', `await import(${JSON.stringify(url)});`],
+    { encoding: 'utf-8', timeout: 30_000 });
+
+  assert.equal(r.status, 0, r.stderr);
+  // Both halves matter. Nothing may be written, and nothing may be announced:
+  // the generator's two summary lines are what proves `main` did not run, and
+  // without this assertion moving only the writes inside it would still pass.
+  assert.equal(r.stdout, '', 'importing the generator must print nothing');
+  assert.deepEqual(snapshot(), before, 'importing the generator rewrote a tracked file');
 });
