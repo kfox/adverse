@@ -11,10 +11,15 @@
 // and the easiest to counterfeit, so the map is pinned here instead —
 // src/personas.mjs sends a maintainer to OWNERSHIP below to change it.
 
-import { test } from 'node:test';
+import { readFileSync, readdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 
-import { DEFAULT_PERSONAS, PERSONAS, isLaneAgent } from '../src/personas.mjs';
+import {
+  DEFAULT_PERSONAS, PERSONAS, advisoryOnlyLane, crossReviews, isLaneAgent,
+  laneAgentOf,
+} from '../src/personas.mjs';
+import { sizeSkippable } from '../src/scaling.mjs';
 import { ADVISORY_KINDS, KINDS } from '../src/taxonomy.mjs';
 
 const all = Object.values(PERSONAS);
@@ -151,5 +156,188 @@ test('isLaneAgent refuses another lane, a bad separator, and a non-letter suffix
   for (const agent of ['adversary', 'adversary-a', 'auditor_a', 'auditor-', 'Auditor-a',
                        'auditor-1', 'auditor-A', 'auditor-a/b', '__proto__', '', null, 42]) {
     assert.equal(isLaneAgent('auditor', agent), false, JSON.stringify(agent));
+  }
+});
+
+// --- advisoryOnlyLane: its callers, enumerated instead of counted ----------
+
+// Every call site of `advisoryOnlyLane`, and the question that site decides.
+// The header comment above the predicate in src/personas.mjs renders this
+// table; the table lives HERE because this is the copy a test can check.
+//
+// It is written down rather than derived from the scan below, or it would be
+// true by construction and could not fail. Every COUNT the prose copy ever
+// carried was wrong: it said two questions turn on the predicate when three
+// did, was corrected to "THREE", and left the sentence four lines below still
+// reading "Both callers". So the count is gone from the prose and the names
+// are checked from here instead.
+const ADVISORY_ONLY_CALLERS = {
+  'personas.mjs': 'crossReviews',
+  'regression.mjs': 'ELIGIBLE',
+  'scaling.mjs': 'sizeSkippable',
+};
+
+const SRC_DIR = new URL('../src/', import.meta.url);
+
+// `src/` basenames that CALL the predicate. Comment lines are skipped — half
+// the modules discuss it — and so is its own declaration; an `import` names it
+// without a following paren and so never matches.
+function callersOfAdvisoryOnlyLane() {
+  const callers = [];
+
+  for (const name of readdirSync(SRC_DIR)) {
+    if (!name.endsWith('.mjs')) continue;
+    const calls = readFileSync(new URL(name, SRC_DIR), 'utf-8').split('\n')
+      .filter((line) => line.includes('advisoryOnlyLane(')
+        && !line.trimStart().startsWith('//')
+        && !line.includes('function advisoryOnlyLane('));
+    if (calls.length) callers.push(name);
+  }
+
+  return callers.sort();
+}
+
+// The `//` block immediately above the declaration, and not one line more: the
+// whole file mentions these names in passing, so a loose slice would pass on
+// prose that says nothing about the callers.
+function advisoryOnlyLaneHeader() {
+  const lines = readFileSync(new URL('personas.mjs', SRC_DIR), 'utf-8').split('\n');
+  const declared = lines.findIndex((l) => l.startsWith('export function advisoryOnlyLane'));
+  assert.ok(declared > 0, 'advisoryOnlyLane is not declared where this test looks for it');
+
+  let first = declared;
+  while (first > 0 && lines[first - 1].startsWith('//')) first -= 1;
+
+  return lines.slice(first, declared).join('\n');
+}
+
+test('the advisoryOnlyLane caller table names every call site, and invents none', () => {
+  assert.deepEqual(callersOfAdvisoryOnlyLane(), Object.keys(ADVISORY_ONLY_CALLERS).sort(),
+    'a question turns on advisoryOnlyLane that ADVISORY_ONLY_CALLERS does not list, '
+    + 'or it lists a module that no longer asks one. Those answers must never '
+    + 'disagree, so a new caller is a deliberate edit here and in the table in '
+    + 'src/personas.mjs.');
+});
+
+test('src/personas.mjs names each caller it answers for, rather than counting them', () => {
+  const header = advisoryOnlyLaneHeader();
+  for (const [file, symbol] of Object.entries(ADVISORY_ONLY_CALLERS)) {
+    assert.ok(header.includes(`src/${file}`),
+      `the comment above advisoryOnlyLane never names src/${file}`);
+    assert.ok(header.includes(symbol),
+      `the comment above advisoryOnlyLane never names \`${symbol}\``);
+  }
+});
+
+test('an unknown persona reaches its callers in the direction that gives it work', () => {
+  // The claim in that comment, run. `advisoryOnlyLane` answering true for a
+  // name the registry has never heard of would drop the lane from round 2 and
+  // let a small diff skip it — silently, which is the direction this design
+  // never takes. scaling.test.mjs pins the `sizeSkippable` half from its own
+  // side; asserted here too because the conjunction is what the comment
+  // promises, and one caller changing its mind would leave it half true.
+  assert.equal(advisoryOnlyLane('scribe'), false, 'an unknown name read as advisory-only');
+  assert.equal(crossReviews('scribe', 2), true, 'round 2 dropped an unrecognized lane');
+  assert.equal(sizeSkippable('scribe'), false, 'a small diff skipped an unrecognized lane');
+  // Not vacuous: the one real advisory-only lane answers the other way on
+  // every one of them.
+  assert.equal(advisoryOnlyLane('pragmatist'), true, 'the pragmatist is advisory-only');
+  assert.equal(crossReviews('pragmatist', 2), false, 'the pragmatist has no round-2 claim');
+  assert.equal(sizeSkippable('pragmatist'), true, 'the pragmatist is size-skippable');
+});
+
+// --- laneAgentOf: one rule, one default ------------------------------------
+//
+// `isLaneAgent` says whether an id is well formed; `laneAgentOf` says who to
+// attribute the work to when it is not, which is the question every caller
+// actually had. It exists because that answer was written out longhand once
+// per module — src/synthesis.mjs's `claimedAgent`, src/briefing.mjs's ternary,
+// and repair.mjs's, where the answer becomes a filename — and round 2's
+// self-validation guard keys on it, so two of them disagreeing hands some
+// agent an independent-looking vote on its own finding.
+
+test('laneAgentOf keeps an id of this lane and substitutes the lane for anything else', () => {
+  assert.equal(laneAgentOf('auditor', 'auditor-b'), 'auditor-b');
+  assert.equal(laneAgentOf('auditor', 'auditor'), 'auditor');
+  for (const claimed of ['steward-a', 'auditor_b', 'auditor-ab', 'auditor-', '', null, 42]) {
+    assert.equal(laneAgentOf('auditor', claimed), 'auditor',
+      `a claimed id of ${JSON.stringify(claimed)} was not coerced to its lane`);
+  }
+});
+
+test('laneAgentOf returns the persona it was given, untouched', () => {
+  // Callers read the lane off a JSON payload, so an absent one has to come
+  // back absent rather than as the string "undefined" or a coerced ''.
+  for (const persona of [null, undefined, 42]) {
+    assert.equal(laneAgentOf(persona, 'auditor-a'), persona,
+      `a lane of ${JSON.stringify(persona)} did not survive the call`);
+  }
+});
+
+// Where the rule is still spelled by hand. `isLaneAgent` answers a second,
+// legitimate question — "is this id well formed" — and the guards that ask it
+// (src/regression.mjs, combine.mjs) are correct as written and are not listed
+// here. What IS listed is a call that uses the answer as a ternary condition
+// and supplies its own default, which is `laneAgentOf` written out longhand.
+//
+// src/briefing.mjs was a fourth. src/synthesis.mjs's `claimedAgent` and
+// repair.mjs's filename key are the two that remain, and both are owned
+// elsewhere. Every `isLaneAgent` reference under src/, bin/ and
+// skills/adverse-review/scripts/ was read to build this list; what the scan
+// below cannot see is the same rule written as an `if`/`else` instead of a
+// ternary, so this bounds the copies it can recognize and does not claim there
+// can never be another.
+const HAND_SPELLED_LANE_AGENT_RULE = [
+  'skills/adverse-review/scripts/repair.mjs',
+  'src/synthesis.mjs',
+];
+
+// `isLaneAgent(...)` used as a ternary CONDITION — the longhand form. A guard
+// that merely negates it, or a ternary that calls it in a branch, does not
+// match. src/personas.mjs is skipped: the one there is the implementation.
+const LONGHAND = /isLaneAgent\(.*\)\s*\?/;
+const SCANNED_DIRS = ['src', 'bin', 'skills/adverse-review/scripts'];
+
+function handSpelledLaneAgentRule() {
+  const root = new URL('../', import.meta.url);
+  const sites = [];
+
+  for (const dir of SCANNED_DIRS) {
+    const dirUrl = new URL(`${dir}/`, root);
+    for (const name of readdirSync(dirUrl)) {
+      if (!name.endsWith('.mjs') || `${dir}/${name}` === 'src/personas.mjs') continue;
+      const hits = readFileSync(new URL(name, dirUrl), 'utf-8').split('\n')
+        .filter((line) => LONGHAND.test(line) && !line.trimStart().startsWith('//'));
+      if (hits.length) sites.push(`${dir}/${name}`);
+    }
+  }
+
+  return sites.sort();
+}
+
+test('the longhand detector recognizes the shape, and not the guards beside it', () => {
+  // The check below loops over what the scan found, so a detector that matched
+  // nothing would pass it vacuously forever. Pinned against literals here so
+  // an empty scan means the copies are gone rather than the regex is broken.
+  assert.ok(LONGHAND.test(
+    'const agent = isLaneAgent(payload.persona, payload.agent) ? payload.agent : payload.persona;'));
+  assert.ok(LONGHAND.test('return isLaneAgent(persona, claimed) ? claimed : null;'));
+  assert.equal(LONGHAND.test('return lane === null || !isLaneAgent(lane, agent);'), false,
+    'a guard that only negates the answer supplies no default and is not a copy');
+  assert.equal(
+    LONGHAND.test('if (legal ? !legal.includes(agent) : !isLaneAgent(persona, agent)) {'), false,
+    'a ternary that calls it in a BRANCH is not the rule written longhand');
+});
+
+test('no new module spells the lane-agent fallback by hand instead of calling laneAgentOf', () => {
+  // A SUBSET check, deliberately. Converting one of the two listed sites is
+  // the open handoff and must not turn this red for whoever lands it; adding a
+  // third copy must. Delete an entry here once its site calls `laneAgentOf`.
+  for (const site of handSpelledLaneAgentRule()) {
+    assert.ok(HAND_SPELLED_LANE_AGENT_RULE.includes(site),
+      `${site} decides whose work an agent id names with its own ternary. `
+      + 'Call laneAgentOf from src/personas.mjs: the round-2 self-validation '
+      + 'guard keys on that answer, so a copy that drifts hands an agent an '
+      + 'independent-looking vote on its own finding.');
   }
 });

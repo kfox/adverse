@@ -339,20 +339,32 @@ export const PERSONAS = Object.freeze({
 export const DEFAULT_PERSONAS = Object.freeze(['auditor', 'adversary', 'steward', 'pragmatist']);
 
 // Does this lane own nothing but ADVISORY kinds? Such a lane can make no claim
-// that blocks anything, and THREE separate questions turn on that one fact:
-// whether it takes part in round 2 (below), whether it may run a fix commit's
-// regression pass (src/regression.mjs), and whether a small diff may skip it
-// altogether (`sizeSkippable` in src/scaling.mjs). One predicate rather than
-// three copies, because those answers must never disagree — a lane with no
-// blocking claim to go on record about in round 2 has none to report a
-// regression with either, and nothing that could block if it is skipped.
+// that blocks anything, and every question below turns on that one fact:
 //
-// Keep this list current. The planner's copy of the rule drifted precisely
-// because a maintainer trusted an enumeration that said two.
+//   src/personas.mjs    `crossReviews`   takes part in round 2
+//   src/regression.mjs  `ELIGIBLE`       may hold a fix commit's regression pass
+//   src/scaling.mjs     `sizeSkippable`  may be skipped on a small diff
 //
-// An UNKNOWN persona is not advisory-only. Both callers fail toward giving a
-// lane work, and a name this registry has never heard of is a roster problem
-// for roster.mjs to refuse, not a lane to quietly demote here.
+// One predicate rather than a copy per question, because those answers must
+// never disagree — a lane with no blocking claim to go on record about in
+// round 2 has none to report a regression with either, and nothing that could
+// block if it is skipped.
+//
+// Do not maintain that table by hand and do not count it in prose. Every
+// count this comment ever carried was wrong: it said "two questions" while
+// there were three, was corrected to "THREE", and left the sentence four
+// lines below still saying "both callers". `ADVISORY_ONLY_CALLERS` in
+// tests/personas.test.mjs is the enumeration that is CHECKED — it is compared
+// against a scan of src/ for call sites, and it also requires each caller to
+// be named right here, so a fourth one cannot appear without this table
+// failing a test. Add the caller there; this is a rendering of it.
+//
+// An UNKNOWN persona is not advisory-only, and every caller an unknown name
+// can reach fails toward giving that lane work: `crossReviews` answers yes,
+// `sizeSkippable` answers no. `ELIGIBLE` is built from DEFAULT_PERSONAS and
+// so never sees an unknown name at all. A name this registry has never heard
+// of is a roster problem for roster.mjs to refuse, not a lane to quietly
+// demote here.
 //
 // `Object.hasOwn`, not a bare index: `persona` is model-written, and
 // `PERSONAS['__proto__']` on a plain object answers with Object.prototype.
@@ -411,4 +423,35 @@ export function isLaneAgent(persona, agent) {
   if (agent === persona) return true;
   const prefix = `${persona}-`;
   return agent.startsWith(prefix) && LANE_AGENT_SUFFIX.test(agent.slice(prefix.length));
+}
+
+// Whose work an agent id names: `claimed` when `isLaneAgent` accepts it, and
+// the LANE otherwise. `isLaneAgent` answers whether an id is well formed; this
+// answers the question every caller of it actually had, which is who to
+// attribute the work to when it is not.
+//
+// One implementation because the rule is one rule — "an id counts only if it
+// names its own lane; everything else resolves toward the persona" — and it
+// had grown a spelling per module, each with its own default: `claimedAgent`
+// under `entryAgent`/`payloadAgent`/`rulingAgent` in src/synthesis.mjs, a bare
+// ternary in src/briefing.mjs, and another in
+// skills/adverse-review/scripts/repair.mjs, where the answer becomes a
+// filename. The round-2 self-validation guard keys on this answer, so two of
+// them differing buys some agent an independent-looking vote on its own
+// finding.
+//
+// src/briefing.mjs calls this. The two that do not yet are listed in
+// `HAND_SPELLED_LANE_AGENT_RULE` in tests/personas.test.mjs, which is checked
+// — a THIRD copy cannot appear quietly, whatever happens to those two.
+//
+// `persona` is returned UNTOUCHED, whatever it is. Callers hand this a
+// persona that came off a JSON payload, so a null or undefined lane has to
+// come back as it went in rather than as a string that looks like an id.
+//
+// "Which HALF of the lane" is a different question and is one line on top of
+// this one, not a second copy of it: `rulingAgent` in src/synthesis.mjs takes
+// this answer and maps the bare persona to null, because a payload claiming to
+// BE the whole lane is claiming both halves and so can be neither.
+export function laneAgentOf(persona, claimed) {
+  return isLaneAgent(persona, claimed) ? claimed : persona;
 }

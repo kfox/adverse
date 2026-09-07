@@ -671,10 +671,19 @@ is `fixed`, `declined`, `deferred`, or `noted`. Only `declined` and `deferred`
 **settle** a question; `fixed` and `noted` do not, and `decisions.mjs` marks
 which is which on its own summary line. **Carry `counterpart` on every
 `contract` decision.** That kind's claim is "X contradicts Y", so Y is half its
-identity: an entry without one matches nothing ever again, and the next pass
-re-raises the finding you just decided. **Every decision needs a reason** — the script
-refuses one without it, because an unexplained decision cannot be reviewed later
-and is indistinguishable from an oversight.
+identity and the ledger matches on it: an entry carrying no counterpart matches
+only a finding that carries none either. Triage requires one on every `contract`
+finding, so the next pass's finding will have one, your entry will not match it,
+and the finding you just decided comes back. Do not read that as "an entry
+without one matches nothing ever again", which is what this line used to say:
+two counterpart-less records with the same title DO match and settle. Both arms
+are pinned by `tests/ledger.test.mjs`, "two counterpart-less contract records
+match; a one-sided counterpart does not" — that test is the mechanism, this
+paragraph is a reading of it.
+
+**Every decision needs a reason** — the script refuses one without it, because
+an unexplained decision cannot be reviewed later and is indistinguishable from
+an oversight.
 
 **Work the confirmed root causes first, one decision each.** A group the report
 calls `confirmed` is one fix and one disposition covering N citations. Write it
@@ -1112,10 +1121,18 @@ unforgeable id. **Letters after the persona are halves, digits are passes** —
 `regression-auditor-c.json` validates as half `c`, not as pass three.
 
 The reshape stamps each finding `provenance: "regression"`, and both renderers
-print it: "the fix introduced this" is a different fact from "round 2 noticed
-this", and an operator reading a ranked list cannot act on the first without
-knowing which it is. The findings themselves feed `added` like any other new
-finding — a regression against a commit that already landed *is* that shape.
+print it: "a landed fix commit's regression pass found this" is a different fact
+from "round 2 noticed this", and an operator reading a ranked list cannot act on
+the first without knowing which it is. The findings themselves feed `added` like
+any other new finding — a regression against a commit that already landed *is*
+that shape.
+
+The stamp does **not** say the fix introduced anything, and neither renderer
+claims it does. A regression entry is classified `intended-inert`,
+`intended-undocumented` or `unintended`, and only the last was introduced in the
+sense a reader takes from that word — so `provenance` records which pass found
+the finding and nothing about causation. The classification is where causation
+lives.
 
 ### Loop
 
