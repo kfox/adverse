@@ -839,16 +839,25 @@ commit either.
 files, which the OS reaps; a `git worktree add` also registers state in the
 repository's own `.git/worktrees`, which nothing reaps — one campaign left
 about sixty stale registrations cluttering `git worktree list` and shadowing
-its branches. Anything worth keeping is in a commit or the run directory by
-now, so remove every worktree this run created — the reviewer fleet and any
-fix-agent worktrees alike — with the tool built for it, never `rm -rf`:
+its branches. Remove every worktree this run created with the tool built for
+it, never `rm -rf` — the reviewer fleet by its roster, each fix-agent worktree
+by the path it was created at:
 
 ```bash
 for agent in $AGENTS; do
   git worktree remove --force "$WORKTREES/$agent"
 done
+# and each fix-agent worktree the run added, by its own path
 git worktree prune
 ```
+
+**Spent worktrees only.** A reviewer worktree is spent when its lane's payload
+validated; a fix worktree is spent when its commit is replayed onto the branch
+(the replay rule in Phase 7). A detached worktree holding an UNREPLAYED commit
+is the one thing `--force` would orphan — that commit is reachable from no
+branch once the worktree record goes — so an unreplayed worktree is unfinished
+work to resolve, not scratch to clean. `git worktree list` against the run's
+paths is the checklist.
 
 ## Phase 11 — harvest what the run taught
 

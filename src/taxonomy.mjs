@@ -16,8 +16,10 @@
 // prose is a checkable claim, so a fix's own comments and docs replenish the
 // supply — counting either kind in a stop condition means the loop never
 // stops. Both are recorded and ranked, never blocking. `defect` and
-// `behavioral` block — and so does an unrecognized kind, so that a finding
-// cannot escape the gate by being mislabeled.
+// `behavioral` block — and so does an unrecognized kind. Mislabeling INTO an
+// advisory kind is the gate's one blind spot, and round 2 is the defense: a
+// second reporter's blocking kind wins the merge (synthesis keeps the worse
+// kind), which is one more reason the cross-review is never skipped on size.
 export const KINDS = Object.freeze(['defect', 'behavioral', 'contract', 'design']);
 export const ADVISORY_KINDS = Object.freeze(new Set(['design', 'contract']));
 
