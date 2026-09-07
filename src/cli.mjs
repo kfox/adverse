@@ -14,7 +14,7 @@ import {
   validatePhase2,
 } from './prompts.mjs';
 import { AgentRunner, runParallel } from './runner.mjs';
-import { parsePlan, runLanes } from './scaling.mjs';
+import { agentNames, parsePlan, runLanes } from './scaling.mjs';
 import { renderMarkdown, synthesize, toJsonReport } from './synthesis.mjs';
 
 const HELP = `Usage: adverse <command> [options]
@@ -336,7 +336,7 @@ async function cmdSynthesize(rest) {
   if (values.plan) {
     let planned;
     try {
-      planned = runLanes(parsePlan(readJsonArg(values.plan)).lanes).map((l) => l.persona);
+      planned = runLanes(parsePlan(readJsonArg(values.plan)).lanes);
     } catch (e) {
       die(`synthesize: --plan ${values.plan}: ${e.message}`);
     }
@@ -345,7 +345,14 @@ async function cmdSynthesize(rest) {
       ...skippedPersonas.map((s) => s.persona),
       ...failedPersonas,
     ]);
-    const unaccounted = planned.filter((p) => !accounted.has(p));
+    // A split lane is accounted under either spelling: combine.mjs unions its
+    // halves under the bare persona, while raw per-agent payloads and the
+    // --skipped/--degraded flags speak agentNames' persona-a/-b. Requiring one
+    // spelling false-refuses the other's fully reported lane.
+    const unaccounted = planned.flatMap((lane) => {
+      if (accounted.has(lane.persona)) return [];
+      return agentNames([lane]).filter((name) => !accounted.has(name));
+    });
     if (unaccounted.length) {
       die(`synthesize: the plan ran ${unaccounted.join(', ')} but no payload, --skipped, or`
         + ' --degraded accounts for it — a lane that failed did not find nothing, it did not'

@@ -364,6 +364,51 @@ test('--plan reconciles the run the payloads prove against the run the plan desc
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
+test('--plan accounts a split lane under either spelling of its payloads', () => {
+  // combine.mjs unions a split lane's halves under the bare persona, while raw
+  // per-agent payloads and --skipped/--degraded speak agentNames' persona-a/-b.
+  // Requiring one spelling false-refused the other: a plan naming
+  // {auditor, agents: 2} with both halves fully reported still exited 2.
+  const out = freshTmp();
+  try {
+    writeFileSync(path.join(out, 'plan.json'), JSON.stringify({
+      lanes: [
+        { persona: 'auditor', run: true, agents: 2 },
+        { persona: 'steward', run: true },
+      ],
+    }));
+    const payload = (persona) => (
+      { persona, verdict: 'approve', summary: 'ok', findings: [] });
+    const args = (r1) => ['synthesize', '--round1', path.join(out, r1),
+      '--plan', path.join(out, 'plan.json'), '--out', path.join(out, 'report.md')];
+
+    writeFileSync(path.join(out, 'per-agent.json'), JSON.stringify({
+      'auditor-a': { ...payload('auditor'), agent: 'auditor-a' },
+      'auditor-b': { ...payload('auditor'), agent: 'auditor-b' },
+      steward: payload('steward'),
+    }));
+    const perAgent = runCli(args('per-agent.json'));
+    assert.ok(perAgent.status === 0 || perAgent.status === 1,
+      `a fully reported split lane is accounted: ${perAgent.stderr}`);
+
+    writeFileSync(path.join(out, 'combined.json'), JSON.stringify({
+      auditor: payload('auditor'),
+      steward: payload('steward'),
+    }));
+    const combined = runCli(args('combined.json'));
+    assert.ok(combined.status === 0 || combined.status === 1,
+      `combine's bare-persona union is accounted: ${combined.stderr}`);
+
+    writeFileSync(path.join(out, 'half.json'), JSON.stringify({
+      'auditor-a': { ...payload('auditor'), agent: 'auditor-a' },
+      steward: payload('steward'),
+    }));
+    const half = runCli(args('half.json'));
+    assert.equal(half.status, 2, half.stderr);
+    assert.match(half.stderr, /auditor-b/, 'the refusal names the missing half');
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
 test('help is an option the parser owns, not a substring scanned out of argv', () => {
   // The first cut scanned the raw argv for --help/-h, so any option VALUE equal
   // to -h silently skipped the run and exited 0 — on a CI gate whose exit-code
