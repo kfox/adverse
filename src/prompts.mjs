@@ -747,10 +747,11 @@ Anything with a timestamp-keyed build cache at second granularity has this hole.
 The seven shapes above describe tests that cannot fail; this describes a
 mutation that never ran, and it defeats every entry in the catalog at once.
 
-## 6. Your diff gets a regression pass by someone who is not you
+## 6. Your diff can get a regression pass by someone who is not you
 
-Knowing the pass is coming is what makes the section below honest, so here are
-the questions it will ask:
+Whether the pass runs on your commit is the orchestrator's call, not yours, so
+write as if it will. Knowing that is what makes the section below honest; here
+are the questions it asks:
 
 1. **What got stricter?** Something that used to be accepted now is not. Who was
    relying on it?
@@ -817,8 +818,8 @@ them from the briefing rather than retyping them.
   \`named_not_fixed\` may each be empty; a batch where every finding was declined
   legitimately commits nothing. \`commits\` may be empty only then — if
   \`fixed\` names a fix, \`commits\` must name the commit that made it, because
-  the regression pass runs once per fix commit and cannot run against a commit
-  nobody named. Blank strings are refused, here as everywhere. Each entry is
+  nothing downstream — the composed replay, a regression pass — can run against
+  a commit nobody named. Blank strings are refused, here as everywhere. Each entry is
   ONE revision and nothing else — a sha, or a symbolic rev like \`HEAD~2\` —
   checked against \`/${REVISION.source}/\`,
   because that string is handed to \`git\` as an argument and printed in this
@@ -1415,14 +1416,15 @@ export function validateFix(obj) {
     }
   }
   // A fix with no commit leaves the orchestrator holding decisions to record
-  // and nothing to run Phase 9's regression pass against — that pass is defined
-  // as one per fix commit — and nothing said so, which is the silent skip
-  // SKILL.md refuses for the pass itself. Cross-field rather than blanket: an
-  // all-declined batch legitimately commits nothing, and the prompt says so.
+  // and nothing to replay or regression-check, and nothing said so — the
+  // silent skip SKILL.md refuses everywhere else. Cross-field rather than
+  // blanket: an all-declined batch legitimately commits nothing, and the
+  // prompt says so.
   if (obj.commits.length === 0 && obj.fixed.length > 0) {
     return `\`commits\` is empty but \`fixed\` claims ${obj.fixed.length} `
-      + 'fix(es). Name the commit(s) you wrote: Phase 9 runs one regression pass '
-      + 'per fix commit, and an unnamed commit is a pass that never runs.';
+      + 'fix(es). Name the commit(s) you wrote: the composed replay and any '
+      + 'regression pass run against named commits, and an unnamed commit is '
+      + 'a check that never runs.';
   }
 
   // Only a `fixed` entry claims a code change, so only a `fixed` entry owes a
