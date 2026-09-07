@@ -55,6 +55,9 @@ Options for 'synthesize':
   --skipped <persona=reason>  A lane deliberately not run (repeatable).
   --degraded <persona>     A lane that was tried and failed, not skipped (repeatable).
   --round2-skipped <reason>   Declare that round 2 did not run, and why.
+  --plan <path>            plan.mjs's plan.json. Every lane it ran must be
+                           accounted for by a payload, --skipped, or --degraded,
+                           or synthesize refuses. Optional.
 
 Exit codes:
   0  approve / conditional / hold

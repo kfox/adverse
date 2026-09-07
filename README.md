@@ -152,7 +152,9 @@ Code 1 is what you wire into a CI gate.
 
 Standalone: turn round-1/round-2 JSON from any source into a report.
 `--skipped`, `--degraded`, and `--round2-skipped` — for declaring lanes that
-did not run, and why — are flags on `adverse synthesize` itself. The Claude
+did not run, and why — are flags on `adverse synthesize` itself, and `--plan`
+reconciles those declarations against the run the plan describes: a planned
+lane no payload or declaration accounts for is refused. The Claude
 Code Skill reaches the same logic, and the same flags, through a bridge script
 (`skills/adverse-review/scripts/synthesize.mjs`) that is a pass-through.
 
