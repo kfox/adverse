@@ -1044,8 +1044,14 @@ node ${SKILL_DIR}/scripts/regression.mjs --repo . --commit <fix-sha> \
     --closed-by <persona> [--closed-by <persona> …]
 ```
 
-`--closed-by` is every persona that reported a finding this commit closed. The
-answer is the Adversary when the fix diff crosses a trust boundary and the
+`--closed-by` is every persona that reported a finding this commit closed,
+spelled the way the registry spells it — lowercase, or a split lane's half like
+`auditor-a`. A name that resolves to no lane is refused at exit 2, not ignored:
+`--closed-by Auditor` differs by one capital letter, excluded nobody, and
+handed the pass to the lane that reported the finding under a line asserting it
+had reported none of them.
+
+The answer is the Adversary when the fix diff crosses a trust boundary and the
 Auditor otherwise (`assessScope`, the same signal that gates the Adversary in
 Phase 1), skipping any lane that reported into the commit — and never the
 Pragmatist, whose findings are advisory and so cannot hold a regression. When
@@ -1058,7 +1064,21 @@ Spawn one subagent, with that persona's system prompt and:
 1. `${SKILL_DIR}/scripts/prompts/regression.txt`
 2. **the repository's own constraint block** — the same one the fix agents got
 3. the fix commit's diff: `git show <fix-sha>`, and what it was written to close
-4. the path to write its own JSON object to: `$ADVERSE_RUN/regression-<persona>.json`
+4. the path to write its own JSON object to:
+   `$ADVERSE_RUN/regression-<persona>-<pass number>.json`
+
+**The pass number is a digit, and it is not optional when a lane runs more than
+one pass.** This phase is per fix commit and a lane routinely reads several in
+one iteration, so `regression-<persona>.json` for all of them means N−1 passes
+overwrite each other and vanish before the glob below ever runs. Number them
+from 1 in the order you spawn them: `regression-auditor-1.json`,
+`regression-auditor-2.json`.
+
+Digits, never letters. `regression-auditor-c.json` is a well-formed *split-lane
+half* id everywhere else in this skill, and round 2's independence signal keys
+on that distinction — a pass numbered `-c` would be counted as a third half of
+the auditor lane. A lane that is itself split writes both:
+`regression-auditor-a-1.json` is half a's first pass.
 
 One agent per fix commit, and it is cheap precisely because the fix diff is
 small and the intent is known — the two properties that make a full re-review
@@ -1081,6 +1101,15 @@ node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/regress
 node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/regression-*.json \
     --outdir "$ADVERSE_RUN"
 ```
+
+`--phase regression` reads the persona off the basename with the pass number
+stripped, so `regression-auditor-1.json` and `regression-auditor-2.json` both
+validate as the `auditor` lane, and a payload declaring a different `persona`
+than its filename is refused. That stripping is only done for this phase: a
+`-1` on a round-1 or round-2 file still implies a persona named `auditor-1` and
+is refused as an unknown lane, because there the basename is the agent's only
+unforgeable id. **Letters after the persona are halves, digits are passes** —
+`regression-auditor-c.json` validates as half `c`, not as pass three.
 
 The reshape stamps each finding `provenance: "regression"`, and both renderers
 print it: "the fix introduced this" is a different fact from "round 2 noticed

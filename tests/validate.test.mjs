@@ -305,10 +305,130 @@ test('a fix payload cannot smuggle a line into the orchestrator through its `age
   }
 });
 
-test('the usage line names the fix phase', () => {
+test('the usage line names every phase the table can validate', () => {
+  // The old assertion matched the PREFIX `round1|round2|verify|fix`, so a phase
+  // dropped from VALIDATORS left the suite green — which is exactly how
+  // `--phase regression` came to have no bridge test at all. The two renderings
+  // are written independently: the first line is the hand-kept human spelling,
+  // the second is `Object.keys(VALIDATORS)`. Holding them equal catches a phase
+  // added to one and not the other in either direction.
   const r = run(['--phase', 'fix']);
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /--phase must be one of: round1\|round2\|verify\|fix/);
+  const spelled = /--phase (round1\|[a-z0-9|]+) <file\.json>/.exec(r.stderr);
+  const derived = /--phase must be one of: (\S+)/.exec(r.stderr);
+  assert.ok(spelled, `usage line did not name its phases: ${r.stderr}`);
+  assert.ok(derived, `usage line did not derive its phases: ${r.stderr}`);
+  assert.equal(spelled[1], derived[1]);
+  assert.ok(derived[1].split('|').includes('regression'),
+    'the regression phase is one of them, and the bridge tests below rely on it');
+});
+
+// --- the regression phase ----------------------------------------------------
+// Lane-scoped like round1/round2/verify, and the only phase with a SECOND axis
+// in its filename: the pass is per fix commit, so one lane routinely writes
+// several payloads in an iteration and regression.mjs unions them. That axis is
+// digits, never letters — `regression-auditor-c.json` is a well-formed split
+// half everywhere else in this skill, and round 2's independence signal keys on
+// that distinction.
+//
+// None of this was reachable from a test before: `regression.mjs`'s own reader
+// calls `validateRegression(payload, payload.persona)`, which agrees with
+// itself, so the filename rule was only ever exercised here — and here had no
+// case for it.
+
+const goodRegression = (over = {}) => ({
+  persona: 'auditor',
+  commit: 'abc1234',
+  checked: [
+    { question: 'stricter', against: 'the callers of the tightened validator' },
+    { question: 'permissive', against: 'the relaxed signal list' },
+    { question: 'hot-path', against: 'the drain loop the warning now sits in' },
+    { question: 'shared-state', against: 'the module-scope writes' },
+  ],
+  added: [],
+  ...over,
+});
+
+test('a regression payload validates under the lane its filename names', () => {
+  const dir = freshTmp();
+  try {
+    const f = write(dir, 'regression-auditor.json', goodRegression());
+    const r = run(['--phase', 'regression', f]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ok \(auditor\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a regression payload filed under the wrong lane is refused', () => {
+  // The check that matters most for this phase: `chooseRegressionLane` picked a
+  // lane precisely so the reporter would not review its own fix, and a payload
+  // filed under a different name than it declares is that choice being undone.
+  const dir = freshTmp();
+  try {
+    const f = write(dir, 'regression-steward.json', goodRegression());
+    const r = run(['--phase', 'regression', f]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /`persona` must be 'steward', got "auditor"/);
+    assert.doesNotMatch(r.stdout, /ok \(/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a lane\'s several passes are numbered, and each validates as that lane', () => {
+  const dir = freshTmp();
+  try {
+    const one = write(dir, 'regression-auditor-1.json', goodRegression());
+    const two = write(dir, 'regression-auditor-2.json', goodRegression({ commit: 'def5678' }));
+    const r = run(['--phase', 'regression', one, two]);
+    assert.equal(r.status, 0, r.stderr);
+    // Both certify the LANE, not a half: a pass number is not an agent id, and
+    // `ok (auditor-1)` would claim a reviewer that does not exist.
+    assert.equal(r.stdout.match(/ok \(auditor\)/g)?.length, 2, r.stdout);
+    assert.doesNotMatch(r.stdout, /ok \(auditor-1\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a pass number does not become a lane half, and a half is still a half', () => {
+  // The two axes have to stay apart in both directions. `-2` must not read as
+  // an agent id (which is what `reportedBy` keys round 2's independence signal
+  // on), and `-a` must still read as one.
+  const dir = freshTmp();
+  try {
+    const numbered = write(dir, 'regression-adversary-2.json',
+      goodRegression({ persona: 'adversary' }));
+    assert.match(run(['--phase', 'regression', numbered]).stdout, /ok \(adversary\)/);
+
+    const half = write(dir, 'regression-adversary-a.json',
+      goodRegression({ persona: 'adversary' }));
+    assert.match(run(['--phase', 'regression', half]).stdout, /ok \(adversary-a\)/);
+
+    // And a split lane's half running several passes composes: half a, pass 1.
+    const both = write(dir, 'regression-adversary-a-1.json',
+      goodRegression({ persona: 'adversary' }));
+    assert.match(run(['--phase', 'regression', both]).stdout, /ok \(adversary-a\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the pass-number strip is scoped to the regression phase', () => {
+  // Loosening the round1/round2 derivation is how the half-binding critical
+  // would come back: there the basename is the agent's only unforgeable id, so
+  // `round1-auditor-1.json` still implies a persona named `auditor-1`.
+  const dir = freshTmp();
+  try {
+    const f = write(dir, 'round1-auditor-1.json', goodPhase1);
+    const r = run(['--phase', 'round1', f]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /filename implies persona 'auditor-1'/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a filename implying a persona outside the registry is refused', () => {

@@ -72,7 +72,14 @@ const VALIDATORS = Object.assign(Object.create(null), {
   // (src/regression.mjs picks which), so `regression-adversary.json` names the
   // persona its payload has to agree with — the check that catches a pass filed
   // under the lane that reported the finding it was run to keep away from.
-  regression: { validate: validateRegression, byPersona: true },
+  //
+  // `passNumbered` is the second axis this one phase needs. The pass is per FIX
+  // COMMIT and an iteration lands several, so one lane routinely writes more
+  // than one payload — which regression.mjs's `foldPayloads` unions into a
+  // single lane file on purpose. Following SKILL.md's old
+  // `regression-<persona>.json` literally, all N passes went to one path and
+  // N-1 were lost before the glob ever ran.
+  regression: { validate: validateRegression, byPersona: true, passNumbered: true },
 });
 
 const { values, positionals } = parseArgs({
@@ -102,9 +109,25 @@ if (!phase || !positionals.length) {
 // a closed failure, not a wrong answer, but do not read this pattern as the
 // capability. `values.phase` is a validated key of VALIDATORS above,
 // never arbitrary text, before it becomes part of a pattern.
+// A pass number: DIGITS, and it must never be letters.
+//
+// `regression-auditor-c.json` is already a well-formed SPLIT HALF id under the
+// rule above, and `reportedBy` in src/synthesis.mjs keys round 2's
+// independence signal on exactly that distinction — so numbering passes with
+// letters would let a pass masquerade as a half and re-open the critical the
+// half-binding rule closed. Digits cannot collide with a suffix `agentNames`
+// emits, which is `String.fromCharCode(97 + i)` and nothing else, so the pass
+// axis and the lane axis stay separate by construction rather than by
+// convention. `regression-auditor-a-1.json` composes: half a, pass 1.
+const PASS_NUMBER = /-\d+$/;
+
 function identityFromPath(file) {
-  const base = file.replace(/^.*\//, '').replace(/\.json$/, '')
+  let base = file.replace(/^.*\//, '').replace(/\.json$/, '')
     .replace(new RegExp(`^${values.phase}-`), '');
+  // Stripped only for the phase that HAS passes. Doing it unconditionally
+  // would loosen the round1/round2 derivation that binds a half to the file it
+  // was written to, which is the one unforgeable identity in this system.
+  if (phase.passNumbered) base = base.replace(PASS_NUMBER, '');
   const half = /^(.+)-[a-z]$/.exec(base);
   return half ? { persona: half[1], agent: base } : { persona: base, agent: null };
 }
