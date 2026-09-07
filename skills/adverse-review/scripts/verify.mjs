@@ -140,7 +140,10 @@ if (values.briefing) {
 // the finding — but it falls back to the blocking default and says so, and an
 // id that resolves to nothing is reported the way repair.mjs reports one.
 function bindToBriefing(v, src) {
-  if (!briefed.size) return null;
+  // BOTH indexes, or the title route is unreachable for the one anchor source
+  // that motivated it: a document whose findings carry no `id` fills
+  // `briefedByTitle` and leaves `briefed` empty, and this line returned first.
+  if (!briefed.size && !briefedByTitle.size) return null;
   let entry = briefed.get(v.id);
   if (!entry) {
     // The id named nothing. Fall back to the title, which is the join key every

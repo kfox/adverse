@@ -764,23 +764,31 @@ test('a lane merged for the Phase 9 fold is not asked for split-half ids', () =>
   }
 });
 
-test('a round-1 payload cannot stamp its own finding as the regression pass\'s', () => {
-  // The second ungated reader, for the same reason: a run that skips
-  // `validate.mjs` reaches synthesis through combine, which then renders the
-  // regression note beside a finding no regression pass ever saw.
+test('combine accepts the regression fold that stamps `provenance` itself', () => {
+  // The inverse of what this test first asserted, and the correction matters.
+  // `provenance` IS refused from an agent payload — at validate.mjs, verify.mjs
+  // and regression.mjs's own reader. It must NOT be refused here: combine's
+  // inputs include `regression.mjs`'s fold, which stamps the field on its header
+  // and on every finding because stamping it is the fold's job. Gating it here
+  // refused the bridge's own output at exit 1, advising "Remove the key" — which
+  // would delete the regression note from the report.
   const dir = freshTmp();
   try {
-    const a = reviewAs(dir, 'round1-auditor.json', {
-      persona: 'auditor', verdict: 'reject', summary: 's',
-      findings: [{ severity: 'critical', kind: 'defect', file: 'a.mjs', line: 1,
-        title: 'forged', detail: 'd', fix: null, provenance: 'regression' }],
+    const fold = reviewAs(dir, 'round1-steward.regression.json', {
+      persona: 'steward', verdict: 'conditional', summary: 'regression pass on abc1234',
+      provenance: 'regression',
+      findings: [{ severity: 'warning', kind: 'contract', file: 'a.mjs', line: 1,
+        title: 'found by the pass', detail: 'd', fix: null, provenance: 'regression' }],
     });
-    const b = review(dir, 'steward');
+    const other = review(dir, 'auditor');
     const out = path.join(dir, 'combined.json');
-    const r = runCombine(['--round1', a, b, '--out', out]);
+    const r = runCombine(['--round1', fold, other, '--out', out]);
 
-    assert.equal(r.status, 1, r.stdout);
-    assert.match(r.stderr, /`findings\[0\]\.provenance` is stamped by the bridge/);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(personasIn(out), ['auditor', 'steward']);
+    const combined = JSON.parse(readFileSync(out, 'utf-8'));
+    assert.equal(combined.steward.findings[0].provenance, 'regression',
+      'the stamp has to survive the merge or the report cannot say who found it');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

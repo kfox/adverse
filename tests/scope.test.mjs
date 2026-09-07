@@ -186,8 +186,15 @@ test('a sink past column 2000 is still found', () => {
   const diff = `--- a/b.js\n+++ b/b.js\n@@ -1 +1 @@\n+${line}\n`;
   const r = assessScope({ files: ['b.js'], diff });
   assert.equal(r.recommend, 'run');
-  assert.ok(r.evidence.length > 0);
-  assert.ok(r.evidence[0].sample.length <= 130, 'the recorded sample is still clipped');
+  // The SINK, by name. `run` and a non-empty `evidence` stopped discriminating
+  // when the length backstop landed: 3,000 x's satisfy both on their own, so
+  // this test passed with the 2,000-character truncation reintroduced and the
+  // `child_process` sink never found — verified by mutation. A test that
+  // survives the mutation it exists to catch is worse than no test.
+  assert.ok(r.evidence.some((e) => String(e.signal).includes('child_process')),
+    'the sink past column 2000 was not found — only the line-length backstop fired');
+  assert.ok(r.evidence.every((e) => e.sample.length <= 130),
+    'every recorded sample is still clipped');
 });
 
 test('scanning a very long line is still fast', () => {
