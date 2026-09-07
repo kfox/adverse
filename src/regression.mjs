@@ -59,27 +59,32 @@ const CANDIDATE_ORDER = Object.freeze({
 // prose read back as "the fix diff crosses a trust boundary (trust-boundary
 // signals present (0 in paths, 1 in added code, 0 in removed code))".
 //
-// `unreadable` keeps the ROUTINE order, and that is a decision rather than a
-// leftover. The boundary order's head position is earned by a positive fact —
-// "this change touches a control plane, where the Adversary is the most
-// valuable reviewer on the panel". A line too long for a bounded span
-// establishes only that the gate could not read it, which is an absence of
-// knowledge, and leading with the Adversary on an absence inverts the very
-// rationale the order is built on. Two things follow from that:
+// `unreadable` takes the BOUNDARY order, and the argument for giving it the
+// routine order is recorded here because it was careful and wrong, and because
+// it stood in this file for two commits after the table above stopped agreeing
+// with it. It ran: the boundary order's head position is earned by a positive
+// fact ("this change touches a control plane"), a line too long for a bounded
+// span establishes only that the gate could not read it, and leading with the
+// Adversary on an absence of knowledge inverts the rationale the order is built
+// on. It added that the population is mostly prose, and that "noisy" is not
+// additive in a pass that runs exactly one lane, since choosing the Adversary
+// means losing the Steward's read.
 //
-//   - The population is prose. 57 lines of this repository's own tracked files
-//     run past the limit, 39 of them in one README, and a signal that fires on
-//     most documentation commits carries no information about boundaries — the
-//     failure src/scope.mjs's PATH_SIGNALS list was pruned to avoid.
-//   - "Noisy" is not additive here. In `planReview` an Adversary that runs on a
-//     hunch costs two model calls and takes nothing away. This pass runs ONE
-//     lane, so choosing the Adversary is choosing to lose the Steward's read —
-//     and the Steward goes from second to LAST. A documentation-only fix commit
-//     is the archetype of the middle category the comment above says the
-//     Steward is placed ahead of the Adversary to catch.
+// What all of that misses is HOW a line becomes unreadable. Several
+// CONTENT_SIGNALS are bounded spans between two literals — the SQL one is
+// `/\bSELECT\b.{0,200}?\bFROM\b/is` — so padding the span defeats the pattern
+// and trips the length backstop in the same move. That makes `unreadable` the
+// signal-DEFEATED case, which is the Adversary's highest-value input rather
+// than its lowest, and it makes "the gate could not read this" adversarial
+// rather than neutral. Measured through the bridge: 710 characters of column
+// list between SELECT and FROM, wrapping `req.params.id` into a raw query,
+// selected `adversary` before the trigger existed and `auditor` after.
 //
-// The Adversary is not excluded, only third, and the clause names the
-// unreadable line out loud rather than hiding the demotion. Any genuine signal
+// The cost is real and paid on purpose: on a documentation-only fix the Steward
+// goes from second to third. The alternative is letting whoever wrote the diff
+// choose a non-Adversary reviewer by making one line long, and where one
+// direction is noisy and the other silent this project takes noisy. The clause
+// still names the unreadable line out loud. Any genuine signal
 // on the same diff still reports `boundary`, unreadable lines merely appended
 // to its reason — so the only diffs this moves to `routine` are the ones where
 // the gate found no boundary signal at all.

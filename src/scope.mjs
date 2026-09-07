@@ -162,8 +162,8 @@ const REMOVED_LINE_SIGNALS = [
 // ("anything unreadable counts as evidence", at the top of this file). That
 // closes the class rather than any one bound: exceeding ANY span limit can
 // now only cost model calls, never silence, whichever pattern the line
-// defeated. It is deliberately the noisy direction, and cheaply so: 57 lines
-// of this repository's own tracked files run past 200 characters, 39 of them
+// defeated. It is deliberately the noisy direction, and cheaply so: 52 lines
+// of this repository's own tracked files run past 200 characters, 34 of them
 // in one README, while a commit deleting a vendored or minified file — the
 // case where the bounds really do go blind — is exactly the one where nobody
 // can claim to have looked.
