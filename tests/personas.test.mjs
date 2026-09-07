@@ -171,10 +171,17 @@ test('isLaneAgent refuses another lane, a bad separator, and a non-letter suffix
 // did, was corrected to "THREE", and left the sentence four lines below still
 // reading "Both callers". So the count is gone from the prose and the names
 // are checked from here instead.
+// Keyed by the path from the repository root, not by basename, and that is not
+// cosmetic: `CALLER_SCAN_DIRS` holds three directories and two of them contain
+// a `regression.mjs`. On basenames a caller added under
+// `skills/adverse-review/scripts/` collided with `src/`'s and could only be
+// named in the header by a path that does not exist. Its sibling scan
+// (`handSpelledLaneAgentRule`) was already dir-qualified; this one is now too,
+// so the two agree.
 const ADVISORY_ONLY_CALLERS = {
-  'personas.mjs': 'crossReviews',
-  'regression.mjs': 'ELIGIBLE',
-  'scaling.mjs': 'sizeSkippable',
+  'src/personas.mjs': 'crossReviews',
+  'src/regression.mjs': 'ELIGIBLE',
+  'src/scaling.mjs': 'sizeSkippable',
 };
 
 const SRC_DIR = new URL('../src/', import.meta.url);
@@ -200,7 +207,7 @@ function callersOfAdvisoryOnlyLane() {
       .filter((line) => line.includes('advisoryOnlyLane(')
         && !line.trimStart().startsWith('//')
         && !line.includes('function advisoryOnlyLane('));
-    if (calls.length) callers.push(name);
+    if (calls.length) callers.push(`${dir}/${name}`);
   }
   }
 
@@ -232,8 +239,8 @@ test('the advisoryOnlyLane caller table names every call site, and invents none'
 test('src/personas.mjs names each caller it answers for, rather than counting them', () => {
   const header = advisoryOnlyLaneHeader();
   for (const [file, symbol] of Object.entries(ADVISORY_ONLY_CALLERS)) {
-    assert.ok(header.includes(`src/${file}`),
-      `the comment above advisoryOnlyLane never names src/${file}`);
+    assert.ok(header.includes(file),
+      `the comment above advisoryOnlyLane never names ${file}`);
     assert.ok(header.includes(symbol),
       `the comment above advisoryOnlyLane never names \`${symbol}\``);
   }
@@ -340,9 +347,15 @@ test('the longhand detector recognizes the shape, and not the guards beside it',
 });
 
 test('no new module spells the lane-agent fallback by hand instead of calling laneAgentOf', () => {
-  // A SUBSET check, deliberately. Converting one of the two listed sites is
-  // the open handoff and must not turn this red for whoever lands it; adding a
-  // third copy must. Delete an entry here once its site calls `laneAgentOf`.
+  // A SUBSET check, deliberately: converting a listed site is an open handoff
+  // and must not turn this red for whoever lands it, while a site the list does
+  // not name must. Delete an entry here once its site calls `laneAgentOf`.
+  //
+  // The count is deliberately not written down. This is the THIRD prose count
+  // of the same array to go stale — the first said "two questions" over three,
+  // the second survived the commit that deleted its siblings, and this one said
+  // "one of the two listed sites" beside a one-element list. The list is right
+  // here; anyone who needs its length can read it.
   for (const site of handSpelledLaneAgentRule()) {
     assert.ok(HAND_SPELLED_LANE_AGENT_RULE.includes(site),
       `${site} decides whose work an agent id names with its own ternary. `

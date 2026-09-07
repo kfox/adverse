@@ -355,9 +355,11 @@ export const DEFAULT_PERSONAS = Object.freeze(['auditor', 'adversary', 'steward'
 // there were three, was corrected to "THREE", and left the sentence four
 // lines below still saying "both callers". `ADVISORY_ONLY_CALLERS` in
 // tests/personas.test.mjs is the enumeration that is CHECKED — it is compared
-// against a scan of src/ for call sites, and it also requires each caller to
-// be named right here, so a fourth one cannot appear without this table
-// failing a test. Add the caller there; this is a rendering of it.
+// against a scan of `src/`, `bin/` and `skills/adverse-review/scripts/` for
+// call sites, keyed by path from the repository root because two of those
+// directories hold a `regression.mjs`. It also requires each caller to be named
+// right here, so a new one cannot appear without that table failing a test. Add
+// the caller there; this is a rendering of it.
 //
 // An UNKNOWN persona is not advisory-only, and every caller an unknown name
 // can reach fails toward giving that lane work: `crossReviews` answers yes,

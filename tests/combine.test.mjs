@@ -756,6 +756,32 @@ for (const order of ['labeled half first', 'unlabeled half first']) {
   });
 }
 
+// `declaresAgent` answers "does this payload declare an id AT ALL", and two of
+// its three arms were pinned by nothing: dropping `agent !== ''`, and then
+// `agent !== null` as well, each left the full suite green. An empty string and
+// an explicit null are how a payload omits the field while looking like it did
+// not — a serializer that writes every key, a template with the value deleted —
+// and either one beside a sibling's claim is the missing half this guard exists
+// to refuse.
+for (const [label, value] of [['an empty string', ''], ['an explicit null', null]]) {
+  test(`${label} in \`agent\` is an omission, not a claim`, () => {
+    const dir = freshTmp();
+    try {
+      const labeled = reviewAs(dir, 'arm-a.json', half('auditor-a'));
+      const blank = reviewAs(dir, 'arm-b.json', { ...NAMELESS_HALF, agent: value });
+      const out = path.join(dir, 'combined.json');
+      const r = runCombine(['--round1', labeled, blank,
+        '--merge-personas', 'auditor', '--out', out]);
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(r.stderr, /arm-b\.json: .*arm-a\.json declares `agent` "auditor-a"/);
+      assert.match(r.stderr, /has to say which half wrote it too/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('a plan that declares the lane `agents: 1` does not license a mixed pair', () => {
   const dir = freshTmp();
   try {
