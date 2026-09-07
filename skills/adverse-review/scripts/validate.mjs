@@ -92,10 +92,15 @@ if (!phase || !positionals.length) {
 // names no half — the unsplit lane, where the persona is the only id the
 // payload may claim.
 //
-// One letter, not `[ab]`: `agentNames` suffixes a, b, c … and parseLane allows
-// up to MAX_SPLIT_AGENTS of them, so the old pattern also mistook a legitimate
-// three-way split's `auditor-c` for a persona named `auditor-c` and refused it
-// as an unknown lane. `values.phase` is a validated key of VALIDATORS above,
+// One letter, not `[ab]`: `agentNames` suffixes a, b, c … up to
+// MAX_SPLIT_AGENTS, so the old pattern read `auditor-c` as a persona named
+// `auditor-c` and refused it as an unknown lane — the full alphabet
+// `agentNames` can emit has to round-trip through here. It does NOT follow that
+// a three-way split works end to end: `checkCount` in src/roster.mjs still
+// expects exactly 2 payloads for a merged lane, so three honest halves pass
+// this bridge and die at combine.mjs with a message about a stale file. That is
+// a closed failure, not a wrong answer, but do not read this pattern as the
+// capability. `values.phase` is a validated key of VALIDATORS above,
 // never arbitrary text, before it becomes part of a pattern.
 function identityFromPath(file) {
   const base = file.replace(/^.*\//, '').replace(/\.json$/, '')

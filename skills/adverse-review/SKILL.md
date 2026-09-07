@@ -521,8 +521,11 @@ single disposition only when **two independent personas** both call it `one` —
 the same cross-validation the report's confidence labels require, for the same
 reason: a confirmed group is one decision covering N findings, and one
 unopposed voice deciding that is exactly the consensus-of-one this design
-refuses everywhere else. A ruling from the persona that is the sole reporter of
-every citation is not a voice.
+refuses everywhere else. A ruling from the **reviewer** that is the sole
+reporter of every citation is not a voice — and for a split lane that reviewer
+is the half that reported, not the lane: the other half's ruling on its
+sibling's citations counts, exactly as its `validate` edge does. Two halves
+agreeing are still one voice, because the quorum counts personas.
 
 Everything short of that stays a candidate and its citations are decided one at
 a time: unruled, contested, oversized, or agreed by only one lane. `split`

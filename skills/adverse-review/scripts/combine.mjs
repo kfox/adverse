@@ -85,9 +85,20 @@ reportRoster(roster, 'combine');
 // files, so this is the roster the orchestrator actually spawned. Null when
 // the plan does not split this persona: `--merge-personas` alone declares a
 // split the plan has no roster for, and shape is then all there is to check.
+//
+// Null when the roster comes back EMPTY, not merely when there is no lane:
+// `agentNames` starts with `runLanes`, so a plan lane of
+// `{run: false, agents: 2}` — which `parseLane` accepts, since its floor is 0
+// when `run` is false — yields `[]`, and `[]` is truthy. The membership check
+// then read an empty expectation as "no id is legal" and refused both honest
+// halves with a message whose remedy line was blank: "expected ". Unreachable
+// today because `reportRoster` refuses a payload from a `run: false` lane
+// first, but the guard failed toward rejecting honest input with no way to
+// read why, so it fails to the shape check instead.
 function laneAgents(persona) {
   const lane = planLanes?.find((l) => l.persona === persona);
-  return lane && lane.agents > 1 ? agentNames([lane]) : null;
+  const names = lane && lane.agents > 1 ? agentNames([lane]) : [];
+  return names.length ? names : null;
 }
 
 // Belt and braces on the identity validate.mjs binds to each payload's

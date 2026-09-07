@@ -942,6 +942,39 @@ const halfCross = (agent, groups) =>
 
 const one = (reason) => [{ id: 'G1', ruling: 'one', reason }];
 
+// The unresolved-citation arm of `ruledOnOwnCitations`. A citation whose title
+// no round-1 finding carries reaches `buildRootCauses` with
+// `reporterAgents: null`, and the fallback treats its claimed reporter as
+// answering for the agents too — so it reads as self-ruling, which COSTS a
+// voice rather than minting one. A regression pass on the commit that added
+// that fallback flipped it to `?? []`, the fail-open direction, and the whole
+// suite stayed green: every citation in the fixtures above resolves. With
+// `?? []` a group whose citations are all unresolved gets a voice from the
+// reporting lane's other half plus one from anywhere else and reaches
+// `confirmed` — one lane's word collapsing N findings into one disposition.
+test('an unresolved citation\'s claimed reporter answers for its agents too', () => {
+  const { round1, groups } = soleCitation();
+  // The only change: the citation names a finding synthesis never built, so
+  // `findByTitle` misses and `reporterAgents` is null.
+  const unresolved = [{ ...groups[0],
+    citations: [{ ...groups[0].citations[0], title: 'a finding nobody reported' }] }];
+  const cross = {
+    auditor: mergeSplitCrossReviews(halfCross('auditor-a', []),
+                                    halfCross('auditor-b', one('b agrees'))),
+    steward: ruling('steward', 'G1', 'one', 'steward agrees'),
+  };
+  const rc = synthesize(round1, cross, { rootCauseGroups: unresolved }).rootCauses[0];
+  assert.deepEqual(rc.confirmation, { voices: 1, required: 2, selfRuled: ['auditor-b'] });
+  assert.equal(rc.status, 'proposed');
+
+  // The control, one variable apart: the SAME rulings over a citation that does
+  // resolve. `auditor-b` is then a genuine voice and the group is confirmed —
+  // so the assertion above is about resolution, not about the ruling shape.
+  const resolved = synthesize(round1, cross, { rootCauseGroups: groups }).rootCauses[0];
+  assert.deepEqual(resolved.confirmation, { voices: 2, required: 2, selfRuled: [] });
+  assert.equal(resolved.status, 'confirmed');
+});
+
 test('the other half of a split lane is a voice on a group it did not report', () => {
   const { round1, groups } = soleCitation();
   const stewardVoice = ruling('steward', 'G1', 'one', 'steward says one');
