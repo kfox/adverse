@@ -690,12 +690,19 @@ test('an agent id outside the plan\'s roster for that lane is refused', () => {
   }
 });
 
-test('a hand-declared split with no plan still needs two distinct ids of this lane', () => {
+test('a hand-declared split with no plan still holds a claimed id to this lane', () => {
   const dir = freshTmp();
   try {
     // `--merge-personas` without a plan has no roster to check against, so the
-    // membership check is shape (src/personas.mjs, isLaneAgent) — but presence
-    // and distinctness are exactly as load-bearing as they are under a plan.
+    // membership check is shape (src/personas.mjs, isLaneAgent) — and membership
+    // and distinctness are exactly as load-bearing here as they are under a
+    // plan. PRESENCE is the one check that reads on the population: with no plan
+    // there is no count of halves to hold the pair to, so two halves that BOTH
+    // omit `agent` are the Phase 9 fold's legs and are accepted. What makes an
+    // omission a MISSING half there is a sibling's claim, not the plan — the
+    // mixed-pair tests below, which is where presence is exercised in this
+    // population. This test's body only ever exercised membership, so read its
+    // name as the guarantee it actually covers.
     const a = reviewAs(dir, 'hand-a.json', half('auditor-a'));
     const b = reviewAs(dir, 'hand-b.json', half('adversary-b'));
     const out = path.join(dir, 'combined.json');
@@ -703,6 +710,92 @@ test('a hand-declared split with no plan still needs two distinct ids of this la
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stderr, /is not an agent of the 'auditor' lane/);
     assert.match(r.stderr, /'auditor-<letter>'/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- one id beside one omission is a missing half, not a leg ----------------
+//
+// Accepting two UNLABELED halves is deliberate: SKILL.md Phase 9 folds one
+// lane's verify and regression legs through `--merge-personas`, and neither
+// verify.mjs nor regression.mjs writes an `agent`. The same gate also admitted
+// the MIXED pair, and that one is not inert.
+//
+// Measured end to end before this guard, with no plan: combine exited 0, the
+// unlabeled half's finding was stamped `agent: "auditor"`, and a round-2
+// payload in which `auditor-a` validated that finding produced
+// `validators: []` and `confidence: "solo"` — where the identical review with
+// the second half stamped `auditor-b` records
+// `validators: [{persona: "auditor"}]` and `confidence: "consensus"`.
+// `reportedBy` (src/synthesis.mjs) reads the bare persona as "the whole lane
+// reported this" and discards the sibling's honest ruling with it. One omitted
+// optional field, one silently converted consensus.
+
+const NAMELESS_HALF = { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] };
+
+for (const order of ['labeled half first', 'unlabeled half first']) {
+  test(`a mixed labeled/unlabeled pair with no plan is refused (${order})`, () => {
+    const dir = freshTmp();
+    try {
+      const labeled = reviewAs(dir, 'mixed-a.json', half('auditor-a'));
+      const nameless = reviewAs(dir, 'mixed-b.json', NAMELESS_HALF);
+      const files = order === 'labeled half first' ? [labeled, nameless] : [nameless, labeled];
+      const out = path.join(dir, 'combined.json');
+      const r = runCombine(['--round1', ...files, '--merge-personas', 'auditor', '--out', out]);
+
+      assert.equal(r.status, 1, r.stdout);
+      // The guard reads the pair, not the argv order: the message always names
+      // the half that owes an id, then the sibling whose claim makes it owe one.
+      assert.match(r.stderr, /mixed-b\.json: .*mixed-a\.json declares `agent` "auditor-a"/);
+      assert.match(r.stderr, /has to say which half wrote it too/);
+      assert.match(r.stderr, /'auditor-<letter>'/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('a plan that declares the lane `agents: 1` does not license a mixed pair', () => {
+  const dir = freshTmp();
+  try {
+    // `--merge-personas` beside a `--plan` that does not split the lane is the
+    // Phase 9 fold's own documented invocation, and `laneAgents` returns null
+    // for it — so this is the no-plan population, reached the other way. The
+    // fold's two legs both omit `agent`; a pair where one half claims
+    // `auditor-a` is not that fold.
+    const a = reviewAs(dir, 'onelane-a.json', half('auditor-a'));
+    const b = reviewAs(dir, 'onelane-b.json', NAMELESS_HALF);
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--merge-personas', 'auditor',
+      '--plan', splitPlan(dir, 1), '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /onelane-b\.json/);
+    assert.match(r.stderr, /has to say which half wrote it too/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an `agent` that is not a string is a bad id, not a half that omitted one', () => {
+  const dir = freshTmp();
+  try {
+    // The classifier's named default, and it fails noisy. `payloadAgent`
+    // (src/synthesis.mjs) coerces an ill-formed id to the bare persona, so
+    // `agent: 42` is a half that will be stamped with the whole LANE while
+    // looking labeled. Reading it as an omission would let a pair of them
+    // through as two unlabeled legs and cost both halves their vote in
+    // silence; the membership check says it out loud instead.
+    const a = reviewAs(dir, 'typed-a.json', half(42));
+    const b = reviewAs(dir, 'typed-b.json', half(42));
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round1', a, b, '--merge-personas', 'auditor', '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /`agent` 42 is not an agent of the 'auditor' lane/);
+    assert.match(r.stderr, /typed-a\.json/);
+    assert.match(r.stderr, /typed-b\.json/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

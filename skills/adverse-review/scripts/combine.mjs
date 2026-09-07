@@ -118,6 +118,18 @@ function laneAgents(persona) {
   return names.length ? names : null;
 }
 
+// Does this payload DECLARE a half id at all? Not "declare a well-formed one":
+// `payloadAgent` in src/synthesis.mjs resolves an ill-formed value to the bare
+// persona, so `agent: 42` is a half that will be stamped with the whole lane
+// while looking labeled. Answering yes here routes it to the membership check
+// below, which says so out loud, instead of the missing-id branch, which would
+// pass it over as an omission. Distinct from src/synthesis.mjs's
+// `claimedAgent`, which asks whether a declared id is this lane's.
+function declaresAgent(payload) {
+  const agent = payload?.agent;
+  return agent !== undefined && agent !== null && agent !== '';
+}
+
 // Belt and braces on the identity validate.mjs binds to each payload's
 // filename. This is the MERGE site: two payloads become one lane here, and the
 // per-entry stamp that makes the merge safe is only worth as much as the two
@@ -128,36 +140,61 @@ function laneAgents(persona) {
 //     stamped with its sibling's name, and its round-2 ruling on its own
 //     finding counts as independent — a cross-validated critical drops to
 //     `disputed` and out of the open-blocking count;
-//   - a half declaring NONE: its entries are stamped with the bare persona,
-//     which `reportedBy` reads as "the whole lane reported this" and uses to
-//     discard its sibling's honest ruling. Immunity from cross-examination for
-//     the price of one omitted optional field.
+//   - one half declaring NONE while the other declares an id: the unlabeled
+//     half's entries are stamped with the bare persona, which `reportedBy`
+//     reads as "the whole lane reported this" and uses to discard its
+//     sibling's honest ruling. Immunity from cross-examination for the price
+//     of one omitted optional field. Measured end to end on a mixed pair:
+//     `validators: []` and `confidence: "solo"` where the same review with
+//     both halves labeled records `consensus`.
 //
-// The default is named explicitly: a lane that was NOT declared split is not
-// checked here at all. It has one payload, so there is no sibling to be
-// confused with, and its `agent` was already held against its own filename by
-// validate.mjs.
+// Only the second bullet reads on the population, and only for PRESENCE.
+// Membership and distinctness are checked for every merged lane either way.
+// Under a plan that declared the lane split, presence is required of every
+// half: the plan says how many halves exist. Under `--merge-personas` alone
+// there is no roster, and two halves with NO id are the Phase 9 fold's verify
+// and regression legs (neither verify.mjs nor regression.mjs emits the field)
+// rather than a split — so presence is required there only of a pair where
+// some half DOES claim an id, which is a missing half and not a leg. That
+// distinction needs no plan, only the sibling.
+//
+// A pair where NEITHER half claims an id passes this site, and the layer that
+// still catches an unlabeled half of a genuinely split lane is validate.mjs:
+// `identityFromPath` reads the half off the filename, and `validateAgent`
+// (src/prompts.mjs) refuses a payload written to `round1-auditor-b.json` that
+// omits the field.
+//
+// The default is named explicitly: a lane that neither the plan nor the flag
+// declared split is not checked here at all. It has one payload, so there is
+// no sibling to be confused with, and its `agent` was already held against its
+// own filename by validate.mjs.
+//
 // `legal` is the plan's id list for this lane, or null when no plan declared it
-// split. Only PRESENCE turns on that difference — see the `continue` below.
+// split. Only presence reads on that difference — see the two branches below.
 function splitAgentProblems(persona, legal, halves) {
   const expected = legal ? legal.join(' or ') : `'${persona}-<letter>'`;
   const claimedBy = new Map();
   const problems = [];
+  // The half that turns an unlabeled sibling into a MISSING half. Null when no
+  // half claims anything, which is the accepted two-leg fold.
+  const claimant = halves.find(({ payload }) => declaresAgent(payload));
   for (const { src, payload } of halves) {
     const agent = payload?.agent;
-    if (typeof agent !== 'string' || !agent) {
-      // Requiring an id needs the PLAN, and nothing else here does. Under
-      // `--merge-personas` alone, two payloads with no `agent` are either two
-      // unlabeled halves or one lane's verify and regression legs — and those
-      // legs write no `agent` at all (neither verify.mjs nor regression.mjs
-      // emits the field), so demanding one refused the Phase 9 fold this Skill
-      // prescribes, calling a one-agent lane "a declared split lane". Only the
-      // plan can tell a missing half from a leg that never had one.
+    if (!declaresAgent(payload)) {
       if (legal) {
         problems.push(`${src}: '${persona}' is a declared split lane, so this payload has to`
           + ` say which half wrote it: \`agent\` must be ${expected}.\n`
           + '  An unlabeled half is stamped with the bare persona, and its sibling\'s ruling'
           + ' on it is then discarded as the lane validating itself.');
+      } else if (claimant) {
+        problems.push(`${src}: ${claimant.src} declares`
+          + ` \`agent\` ${JSON.stringify(claimant.payload.agent)}, so this payload has to say`
+          + ` which half wrote it too: \`agent\` must be ${expected}.\n`
+          + '  Two halves that BOTH omit the field are one lane\'s verify and regression legs,'
+          + ' which is why an unlabeled pair is accepted here. One id beside one omission is a'
+          + ' missing half instead: the unlabeled half is stamped with the bare persona, and'
+          + ' its sibling\'s ruling on it is then discarded as the lane validating itself,'
+          + ' which turns a consensus finding into a solo one.');
       }
       continue;
     }
@@ -184,8 +221,9 @@ function splitAgentProblems(persona, legal, halves) {
 // `roster.merged` unions the plan's split lanes with the raw `--merge-personas`
 // values, and that flag is also how Phase 9 folds one lane's verify and
 // regression payloads — so membership and distinctness (which any claimed id
-// must satisfy either way) are enforced for all of them, and presence only
-// where `laneAgents` says the plan declared the lane split.
+// must satisfy either way) are enforced for all of them, and presence wherever
+// something says a second half exists: `laneAgents` reporting a plan-declared
+// split, or, with no plan, a sibling that declares a half id of its own.
 const idProblems = [...roster.merged].flatMap((persona) => splitAgentProblems(
   persona, laneAgents(persona),
   payloads.filter(({ payload }) => payload?.persona === persona)));
