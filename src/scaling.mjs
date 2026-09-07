@@ -54,9 +54,12 @@
 // flow only; the standalone CLI's `--personas` flag remains an explicit,
 // unscaled choice (see kfox/adverse#12).
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { DEFAULT_PERSONAS, PERSONAS, advisoryOnlyLane } from './personas.mjs';
 import { assessScope } from './scope.mjs';
 import { isBlocking } from './synthesis.mjs';
+
+refuseDirectRun(import.meta.url);
 
 // small = a diff one reviewer reads comfortably; large = one that exhausts a
 // reviewer's attention budget, the documented cause of deterministic lane

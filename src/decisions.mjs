@@ -25,6 +25,10 @@
 // flow: transcription drift, truncated `detail` fields, a decision recorded
 // from memory that had never been written to a file at all.
 
+import { refuseDirectRun } from './entryGuard.mjs';
+
+refuseDirectRun(import.meta.url);
+
 // Ids for items nobody ever assigned one. Two letters so it cannot collide with
 // triage's `F<n>` or its root causes' `G<n>`, and it carries the batch label so
 // two fix agents folded in separate invocations cannot both mint `NF1` for

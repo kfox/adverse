@@ -14,6 +14,10 @@
 
 import { constants, closeSync, fstatSync, openSync } from 'node:fs';
 
+import { refuseDirectRun } from './entryGuard.mjs';
+
+refuseDirectRun(import.meta.url);
+
 // O_NONBLOCK matters as much as O_NOFOLLOW here. Opening a FIFO for reading
 // BLOCKS until a writer appears, and the paths this opens come from reviewer
 // JSON — a checkout containing a committed FIFO (git stores mode 010000), or a

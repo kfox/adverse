@@ -19,8 +19,11 @@
 // This is a routing decision, not a security judgment: it says who reads the
 // commit, never whether the commit is safe.
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { DEFAULT_PERSONAS, advisoryOnlyLane, isLaneAgent } from './personas.mjs';
 import { SCOPE_TRIGGER, assessScope } from './scope.mjs';
+
+refuseDirectRun(import.meta.url);
 
 // The candidate order, best lens first — and the tail matters as much as the
 // head, because the first choice is routinely excluded and the second is then

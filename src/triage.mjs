@@ -13,9 +13,12 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { closeQuietly, openRegularFileSync } from './fsSafe.mjs';
 import { ADVISORY_KINDS, SEVERITIES, SEVERITY_RANK } from './taxonomy.mjs';
 import { parseHunks } from './trace.mjs';
+
+refuseDirectRun(import.meta.url);
 
 export const CLUSTER_WINDOW_LINES = 15;
 

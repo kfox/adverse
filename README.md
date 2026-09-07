@@ -306,6 +306,7 @@ src/                          # Shared core, used by both CLI and Skill
   html.mjs                    # Self-contained HTML dashboard renderer
   cli.mjs                     # Argv parsing + command dispatch
   fsSafe.mjs                  # Open-and-check without a TOCTOU gap
+  entryGuard.mjs              # Nothing here is runnable: `node src/x.mjs` refuses, exit 2
 
 bin/
   adverse.mjs                 # CLI entrypoint (#!/usr/bin/env node)

@@ -38,7 +38,10 @@
 // the single signal the whole design trusts most, and therefore the worst thing
 // this file can manufacture.
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { ADVISORY_KINDS } from './taxonomy.mjs';
+
+refuseDirectRun(import.meta.url);
 
 export const AUDITOR = {
   name: 'auditor',

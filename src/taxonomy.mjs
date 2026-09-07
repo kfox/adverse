@@ -4,6 +4,10 @@
 // renderer depending on ~300 lines of prompt text to learn that `design` is
 // advisory was backwards.
 
+import { refuseDirectRun } from './entryGuard.mjs';
+
+refuseDirectRun(import.meta.url);
+
 // Finding kinds. The axis is orthogonal to severity and answers a different
 // question: not "how bad is this" but "what evidence would settle it". That is
 // what makes it mechanically useful — it selects how a finding is verified,

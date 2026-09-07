@@ -6,6 +6,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { collectDirectory, collectDiff } from './collect.mjs';
+import { refuseDirectRun } from './entryGuard.mjs';
 import { PERSONAS, DEFAULT_PERSONAS, crossReviews } from './personas.mjs';
 import {
   buildPhase1Prompt,
@@ -16,6 +17,8 @@ import {
 import { AgentRunner, runParallel } from './runner.mjs';
 import { agentNames, parsePlan, runLanes } from './scaling.mjs';
 import { renderMarkdown, synthesize, toJsonReport } from './synthesis.mjs';
+
+refuseDirectRun(import.meta.url);
 
 const HELP = `Usage: adverse <command> [options]
 
