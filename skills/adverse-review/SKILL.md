@@ -94,6 +94,17 @@ Two rules follow from that table and both are load-bearing:
   the one signal the whole design trusts most, and it is the easiest to
   counterfeit.
 
+One more thing about that table, because it is the only roster in this file:
+**the agent driving the panel is not a fifth lane.** It reports no findings and
+nothing it does can block; its questions are how the repair should be divided,
+what each agent has to be told, and what may run at the same time. Those are
+decisions, not observations, so the rules governing them sit at the phase where
+each one is made — Phases 7, 9 and 11 — and not here. A rule read at the top of
+a long file is not read at the moment it applies, which is the failure this
+arrangement is built against: a doctrine that was written down and then not
+followed by the same person who wrote it, because the remembered habit and the
+filed correction feel equally like knowledge.
+
 ## Phase 0 — scope, run directory, and the repo's own gate
 
 **Pick scope.**
@@ -275,7 +286,10 @@ one per persona — two for a lane the plan split. Each gets:
     reply with the JSON in chat.
 - **Model**: `opus` unless the user asked otherwise. If the user picks a smaller
   model, pass it to every persona — mixing models across personas defeats the
-  single-model design.
+  single-model design. That rule is about the panel, whose whole method is one
+  model wearing four lenses. The roles outside it — a fix agent, the absorber
+  commit, the regression pass — are not lanes and are tiered per role instead;
+  Phase 7 says on what basis.
 
 The Steward needs one thing the others don't: point it at where this repo keeps
 its rules and its architecture notes (`CLAUDE.md`, `CONTRIBUTING.md`,
@@ -712,9 +726,121 @@ and the brief each one gets is improvised prose, different every time. **A
 reviewer's improvised brief costs a finding; a fix agent's costs a commit.** So
 the brief is generated, exactly like the reviewers' are.
 
-Partition the findings into batches that touch **disjoint files** wherever the
-findings allow it. Two agents editing one file is a conflict you resolve by
-reading the same code twice.
+**Sequence the fix commits by blast radius, not by review unit.** The findings
+arrive grouped by who was looking; that boundary is an artifact of the panel's
+own partition, and the findings worth having are the ones that cross it.
+Ordering repair by review unit forces every cross-cutting fix to be split across
+commits or assigned to one of them arbitrarily. Order by how far the change
+reaches instead — the shared type-level change, then its call sites, then the
+prose — which also leaves each commit independently reviewable; the review
+ordering does not.
+
+**A class is an indivisible unit of fix work. Partition between classes freely;
+never within one.** The worked example is three findings in three files with no
+overlap: an unthrottled per-frame warning, a second unthrottled per-message
+warning, and a reader bound that counts messages rather than the work each
+message buys. A decomposer optimizing for partitionability splits them three
+ways without hesitation. They are one lever — a byte on the wire buying
+unbounded work inside a bounded reader — and three agents produce three one-shot
+flags, leave the lever, and the next site anyone adds reintroduces the bug under
+a new name.
+
+Class closure is also where the fix phase out-finds the panel, and that is the
+argument against fragmenting it. The sibling sweep this section closes with —
+one agent, one working reproduction, a second reserved I/O window four reviewers
+across two rounds had missed — needs the whole neighborhood in a single agent's
+view. It is the first thing a finer partition loses and the last thing you would
+want to lose.
+
+**A class outranks the commit boundaries you drew for good reasons.** When a
+class spans them, the commit that owns the class gets every file the class
+reaches, and the *other* concerns in those files stay with their own commits.
+Blast radius is measured in behavior, not in files. Below that line, prefer
+batches touching **disjoint files**: two agents editing one file is a conflict
+you resolve by reading the same code twice.
+
+**Unbounded work is a task, not a rider.** "Fix the clock bug, then determine
+which existing budget tests were passing for the wrong reason" is one bounded
+clause and one with no stopping point; attached to the bounded work, the second
+ran about ninety minutes past it before anyone interrupted. An audit, a sweep,
+or a "check whether this is true everywhere" gets its own agent and its own
+commit, or gets scoped down to a question that has an answer. A fix agent that
+stops at its brief's boundary and names what it found there is behaving
+correctly — `fix.txt` tells it to — and that costs one line in a report instead
+of a fourth file in a commit three reviewers were about to read.
+
+**Count deferred items against the receiving commit's budget.** A `deferred`
+disposition is not free: it is a note that has to be written, placed, and
+carried into the next iteration's briefing. A commit taking on six of them
+alongside its fixes is doing more work than its finding count suggests.
+
+**Budget one docs-and-comments absorber commit per batch, placed after the fix
+commits.** Boundary-respecting agents shed orphans — comment- and doc-level
+items belonging to no remaining commit in the batch — and the `named_not_fixed`
+channel records each one `deferred`, which settles the ledger without ever doing
+the work. Riding them into an unrelated commit instead breaks the boundary rule
+that produced them. So: one absorber per batch, not one per commit, and not
+optional. Usually you write it yourself rather than spawning for it — the
+orphans are individually trivial and you are already holding the batch context
+someone else would have to be briefed on.
+
+None of this reads as "always decompose". Findings that are one type-level
+change seen from several call sites are one commit, because the intermediate
+commits do not compile. And an ordering dependency between two fixes is real —
+a budget test cannot be trusted until the clock it reads matches the clock the
+code reads — so it is a sequence, not a parallel opportunity.
+
+**Independent batches run concurrently, and the edge test is a file or a
+class.** Draw a dependency edge between two fix nodes iff they share a file
+**or** share a class; nodes with no edge between them can run at the same time,
+each in its own `git worktree` — the same isolation Phase 1 already gives
+reviewers, for the same reason. What serializes the fix phase otherwise is
+mechanical, not logical: commits land on one branch in one checkout, and a
+pre-commit hook that stashes unstaged changes fails spuriously while a second
+agent is editing. Two commits in one batch shared no file and no class and ran
+in sequence anyway, on that alone. `git worktree add --detach` off a checkout an
+agent is actively editing was measured not to disturb it — its modified files
+stayed modified and its index untouched — so the git half of this is safe. The
+environment half, below, is not.
+
+**Replay in topological order and re-run the gate on the composed result.**
+Per-worktree green does not compose. Cherry-pick each worktree's commit onto the
+branch in dependency order, then run the repo's own gate (Phase 0) over what
+that produced: N worktrees means N gate runs plus one, and a conflict on replay
+needs resolving. This buys wall-clock, not tokens — say which one you bought,
+because the setup cost is visible and the saving is not.
+
+**A worktree isolates the source tree. It does not isolate the build or
+dependency environment, and that is where the shared mutable state usually
+lives.** Phase 1 asks only that one worktree can run the gate, which is enough
+for reviewers because reviewers read; a fix agent builds. This has already cost
+a run: a worktree with no virtualenv of its own, a parent shell with the main
+checkout's environment activated, and a `uv sync` invoked transitively by a
+`make` target re-pointed the *shared* editable install at the worktree path. For
+about two minutes every import in the main checkout resolved to a tree without
+the concurrent agent's edits — no error, no warning, and the symptom is worse
+than a crash, because that agent sees an unexplained failure and may "fix"
+something that was never broken. So, before any agent runs in a worktree:
+
+- provision that worktree's own environment, and unset an inherited
+  `VIRTUAL_ENV` or whatever the toolchain's equivalent is — an activated parent
+  environment is what makes the hijack reachable at all;
+- **verify the parent still resolves to itself afterward.** One cheap command
+  from the parent checkout — `uv run python -c "import pkg; print(pkg.__file__)"`
+  for that toolchain — and the only thing that would have caught this;
+- treat any test result a concurrent agent produced during a provisioning window
+  as void, and say so to that agent rather than leaving it to reason from
+  phantom failures.
+
+The shape is not Python-specific: a shared target directory, a module cache, a
+daemon with a project-keyed workspace, or any linked install does the same.
+
+**Parallelism is not free, so it is not automatic.** Setup and replay cost the
+same whether the concurrent work is long or short. For a four-line change the
+worktree, its environment, and the topological replay cost more than waiting for
+the running agent to finish. Rough rule: parallelize a fix node when it is
+itself agent-sized. Orphans and the absorber commit are below that line and
+should just wait.
 
 Spawn one subagent per batch (`general-purpose`; there is no fix persona — a
 fix agent is a batch of repair work, not a lane) with:
@@ -737,6 +863,35 @@ portable half — reproduce before fixing, close the class, the mutation catalog
 what to do with something found out of scope — is already in `fix.txt` and is
 versioned with this skill, so it is not retyped per agent: each restatement is
 a place a rule gets silently dropped.
+
+**That per-agent cost is fixed, and it puts a floor under how small a batch is
+worth spawning for.** Six small agents restate the repository half six times,
+and the tokens are the cheap part: a rule lost in one of those restatements is
+lost quietly, and the batch that lost it fails the gate for a reason invisible
+from inside the agent. That is an argument against fine partitioning that has
+nothing to do with model capability, and it points the same direction the class
+rule does.
+
+**Tier is per role, not per size.** "Smaller tasks let you use a smaller model"
+bundles a premise that does not need to be true, and tier is testable at today's
+granularity with no decomposition change at all. Best candidate first: the
+regression pass (Phase 9), which is read-only, one question, bounded in output,
+the most repeated role in the loop and the least destructive if it comes back
+weak; then the docs-and-comments absorber, where nothing changes behavior and
+the gate is the whole test; then a test-only pinning commit. **Not the
+class-closure fix commit** — that is where the value is.
+
+The caveat is the crux, because a tier experiment measuring the wrong thing
+passes. On the "mechanical" test-only commit in one batch, the larger model
+re-derived three cycle constants from the assembly they model rather than
+trusting the brief, verified a reviewer-supplied arithmetic figure instead of
+asserting it, and caught a mutation-trap shape in its own new tests mid-pass —
+recognizing that a green mutation was anomalous and reaching for `fix.txt`'s
+catalog by name. That is recognition, not procedure. Whether a smaller model
+does it under load is unknown, and it is the difference between a fix and a
+plausible fix. So measure trap-recognition specifically rather than whether the
+commit landed green: a commit that lands green on a vacuous test is the failure
+this whole loop exists to prevent, and it looks identical to success.
 
 Then check what landed and fold it, the same way round 1 is checked:
 
@@ -1031,13 +1186,21 @@ surfaces that reading cannot:
 - **A blind spot the panel did not cover** — most valuably one a human found
   that four lanes missed. That is a gap in the lanes, not in the change.
 
+A fourth shape belongs to you rather than to the panel: **a decision you had to
+derive because nothing told you how.** How to divide the batch, what a fix agent
+had to be told, which nodes could run at once, which role could drop a tier —
+if you worked one of those out mid-run, the next orchestrator will work it out
+again. Write it into the phase where the decision gets made, not into a section
+about orchestration: doctrine filed near a decision is doctrine that gets
+skipped at it.
+
 Where each lesson goes:
 
 | The lesson is about | Write it to |
 |---|---|
 | how a reviewer should look | the persona's prompt in `src/personas.mjs`, or `VERIFY_INSTRUCTIONS` in `src/prompts.mjs` if it is about checking a fix |
 | how this repository works | its `CLAUDE.md` / `AGENTS.md` / architecture notes |
-| how the loop itself should run | this file |
+| how the loop itself should run | this file — in the phase that makes the decision, never as an appendix |
 | how *you* should work, across projects | your own persistent instructions or memory, if the harness gives you one |
 
 Then say what you wrote and why, in one or two sentences. Do not pad this: a
@@ -1062,7 +1225,7 @@ ledger, rather than only in conversation state.
 | 4 — round 2 | **Never** until every `round2-<persona>.json` passes `validate.mjs`, and never between triage and synthesize | Same unsaved-payload risk as Phase 2, plus `$ROUNDS`/`$CAP`/`$R2_REASON` exist only as shell variables until Phase 6 writes the report that carries them forward. |
 | 5 — repair, combine | Once `round1.json` and `round2.json` are written | The repaired and combined files are the only state Phase 6 needs. |
 | 6 — synthesize | Once `report.json` / `report.md` are written | This is the artifact the whole triage → synthesize span exists to produce. |
-| 7 — decide, record | **Never mid-fix-batch.** Safe once decisions are `--record`ed to the ledger *and* the fix commit lands with the gate re-run green | Before that, "which findings are fixed" and "what the diff contains" exist only as edits in flight — exactly the state Phases 8–9 depend on. |
+| 7 — decide, record | **Never mid-fix-batch.** Safe once decisions are `--record`ed to the ledger *and* every fix commit is on the branch with the gate re-run green over all of them together | Before that, "which findings are fixed" and "what the diff contains" exist only as edits in flight — exactly the state Phases 8–9 depend on. A worktree's own green is not the composed one, so a batch that ran concurrently is not checkpointable until the replay is done. |
 | 8 — check convergence | Anytime after it runs | Its exit code is derived entirely from the ledger and `report.json`, both already durable. |
 | 9 — verify | **Never** until every `verify-<persona>.json` passes validation | Same unsaved-reviewer-payload rule as Phases 2 and 4. |
 | 10 — hand over | Anytime | Everything is in the ledger, the branch, and (if opened) the PR. |
