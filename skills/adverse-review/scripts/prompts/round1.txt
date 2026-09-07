@@ -48,11 +48,13 @@ is.
 
 **Read the id off the path you were told to write to.** If that filename ends
 in `-<letter>.json` — `round1-auditor-a.json` — then `agent` is exactly
-`auditor-a`. If it does not, omit the key. Those are the only two
-right answers: the validator derives the expected id from the filename and
-refuses a payload that disagrees with it, because the filename is the one part
-of your identity you did not write. A half that omits the id cannot be told from
-the whole lane, and an id naming a lane you are not is a reviewer who does not
+`auditor-a`, and omitting the key is refused: a half that omits the id cannot
+be told from the whole lane. If the filename names no half, or you were given
+no path to write to at all, then omit the key — or write your bare persona
+name, which asserts the same thing and is accepted too. Nothing else is: the
+validator derives the expected id from the filename and refuses a payload that
+disagrees with it, because the filename is the one part of your identity you
+did not write, and an id naming a lane you are not is a reviewer who does not
 exist.
 
 `verdict` rubric:

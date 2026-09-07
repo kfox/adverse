@@ -198,8 +198,9 @@ it is `design`. If you cannot name the file the code disagrees with, it is not
 
 - `persona`, `validate`, `challenge` and `added` are required; each list may
   be empty. `groups` may be omitted when the briefing proposed none. `agent`
-  must be the id your output filename names, or omitted when that filename
-  names no half — see above; any other value is refused.
+  must be the id your output filename names; when that filename names no half,
+  or you were given no path to write to, omit it or write your bare persona
+  name — see above. Any other value is refused.
 - Do not re-report your own round-1 findings.
 - `id` and `title` must both be present and must agree with the briefing.
 - A `groups` entry's `id` must name a group in the briefing, and `ruling` must

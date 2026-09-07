@@ -205,7 +205,7 @@ misremembered.
 ```
 {
   "agent":    "<short label for this batch, e.g. fix-sid-bounds>",
-  "commits":  ["<sha>", …],
+  "commits":  ["<one sha, matching ^[0-9A-Za-z][0-9A-Za-z._/~^{}-]{0,63}$>", …],
   "fixed": [
     { "id": "F3", "title": "<verbatim from the briefing>",
       "kind": "defect" | "behavioral" | "contract" | "design",
@@ -268,7 +268,11 @@ them from the briefing rather than retyping them.
   legitimately commits nothing. `commits` may be empty only then — if
   `fixed` names a fix, `commits` must name the commit that made it, because
   the regression pass runs once per fix commit and cannot run against a commit
-  nobody named. Blank strings are refused, here as everywhere.
+  nobody named. Blank strings are refused, here as everywhere. Each entry is
+  ONE revision and nothing else — a sha, or a symbolic rev like `HEAD~2` —
+  checked against `/^[0-9A-Za-z][0-9A-Za-z._/~^{}-]{0,63}$/`,
+  because that string is handed to `git` as an argument and printed in this
+  tool's own summary. Prose around the sha ("abc1234 and def5678") is refused.
 - `mutations` is required on every `fixed` entry. An empty list is a claim that
   this fix added no test — reviewable, and sometimes true. A mutation entry
   naming no victim is not evidence and is refused.
