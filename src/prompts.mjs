@@ -8,6 +8,7 @@
 // briefing and makes reviewers read the repo themselves. See
 // PHASE2_BRIEFING_INSTRUCTIONS.
 
+import { isLaneAgent } from './personas.mjs';
 import { GROUP_RULINGS, KINDS, SEVERITIES } from './taxonomy.mjs';
 
 export const KIND_RUBRIC = `\`kind\` — what kind of claim this is. This selects how the finding gets
@@ -64,6 +65,7 @@ instruction exists to avoid.
 \`\`\`
 {
   "persona":   "<your persona name, lowercase>",
+  "agent":     "<your agent id, only if your lane was split; else omit>",
   "verdict":   "approve" | "conditional" | "reject",
   "summary":   "<one sentence, <= 200 chars>",
   "findings": [
@@ -71,6 +73,17 @@ ${FINDING_SCHEMA}
   ]
 }
 \`\`\`
+
+\`agent\` is for the one case where a lane is reviewed by two agents at once: a
+large diff partitioned by file, where you were told you are \`auditor-a\` or
+\`auditor-b\`. Write that id here and your persona name — unsuffixed — in
+\`persona\`. Both halves of a split lane share the persona deliberately, so that
+two halves reporting one problem cannot inflate it into agreement between two
+reviewers; the agent id is what lets round 2 tell your findings from your
+sibling's, so that its judgment on yours can count as the independent review it
+is. Omit the key entirely if nobody told you your lane was split. It must be
+your own persona name or that name with a suffix — an id naming a lane you are
+not is a reviewer who does not exist.
 
 \`verdict\` rubric:
 - \`approve\` — nothing in your lane warrants blocking the change.
@@ -254,6 +267,29 @@ left on the table, and a group marked \`oversized\` (too many citations for one
 disposition to be honest) is one the machinery has already refused to collapse,
 so say which smaller root causes are actually in there.
 
+## If your lane was split
+
+A large diff sometimes splits one lane across two agents, partitioned by file.
+If you were told you are \`auditor-b\` rather than plain \`auditor\`, then some of
+the briefing entries under your persona are your own round-1 work and some are
+your sibling's — every finding carries \`reporterAgent\`, which says which.
+
+**Your sibling's entries are the ones you are here for.** It read files you did
+not and reached its conclusions without seeing yours, so your judgment on them
+is independent in exactly the way a cross-review is supposed to be, and it
+counts as such. Read those the way you would read another lane's: open the
+code, and validate or challenge on what you find. The failure this instruction
+exists to stop is the easy one — reading everything under your own persona as
+prior work you already agree with, and passing it through unexamined, which
+spends the second agent's whole round and produces nothing.
+
+Your OWN entries are not up for re-litigation, same as any unsplit lane: they
+go forward as they are.
+
+Put your agent id in \`agent\`. Without it the synthesizer cannot tell you from
+your sibling, and it will fall back to discarding every ruling you made on your
+own lane — including the ones on the half you did not write.
+
 ## Your decisions
 
 - **validate** — this is real, in your lane or not. Cross-lane validation is the
@@ -279,6 +315,7 @@ payload that can be truncated or misremembered.
 \`\`\`
 {
   "persona": "<your persona name, lowercase>",
+  "agent":   "<your agent id, only if your lane was split; else omit>",
   "validate": [
     { "id": "F3", "from": "<reporter persona>", "title": "<verbatim from briefing>", "reason": "<why you agree, 1-3 sentences>" }
   ],
@@ -299,7 +336,8 @@ ${KIND_RUBRIC}
 ## Hard constraints
 
 - \`persona\`, \`validate\`, \`challenge\` and \`added\` are required; each list may
-  be empty. \`groups\` may be omitted when the briefing proposed none.
+  be empty. \`groups\` may be omitted when the briefing proposed none. \`agent\`
+  is required only if your lane was split, and must name your own lane.
 - Do not re-report your own round-1 findings.
 - \`id\` and \`title\` must both be present and must agree with the briefing.
 - A \`groups\` entry's \`id\` must name a group in the briefing, and \`ruling\` must
@@ -486,6 +524,26 @@ function validateFinding(f, label) {
   return null;
 }
 
+// `agent` is OPTIONAL, and absent means "this lane was not split", so the
+// agent id is the persona name. Present, it must name THIS lane: `auditor` or
+// `auditor-a`, never `adversary` and never `auditor_a`.
+//
+// An agent id that does not name its own lane is how a phantom reviewer gets
+// minted — the same class src/roster.mjs refuses for persona names, and worth
+// more here, because the id is what round 2's self-validation guard keys on.
+// A rejection rather than a coercion because this runs on the retry path,
+// where the model can be told what it got wrong; the readers downstream
+// coerce instead, and coerce toward the persona so a bad id can only ever cost
+// an edge, never manufacture one.
+function validateAgent(obj, personaName) {
+  if (!('agent' in obj)) return null;
+  if (!isLaneAgent(personaName, obj.agent)) {
+    return `\`agent\` must be '${personaName}' or '${personaName}-<suffix>',`
+      + ` got ${JSON.stringify(obj.agent)}.`;
+  }
+  return null;
+}
+
 // Returns null if `obj` is a valid phase-1 review, else an error string suitable
 // for feeding back to the model on retry.
 export function validatePhase1(obj, personaName) {
@@ -498,6 +556,8 @@ export function validatePhase1(obj, personaName) {
   if (obj.persona !== personaName) {
     return `\`persona\` must be '${personaName}', got ${JSON.stringify(obj.persona)}.`;
   }
+  const badAgent = validateAgent(obj, personaName);
+  if (badAgent) return badAgent;
   if (!VERDICTS.has(obj.verdict)) {
     return `\`verdict\` must be one of approve|conditional|reject, got ${JSON.stringify(obj.verdict)}.`;
   }
@@ -519,6 +579,8 @@ export function validatePhase2(obj, personaName) {
   if (obj.persona !== personaName) {
     return `\`persona\` must be '${personaName}', got ${JSON.stringify(obj.persona)}.`;
   }
+  const badAgent = validateAgent(obj, personaName);
+  if (badAgent) return badAgent;
   for (const key of ['validate', 'challenge']) {
     if (!Array.isArray(obj[key])) return `\`${key}\` must be an array.`;
     for (let i = 0; i < obj[key].length; i++) {

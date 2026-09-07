@@ -292,12 +292,21 @@ one member of a split lane fails, the lane is **degraded** unless that
 member's half is re-run — half the files got no reviewer, and an undeclared
 gap reads exactly like a clean review.
 
+**Tell each half its agent id, and tell it to put that id in `agent`** —
+`"persona": "auditor"`, `"agent": "auditor-a"`. The shared persona name is what
+stops two halves inflating one finding into agreement between two reviewers;
+the agent id beside it is what lets Phase 4 tell one half's findings from the
+other's, so that a half's judgment on its sibling's work counts as the
+independent review it is. Both are needed and neither substitutes for the
+other. Omit `agent` on any lane that was not split.
+
 Each subagent's JSON object, written to its own path rather than returned in
 chat, has this shape:
 
 ```json
 {
   "persona": "<auditor|adversary|steward|pragmatist>",
+  "agent": "<persona>-a | <persona>-b — split lanes only, else omit",
   "verdict": "approve|conditional|reject",
   "summary": "<one sentence>",
   "findings": [
@@ -442,13 +451,32 @@ Two dials move, both deterministic:
 
 If `$ROUNDS` is 1, phases 4–5 collapse the same way the "faster review" path
 does — but the skip rides into the report via `--round2-skipped`. Otherwise:
-for each persona that produced a valid round-1 review **except the
-Pragmatist**, spawn a subagent with the same persona system prompt and:
+for each **round-1 agent** that produced a valid review **except the
+Pragmatist's**, spawn a subagent with the same persona system prompt and:
 
 1. `${SKILL_DIR}/scripts/prompts/round2.txt`
 2. `$ADVERSE_RUN/briefing.json`
 3. the repo path and `$BASE`
-4. the path to write its own JSON object to: `$ADVERSE_RUN/round2-<persona>.json`
+4. the path to write its own JSON object to: `$ADVERSE_RUN/round2-<agent>.json`
+
+**Per agent, not per persona — a split lane spawns two.** `auditor-a` and
+`auditor-b` each get their own round-2 call and each declares its own id in
+`agent`, exactly as in round 1. That id is what makes the second call worth
+making: every briefing finding carries `reporterAgent`, so `-b` can see which
+entries under its persona are its sibling's rather than its own, and the
+synthesizer counts `-b`'s ruling on an `-a` finding as the independent
+cross-review it is. Left as one round-2 agent per persona, the orchestrator
+either hands one agent both halves — where it reads its sibling's work as its
+own prior work and passes it through unexamined — or spawns two that both claim
+the whole lane, whose rulings the self-validation guard then discards.
+
+The cost is **one extra round-2 call per split lane, on large diffs only**;
+lanes only ever split when a diff is large enough to exhaust one reviewer's
+attention (Phase 1), and only the Auditor and the Adversary split at all. What
+it buys is a validator that read different files from the reporter and reached
+its conclusions without seeing them — the same independence a cross-lane edge
+has, on the half of the diff no other lane was assigned. Do not economize by
+sending one agent both halves: that spends the tokens and produces nothing.
 
 **The Pragmatist skips round 2.** Its findings are advisory: cross-validation
 exists to decide what blocks, and nothing it reports can. Its round-1 output
@@ -505,6 +533,12 @@ node ${SKILL_DIR}/scripts/repair.mjs \
     --outdir "$ADVERSE_RUN"
 ```
 
+Pass every round-2 file, including both halves of a split lane
+(`round2-auditor-a.json`, `round2-auditor-b.json`) — `--round2
+"$ADVERSE_RUN"/round2-*.json` expands to exactly that. Each is repaired to
+`round2-<agent>.repaired.json`, keyed on the agent so two halves land in two
+files rather than one refusing to overwrite the other.
+
 It exits non-zero when an edge names an ID not in the briefing — a reviewer
 invented a finding number and that edge is about to vanish. Read the stderr
 lines; do not ignore the exit code.
@@ -523,11 +557,12 @@ node ${SKILL_DIR}/scripts/combine.mjs --round1 "$ADVERSE_RUN"/round1-*.json \
 node ${SKILL_DIR}/scripts/combine.mjs --round2 "$ADVERSE_RUN"/round2-*.repaired.json \
     --plan "$ADVERSE_RUN/plan.json" \
     --out "$ADVERSE_RUN"/round2.json
-    # --plan on round 2 is the ROSTER half only — round 2 spawns one agent per
-    # persona, so there is nothing to merge, and --merge-personas is still
-    # refused here. What it buys is the gate: a payload from a lane the plan
-    # recorded `run: false` is a stale file or a spoof, and this is the one
-    # place that can tell.
+    # --plan carries both halves here too, same as round 1. The ROSTER half is
+    # the gate: a payload from a lane the plan recorded `run: false` is a stale
+    # file or a spoof, and this is the one place that can tell. The SPLIT half
+    # unions a split lane's two round-2 payloads — validate, challenge, groups
+    # and added, each entry stamped with the agent that made it — and demands
+    # both: one half missing is a lane that cross-reviewed half the diff.
 ```
 
 

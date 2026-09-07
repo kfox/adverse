@@ -34,14 +34,24 @@ const problem = (exit, message) => ({ exit, message });
 const at = (src, message) => (src ? `${src}: ${message}` : message);
 
 // The lanes a caller must expect two payloads from: the ones named by hand
-// plus the ones the plan actually split. A split lane exists only in round 1 —
-// round 2 spawns one agent per persona from the briefing, and its payloads
-// carry validates/challenges rather than findings, so merging two would
-// silently drop the second one's work.
+// plus the ones the plan actually split. A split lane spans BOTH rounds — one
+// round-2 agent per round-1 agent, each declaring its own id — because that id
+// is what lets a half's ruling on its sibling's finding count as the
+// independent review it is. Round 2 used to be excluded here on the grounds
+// that merging two cross-reviews would drop the second one's work, which was
+// true while every entry arrived under a bare persona name and the
+// self-validation guard threw it away (kfox/adverse#50).
+//
+// Filtered on `crossReviews`: a hand-written plan can split a lane that never
+// produces a round-2 payload at all, and demanding two from it would refuse a
+// run for doing exactly what the design asks. Round 1's predicate is true for
+// every lane, so this is one expression rather than a branch per round.
 export function mergeRoster(lanes, explicit = [], { round = 1 } = {}) {
   return new Set([
     ...explicit,
-    ...(lanes && round === 1 ? splitLanes(lanes).map((l) => l.persona) : []),
+    ...(lanes
+      ? splitLanes(lanes).map((l) => l.persona).filter((p) => crossReviews(p, round))
+      : []),
   ]);
 }
 

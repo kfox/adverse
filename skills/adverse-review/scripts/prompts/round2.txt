@@ -89,6 +89,29 @@ left on the table, and a group marked `oversized` (too many citations for one
 disposition to be honest) is one the machinery has already refused to collapse,
 so say which smaller root causes are actually in there.
 
+## If your lane was split
+
+A large diff sometimes splits one lane across two agents, partitioned by file.
+If you were told you are `auditor-b` rather than plain `auditor`, then some of
+the briefing entries under your persona are your own round-1 work and some are
+your sibling's — every finding carries `reporterAgent`, which says which.
+
+**Your sibling's entries are the ones you are here for.** It read files you did
+not and reached its conclusions without seeing yours, so your judgment on them
+is independent in exactly the way a cross-review is supposed to be, and it
+counts as such. Read those the way you would read another lane's: open the
+code, and validate or challenge on what you find. The failure this instruction
+exists to stop is the easy one — reading everything under your own persona as
+prior work you already agree with, and passing it through unexamined, which
+spends the second agent's whole round and produces nothing.
+
+Your OWN entries are not up for re-litigation, same as any unsplit lane: they
+go forward as they are.
+
+Put your agent id in `agent`. Without it the synthesizer cannot tell you from
+your sibling, and it will fall back to discarding every ruling you made on your
+own lane — including the ones on the half you did not write.
+
 ## Your decisions
 
 - **validate** — this is real, in your lane or not. Cross-lane validation is the
@@ -114,6 +137,7 @@ payload that can be truncated or misremembered.
 ```
 {
   "persona": "<your persona name, lowercase>",
+  "agent":   "<your agent id, only if your lane was split; else omit>",
   "validate": [
     { "id": "F3", "from": "<reporter persona>", "title": "<verbatim from briefing>", "reason": "<why you agree, 1-3 sentences>" }
   ],
@@ -163,7 +187,8 @@ it is `design`. If you cannot name the file the code disagrees with, it is not
 ## Hard constraints
 
 - `persona`, `validate`, `challenge` and `added` are required; each list may
-  be empty. `groups` may be omitted when the briefing proposed none.
+  be empty. `groups` may be omitted when the briefing proposed none. `agent`
+  is required only if your lane was split, and must name your own lane.
 - Do not re-report your own round-1 findings.
 - `id` and `title` must both be present and must agree with the briefing.
 - A `groups` entry's `id` must name a group in the briefing, and `ruling` must

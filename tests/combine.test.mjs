@@ -329,14 +329,52 @@ test('--merge-personas leaves the duplicate guard live for lanes it does not nam
   }
 });
 
-test('--merge-personas is refused for --round2 — round-2 payloads carry no findings to union', () => {
+// This pair used to assert that --merge-personas was REFUSED for --round2. The
+// refusal was right for the code it guarded: two cross-reviews unioned under
+// one persona name gave synthesis no way to say which half ruled, so the
+// self-validation guard threw every ruling away and the merge really did drop a
+// payload's work. Each entry now carries its own agent id (kfox/adverse#50),
+// which is what makes the union worth doing — so these tests are rewritten to
+// pin the union, not deleted.
+test('--merge-personas unions a split lane\'s two round-2 payloads, stamped per agent', () => {
   const dir = freshTmp();
   try {
-    const a = review(dir, 'auditor');
+    const a = reviewAs(dir, 'r2-auditor-a.json', {
+      persona: 'auditor', agent: 'auditor-a',
+      validate: [{ id: 'F1', from: 'steward', title: 'T1', reason: 'a agrees' }],
+      challenge: [], groups: [{ id: 'G1', ruling: 'one', reason: 'a says one' }], added: [],
+    });
+    const b = reviewAs(dir, 'r2-auditor-b.json', {
+      persona: 'auditor', agent: 'auditor-b',
+      validate: [], added: [],
+      challenge: [{ id: 'F2', from: 'auditor', title: 'T2', reason: 'b disagrees' }],
+      groups: [],
+    });
+    const out = path.join(dir, 'combined.json');
+    const r = runCombine(['--round2', a, b, '--merge-personas', 'auditor', '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    const { auditor } = JSON.parse(readFileSync(out, 'utf-8'));
+    assert.deepEqual(auditor.validate.map((e) => [e.title, e.agent]), [['T1', 'auditor-a']]);
+    assert.deepEqual(auditor.challenge.map((e) => [e.title, e.agent]), [['T2', 'auditor-b']]);
+    assert.deepEqual(auditor.groups.map((g) => [g.id, g.agent]), [['G1', 'auditor-a']]);
+    // The merged object describes a lane, not a half, so it names no agent of
+    // its own — one there would label half B's rulings with half A's id.
+    assert.ok(!('agent' in auditor), 'the merged lane must not claim one half\'s id');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a split lane with only one round-2 half present is refused', () => {
+  const dir = freshTmp();
+  try {
+    const a = reviewAs(dir, 'r2-auditor-a.json', {
+      persona: 'auditor', agent: 'auditor-a', validate: [], challenge: [], added: [],
+    });
     const out = path.join(dir, 'combined.json');
     const r = runCombine(['--round2', a, '--merge-personas', 'auditor', '--out', out]);
-    assert.equal(r.status, 2);
-    assert.match(r.stderr, /applies only to --round1/);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /got 1/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -494,15 +532,17 @@ test('the Pragmatist missing from a round-2 combine is not warned about', () => 
   }
 });
 
-test('--merge-personas is still refused for --round2 even alongside --plan', () => {
+test('--plan derives the round-2 split roster too, and still demands both halves', () => {
   const dir = freshTmp();
   try {
-    const a = review(dir, 'auditor');
+    const a = reviewAs(dir, 'r2-auditor-a.json', {
+      persona: 'auditor', agent: 'auditor-a', validate: [], challenge: [], added: [],
+    });
     const plan = writePlan(dir, [{ persona: 'auditor', run: true, agents: 2, reason: 'split' }]);
     const out = path.join(dir, 'combined.json');
-    const r = runCombine(['--round2', a, '--plan', plan, '--merge-personas', 'auditor', '--out', out]);
-    assert.equal(r.status, 2);
-    assert.match(r.stderr, /applies only to --round1/);
+    const r = runCombine(['--round2', a, '--plan', plan, '--out', out]);
+    assert.equal(r.status, 1, 'half a split lane is a degraded lane, not a quiet success');
+    assert.match(r.stderr, /got 1/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

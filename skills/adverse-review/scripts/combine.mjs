@@ -13,6 +13,14 @@
 // must arrive in exactly two payloads: one half missing means half the diff
 // got no reviewer, which is a degraded lane, not a quiet success.
 //
+// That holds in round 2 as well, where it used to be refused outright. The
+// refusal's reasoning was correct for the code it was written against: two
+// cross-reviews unioned under one persona name gave synthesis no way to tell
+// which half ruled, so the self-validation guard discarded every ruling and
+// the merge really did drop a payload's work. Now each entry is stamped with
+// its own agent id, so unioning them is what makes a split lane's second
+// round-2 agent worth spawning at all (kfox/adverse#50).
+//
 // Every persona is checked against the registry before it is used as a key.
 // The persona string is model-written and untrusted: a prototype key
 // (`__proto__`) used to vanish a whole review into Object.prototype, and a
@@ -26,7 +34,8 @@ import { readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
 
 import { importFromSrc } from './package-root.mjs';
 
-const { mergeSplitReviews, normalizeVerdict } = await importFromSrc('synthesis.mjs');
+const { mergeSplitCrossReviews, mergeSplitReviews, normalizeVerdict } =
+  await importFromSrc('synthesis.mjs');
 const { checkRoster } = await importFromSrc('roster.mjs');
 
 const { values, positionals } = parseArgs({
@@ -42,23 +51,14 @@ const { values, positionals } = parseArgs({
 });
 
 if (!values.out) {
-  usage('Usage: combine.mjs (--round1 a.json b.json … [--merge-personas <persona>]… [--plan plan.json]) | (--round2 a.json b.json …) --out <combined.json>');
+  usage('Usage: combine.mjs (--round1 | --round2) a.json b.json …'
+    + ' [--merge-personas <persona>]… [--plan plan.json] --out <combined.json>');
 }
 
 const hasRound1 = values.round1 !== undefined;
 const hasRound2 = values.round2 !== undefined;
 if (hasRound1 === hasRound2) {
   process.stderr.write('combine: provide exactly one of --round1 or --round2\n');
-  process.exit(2);
-}
-
-// A split lane exists only in round 1; round 2 spawns one agent per persona
-// from the briefing, and its payloads carry validates/challenges rather than
-// findings, so a merge would silently drop the second payload's work. The
-// ROSTER half of --plan still applies to round 2 — the lanes round 2 runs are
-// a subset of the lanes the plan ran, so the gate is sound either way.
-if (values['merge-personas']?.length && hasRound2) {
-  process.stderr.write('combine: --merge-personas applies only to --round1\n');
   process.exit(2);
 }
 
@@ -80,6 +80,13 @@ reportRoster(checkRoster(
 // Null prototype: the persona string indexes this map, and a plain object
 // would answer `__proto__` with something truthy.
 const combined = Object.create(null);
+// A split lane's two halves union differently per round — findings, verdict and
+// summaries in round 1; validate, challenge, groups and added in round 2 — but
+// both stamp every entry with the agent that produced it. That stamp is what
+// makes the round-2 merge safe at all: without it both halves' rulings arrive
+// under one persona name and synthesis discards them as the lane validating
+// itself, which is the reason this was refused before kfox/adverse#50.
+const merge = hasRound2 ? mergeSplitCrossReviews : mergeSplitReviews;
 for (const { src, payload } of payloads) {
   if (hasRound1) {
     // Off-contract verdicts degrade to `reject`, loudly: synthesis scores an
@@ -95,7 +102,7 @@ for (const { src, payload } of payloads) {
   // Duplicates that are not a declared split lane were refused above, so a
   // second payload here is a half of one.
   const existing = combined[payload.persona];
-  combined[payload.persona] = existing ? mergeSplitReviews(existing, payload) : payload;
+  combined[payload.persona] = existing ? merge(existing, payload) : payload;
 }
 
 writeFileSync(values.out, JSON.stringify(combined, null, 2), 'utf-8');

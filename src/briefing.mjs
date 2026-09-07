@@ -21,6 +21,7 @@
 // I/O and the exit codes. Same split as ledger.mjs's `checkBinding`.
 
 import { emptyLedger, isRegressionCandidate, annotate } from './ledger.mjs';
+import { isLaneAgent } from './personas.mjs';
 import { ADVISORY_KINDS } from './taxonomy.mjs';
 import {
   CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings,
@@ -32,6 +33,15 @@ import { mergeSplitReviews, normalizeVerdict } from './synthesis.mjs';
 // `counterpart` and `detail` come out of a model, and downstream they reach a
 // bounds test, a path resolver and a prose scan that each assumed a type
 // nothing had established.
+// The agent id, coerced toward the persona. An id that does not name its own
+// lane is a phantom reviewer, and this string goes in front of every round-2
+// agent as the answer to "was this mine?" — so a bad one falls back to the
+// lane, where it reads as the whole lane's work and gets examined, rather than
+// as a stranger's.
+function reporterAgentOf(review) {
+  return isLaneAgent(review?.persona, review?.agent) ? review.agent : review?.persona;
+}
+
 function ingest(reviews, { checkClaim, checkCounterpart, advisoryKinds }) {
   const findings = [];
   const rejectedAnchors = [];
@@ -44,6 +54,15 @@ function ingest(reviews, { checkClaim, checkCounterpart, advisoryKinds }) {
       findings.push({
         id,
         reporter: review.persona,
+        // Which AGENT of that lane, where the lane was split in two. Round 2
+        // spawns one agent per round-1 agent, and this is the only field that
+        // lets one of them tell its own prior work from its sibling's — without
+        // it a split lane's round-2 agent reads every entry under its persona
+        // as its own and passes the lot through unexamined, which is half the
+        // cost kfox/adverse#50 names. Always present, equal to `reporter` for
+        // an unsplit lane: a field that appears only sometimes is one every
+        // consumer has to guess about.
+        reporterAgent: reporterAgentOf(review),
         // On the FINDING, not only on stdout. A coerced-away anchor left the
         // briefing looking exactly like a finding whose reporter never
         // supplied one — and briefing.json is what round 2 reads, so the

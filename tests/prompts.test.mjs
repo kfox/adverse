@@ -37,6 +37,33 @@ test('phase1: valid with findings', () => {
   assert.equal(validatePhase1(p, 'auditor'), null);
 });
 
+// `agent` is optional and absent means "this lane was not split". Present, it
+// must name THIS lane — an id naming a lane the payload is not is how a phantom
+// reviewer gets minted, and it is worth more than an invented persona name
+// because the persona has a registry to be checked against and the agent id has
+// none. Round 2's self-validation guard keys on this string.
+test('phase1/2: an omitted `agent` is valid — an unsplit lane names none', () => {
+  assert.equal(validatePhase1(goodPhase1(), 'auditor'), null);
+  assert.equal(validatePhase2(goodPhase2(), 'auditor'), null);
+});
+
+test('phase1/2: `agent` may be this lane\'s own name, split or not', () => {
+  for (const agent of ['auditor', 'auditor-a', 'auditor-b']) {
+    assert.equal(validatePhase1({ ...goodPhase1(), agent }, 'auditor'), null, agent);
+    assert.equal(validatePhase2({ ...goodPhase2(), agent }, 'auditor'), null, agent);
+  }
+});
+
+test('phase1/2: an `agent` naming another lane is refused', () => {
+  for (const agent of ['adversary', 'adversary-a', 'auditor_a', 'auditor-', 'Auditor-a',
+                       'auditor-a1', '__proto__', '', null, 42]) {
+    assert.match(validatePhase1({ ...goodPhase1(), agent }, 'auditor'),
+      /`agent` must be 'auditor'/, `phase1 ${JSON.stringify(agent)}`);
+    assert.match(validatePhase2({ ...goodPhase2(), agent }, 'auditor'),
+      /`agent` must be 'auditor'/, `phase2 ${JSON.stringify(agent)}`);
+  }
+});
+
 test('phase1: rejects non-dict', () => {
   const err = validatePhase1([], 'auditor');
   assert.match(err, /object/);

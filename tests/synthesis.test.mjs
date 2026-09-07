@@ -5,8 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  isBlocking, isOpenBlocking, mergeSplitReviews, normalizeVerdict, renderMarkdown,
-  synthesize, toJsonReport, worseVerdict,
+  isBlocking, isOpenBlocking, mergeSplitCrossReviews, mergeSplitReviews,
+  normalizeVerdict, renderMarkdown, synthesize, toJsonReport, worseVerdict,
 } from '../src/synthesis.mjs';
 import { renderHtml } from '../src/html.mjs';
 
@@ -169,6 +169,167 @@ test('self-validation does not count', () => {
   const s = synthesize(r1, r2);
   assert.deepEqual(s.findings[0].validators, []);
   assert.equal(s.findings[0].confidence, 'solo');
+});
+
+// --- Split lanes: one persona, two agents ------------------------------------
+//
+// A lane the plan split writes ONE persona name from both halves, deliberately:
+// `reporters` dedupes on persona, so two halves finding the same thing cannot
+// inflate it to `cross-validated`. Round 2 has to tell them apart anyway, or
+// `auditor-b`'s judgment on `auditor-a`'s findings — as independent as any
+// other lane's — is discarded as the lane rubber-stamping itself
+// (kfox/adverse#50). Both properties are asserted below; the second must not
+// have cost the first.
+
+// A half of a split lane, in the shape it writes its own file.
+const half = (agent, findings) =>
+  ({ persona: 'auditor', agent, verdict: 'approve', summary: agent, findings });
+
+// A half's round-2 payload.
+const crossOf = (agent, validate = [], challenge = []) =>
+  ({ persona: 'auditor', agent, validate, challenge, added: [] });
+
+// What combine.mjs hands synthesis: the two halves unioned under one persona.
+const splitLane = (aFindings, bFindings = []) =>
+  mergeSplitReviews(half('auditor-a', aFindings), half('auditor-b', bFindings));
+
+test('mergeSplitReviews stamps each half\'s findings with the agent that reported them', () => {
+  const merged = splitLane([f('from A')], [f('from B')]);
+  assert.deepEqual(merged.findings.map((x) => [x.title, x.agent]),
+    [['from A', 'auditor-a'], ['from B', 'auditor-b']]);
+  // The merged object describes a LANE. Half A's id left on it would label half
+  // B's verdict, summary and findings with half A's name.
+  assert.ok(!('agent' in merged), 'the merged lane must not claim one half\'s id');
+});
+
+test('a sibling\'s ruling on the other half\'s finding counts', () => {
+  const s = synthesize(
+    { auditor: splitLane([f('A-side bug')]) },
+    { auditor: crossOf('auditor-b', [{ from: 'auditor', title: 'A-side bug', reason: 'read it, agree' }]) },
+  );
+  assert.deepEqual(s.findings[0].validators, [{ persona: 'auditor', reason: 'read it, agree' }]);
+  assert.equal(s.findings[0].confidence, 'consensus');
+});
+
+test('an agent\'s ruling on its OWN finding still does not count', () => {
+  const s = synthesize(
+    { auditor: splitLane([f('A-side bug')]) },
+    { auditor: crossOf('auditor-a', [{ from: 'auditor', title: 'A-side bug', reason: 'I still agree' }]) },
+  );
+  assert.deepEqual(s.findings[0].validators, []);
+  assert.equal(s.findings[0].confidence, 'solo');
+});
+
+test('a sibling\'s challenge counts, and its own does not', () => {
+  const entry = [{ from: 'auditor', title: 'A-side bug', reason: 'the caller guards it' }];
+  const sibling = synthesize({ auditor: splitLane([f('A-side bug')]) },
+    { auditor: crossOf('auditor-b', [], entry) });
+  assert.equal(sibling.findings[0].confidence, 'disputed');
+  const own = synthesize({ auditor: splitLane([f('A-side bug')]) },
+    { auditor: crossOf('auditor-a', [], entry) });
+  assert.deepEqual(own.findings[0].challengers, []);
+});
+
+test('a round-2 payload naming no agent behaves exactly as it does today', () => {
+  // The fail-closed default. An orchestrator that has never heard of agent ids
+  // sends no `agent`, and it must not start counting a lane's ruling on its own
+  // finding as independent by doing nothing at all.
+  const unnamed = {
+    persona: 'auditor', challenge: [], added: [],
+    validate: [{ from: 'auditor', title: 'A-side bug', reason: 'agree' }],
+  };
+  const s = synthesize({ auditor: splitLane([f('A-side bug')]) }, { auditor: unnamed });
+  assert.deepEqual(s.findings[0].validators, []);
+  assert.equal(s.findings[0].confidence, 'solo');
+});
+
+test('an id that does not name its own lane buys nothing', () => {
+  // Every one of these resolves to the lane, which is the fail-closed
+  // direction: a bad id can cost an edge, never mint one. `auditor` itself is
+  // in the list because a payload claiming to BE the whole lane is claiming to
+  // contain both halves, so it can be neither of them.
+  for (const agent of ['auditor', 'adversary-b', 'auditor_b', 'auditor-', 'Auditor-b',
+                       'auditor-b2', '__proto__', 42]) {
+    const s = synthesize(
+      { auditor: splitLane([f('A-side bug')]) },
+      { auditor: crossOf(agent, [{ from: 'auditor', title: 'A-side bug', reason: 'agree' }]) },
+    );
+    assert.deepEqual(s.findings[0].validators, [], `agent ${JSON.stringify(agent)}`);
+  }
+});
+
+test('a half cannot stamp its sibling\'s id on its own finding', () => {
+  // The stamp is a JSON field, so a round-1 payload can put anything in it. The
+  // merge overwrites it unconditionally, and overwriting toward the lane that
+  // actually wrote the file is what stops a half from buying itself an
+  // independent-looking vote on its own work.
+  const spoofed = half('auditor-a', [{ ...f('Mine, really'), agent: 'auditor-b' }]);
+  const merged = mergeSplitReviews(spoofed, half('auditor-b', []));
+  assert.deepEqual(merged.findings.map((x) => x.agent), ['auditor-a']);
+  const s = synthesize({ auditor: merged },
+    { auditor: crossOf('auditor-a', [{ from: 'auditor', title: 'Mine, really', reason: 'agree' }]) });
+  assert.deepEqual(s.findings[0].validators, []);
+});
+
+test('a split lane cannot push two validators under one persona', () => {
+  // `validators.length` is what turns a finding into `consensus`, and the group
+  // `voices` count reads the same shape. Two halves ruling is two agents and
+  // still one lane.
+  const round1 = {
+    auditor: splitLane([]),
+    steward: { persona: 'steward', verdict: 'approve', summary: '', findings: [f('Steward finding')] },
+  };
+  const edge = (reason) => [{ from: 'steward', title: 'Steward finding', reason }];
+  const both = mergeSplitCrossReviews(
+    crossOf('auditor-a', edge('a agrees')), crossOf('auditor-b', edge('b agrees')));
+  const s = synthesize(round1, { auditor: both });
+  assert.deepEqual(s.findings[0].validators, [{ persona: 'auditor', reason: 'a agrees' }]);
+
+  const contra = mergeSplitCrossReviews(
+    crossOf('auditor-a', [], edge('a objects')), crossOf('auditor-b', [], edge('b objects')));
+  const c = synthesize(round1, { auditor: contra });
+  assert.deepEqual(c.findings[0].challengers, [{ persona: 'auditor', reason: 'a objects' }]);
+});
+
+test('`reporters` still dedupes: two halves reporting one thing stay solo', () => {
+  const s = synthesize({
+    auditor: splitLane([f('Same bug', 'critical', 'db.py', 22)], [f('Same bug', 'critical', 'db.py', 22)]),
+  });
+  assert.equal(s.findings.length, 1, 'the two halves must merge into one finding');
+  assert.deepEqual(s.findings[0].reporters, ['auditor'], 'confidence still counts lanes');
+  assert.deepEqual(s.findings[0].reporterAgents, ['auditor-a', 'auditor-b']);
+  assert.equal(s.findings[0].confidence, 'solo');
+});
+
+test('a finding BOTH halves reported is neither half\'s to validate', () => {
+  const round1 = {
+    auditor: splitLane([f('Same bug', 'critical', 'db.py', 22)], [f('Same bug', 'critical', 'db.py', 22)]),
+  };
+  for (const agent of ['auditor-a', 'auditor-b']) {
+    const s = synthesize(round1,
+      { auditor: crossOf(agent, [{ from: 'auditor', title: 'Same bug', reason: 'agree' }]) });
+    assert.deepEqual(s.findings[0].validators, [], agent);
+  }
+});
+
+test('an unsplit lane reports as itself, and cannot validate its own finding', () => {
+  // The whole lane's id sits in `reporterAgents`, so a half claiming to be one
+  // of two agents on a lane that was never split still cannot rule on it.
+  const round1 = { auditor: { persona: 'auditor', verdict: 'approve', summary: '',
+                             findings: [f('Whole-lane bug')] } };
+  assert.deepEqual(synthesize(round1).findings[0].reporterAgents, ['auditor']);
+  const s = synthesize(round1,
+    { auditor: crossOf('auditor-b', [{ from: 'auditor', title: 'Whole-lane bug', reason: 'agree' }]) });
+  assert.deepEqual(s.findings[0].validators, []);
+});
+
+test('another lane\'s ruling is unaffected by any of this', () => {
+  const s = synthesize(
+    { auditor: splitLane([f('A-side bug')]) },
+    { steward: { persona: 'steward', challenge: [], added: [],
+                 validate: [{ from: 'auditor', title: 'A-side bug', reason: 'agree' }] } },
+  );
+  assert.deepEqual(s.findings[0].validators, [{ persona: 'steward', reason: 'agree' }]);
 });
 
 test('title normalization handles whitespace and case', () => {

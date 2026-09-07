@@ -158,10 +158,10 @@ function briefingAt(dir) {
   return briefing;
 }
 
-function round2At(dir, name, persona) {
+function round2At(dir, name, persona, agent = undefined) {
   const file = path.join(dir, name);
   writeFileSync(file, JSON.stringify({
-    persona, validates: [], challenges: [], added: [],
+    persona, agent, validates: [], challenges: [], added: [],
   }));
   return file;
 }
@@ -185,6 +185,42 @@ test('a re-cased persona is refused — it is a different key to the synthesizer
     const r = runRepair(['--briefing', briefingAt(dir), '--round2', src, '--outdir', dir]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /unknown persona "Auditor"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A split lane sends TWO round-2 payloads under one persona now
+// (kfox/adverse#50). Keying the destination on the persona collapsed them onto
+// one path, where the write guard — doing its job — refused the second half and
+// took the whole phase down.
+test('a split lane\'s two halves repair to two files, one per agent', () => {
+  const dir = freshTmp();
+  try {
+    const a = round2At(dir, 'round2-auditor-a.json', 'auditor', 'auditor-a');
+    const b = round2At(dir, 'round2-auditor-b.json', 'auditor', 'auditor-b');
+    const r = runRepair(['--briefing', briefingAt(dir), '--round2', a, '--round2', b, '--outdir', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    for (const agent of ['auditor-a', 'auditor-b']) {
+      const out = JSON.parse(readFileSync(path.join(dir, `round2-${agent}.repaired.json`), 'utf-8'));
+      assert.equal(out.agent, agent);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an agent id that is not this lane\'s does not get to name a file', () => {
+  // The id is model-written and it is about to be interpolated into a path.
+  // Anything but the persona plus a letter suffix falls back to the persona,
+  // where the write guard is still watching.
+  const dir = freshTmp();
+  try {
+    const a = round2At(dir, 'round2-auditor-a.json', 'auditor', '../escaped');
+    const r = runRepair(['--briefing', briefingAt(dir), '--round2', a, '--outdir', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /round2-auditor\.repaired\.json/);
+    assert.doesNotMatch(r.stdout, /escaped/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

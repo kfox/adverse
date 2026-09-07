@@ -361,3 +361,24 @@ export function crossReviews(persona, round = 1, { personas = PERSONAS } = {}) {
   const kinds = personas[persona].kinds ?? [];
   return kinds.length === 0 || !kinds.every((kind) => ADVISORY_KINDS.has(kind));
 }
+
+// Whether an agent id names THIS lane. A lane the plan did not split writes no
+// id at all and its agent is the persona itself; a lane split in two writes
+// `auditor-a` and `auditor-b` (src/scaling.mjs, `agentNames`, whose suffixes
+// come off `String.fromCharCode(97 + i)` — hence lowercase letters and nothing
+// else).
+//
+// This is the same class of guard `checkRoster` applies to the persona name one
+// field up, and it matters more here. The persona name is checked against a
+// registry, so an invented one is caught by construction; an agent id has no
+// registry, and round 2's self-validation guard keys on it — an id that does
+// not name its own lane would buy an agent an independent-looking vote on its
+// own finding, which is the single signal this whole design exists to produce.
+// The id also reaches a filename in repair.mjs, so a suffix that is not
+// letters is a path, not a name.
+export function isLaneAgent(persona, agent) {
+  if (typeof persona !== 'string' || typeof agent !== 'string') return false;
+  if (agent === persona) return true;
+  const prefix = `${persona}-`;
+  return agent.startsWith(prefix) && /^[a-z]+$/.test(agent.slice(prefix.length));
+}

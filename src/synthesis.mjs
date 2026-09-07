@@ -33,6 +33,7 @@
 // are both credible enough (cross-validated or consensus) and consequential
 // enough (not advisory, not `info`) to hold a change open.
 
+import { isLaneAgent } from './personas.mjs';
 import { ADVISORY_KINDS, GROUP_RULINGS, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
          assertCoversStatuses } from './taxonomy.mjs';
 
@@ -70,16 +71,112 @@ export function worseVerdict(a, b) {
 // The summary cell cap below is derived from this bound for the same reason.
 const MERGED_SUMMARY_PART_MAX = 200;
 const SUMMARY_CELL_MAX = 2 * MERGED_SUMMARY_PART_MAX + ' · '.length;
+
+// ---------- Agent identity ---------------------------------------------------
+//
+// A lane split across two agents writes ONE persona name from both halves, on
+// purpose: `reporters` dedupes on persona, so two halves finding the same thing
+// cannot inflate it to `cross-validated`. That property is untouched here.
+// What the persona name cannot do is tell `auditor-a` from `auditor-b`, and
+// round 2's self-validation guard needs exactly that — `-b` read different
+// files and its judgment on `-a`'s findings is as independent as any other
+// lane's, but the guard used to discard it as the lane rubber-stamping itself.
+//
+// Three questions, one rule underneath: an id counts only if it names its own
+// lane (src/personas.mjs, `isLaneAgent`). Everything else resolves toward the
+// persona, which is the behavior that predates this field.
+
+// The id an entry claims, or null when it claims none the lane will vouch for.
+// An entry stamped by a split-lane merge answers for itself; otherwise the
+// payload answers for all of its entries.
+function claimedAgent(persona, payload, entry) {
+  const claimed = coerceStr(entry?.agent) ?? coerceStr(payload?.agent);
+  return isLaneAgent(persona, claimed) ? claimed : null;
+}
+
+// Who REPORTED an entry. The bare persona is a legitimate answer here — an
+// unsplit lane reports as itself — so nothing is refused, only defaulted.
+function entryAgent(persona, payload, entry) {
+  return claimedAgent(persona, payload, entry) ?? persona;
+}
+
+// Which HALF of a lane is making a round-2 ruling, or null for "the lane
+// itself". Null is the fail-closed default, and it is the answer in three
+// cases: the payload named no agent, it named one that does not belong to this
+// lane, or it named the bare persona. The first is an orchestrator that
+// predates agent ids, and it must keep getting today's persona-level behavior
+// — otherwise doing nothing would silently start counting a lane's ruling on
+// its own finding as independent, which is the one direction this change must
+// not fail. The third is a payload claiming to BE the whole lane: a claim to
+// contain both halves, so it can be neither of them.
+function rulingAgent(persona, payload, entry) {
+  const agent = claimedAgent(persona, payload, entry);
+  return agent === persona ? null : agent;
+}
+
+// The agent a whole payload was written by, read off the payload's own
+// persona because a bridge merging two files has no key to consult.
+function payloadAgent(payload) {
+  const persona = coerceStr(payload?.persona);
+  return claimedAgent(persona, payload, null) ?? persona;
+}
+
+// Stamp each half's entries with the agent that produced them, before the two
+// lists become one list under one persona name. This has to be a JSON field
+// and not a closure: combine.mjs writes the merged object to round1.json and
+// synthesis reads it back out of the file, so an identity that lives anywhere
+// but in the payload is an identity the second half of the pipeline cannot
+// see. Unconditional, overwriting whatever the reporter put there — the stamp
+// is what the round-2 guard keys on, and a payload that names its sibling on
+// its own finding would hand its sibling's ruling an independent vote.
+function stampAgent(payload, key) {
+  const agent = payloadAgent(payload);
+  const entries = Array.isArray(payload?.[key]) ? payload[key] : [];
+  return entries.map((e) => (e && typeof e === 'object' && !Array.isArray(e)
+    ? { ...e, agent }
+    : e));
+}
+
+// The merged object describes a LANE, so it carries no single agent: half A's
+// id left on it would label half B's verdict, summary and findings with half
+// A's name, which is the same misattribution the two-summary join above exists
+// to prevent. The identity survives per entry instead.
+function mergedLane(a) {
+  const lane = { ...a };
+  delete lane.agent;
+  return lane;
+}
+
 export function mergeSplitReviews(a, b) {
   const part = (s) => String(s ?? '').slice(0, MERGED_SUMMARY_PART_MAX);
   return {
-    ...a,
+    ...mergedLane(a),
     verdict: worseVerdict(a?.verdict, b?.verdict),
     summary: [a?.summary, b?.summary].filter(Boolean).map(part).join(' · '),
-    findings: [
-      ...(Array.isArray(a?.findings) ? a.findings : []),
-      ...(Array.isArray(b?.findings) ? b.findings : []),
-    ],
+    findings: [...stampAgent(a, 'findings'), ...stampAgent(b, 'findings')],
+  };
+}
+
+// The round-2 counterpart. Merging two cross-reviews used to be refused
+// outright, and the reason was sound: both halves write one persona name, so a
+// union handed synthesis two payloads' rulings with no way to tell which agent
+// made which — and the self-validation guard, keyed on the persona, discarded
+// every one of them. Once each entry carries its own agent (above), the union
+// is the whole point: `auditor-b` read different files and its judgment on
+// `auditor-a`'s findings is as independent as any other lane's.
+//
+// `groups` is unioned for the same reason the other three lists are — a
+// dropped ruling is a candidate root cause reported as unruled — and it is
+// safe to let one persona appear twice there: `buildRootCauses` counts voices
+// with a Set, and two halves that disagree land the group on `contested`,
+// which dissolves nothing and decides every citation individually.
+export function mergeSplitCrossReviews(a, b) {
+  return {
+    ...mergedLane(a),
+    validate: [...stampAgent(a, 'validate'), ...stampAgent(b, 'validate')],
+    challenge: [...stampAgent(a, 'challenge'), ...stampAgent(b, 'challenge')],
+    groups: [...stampAgent(a, 'groups'), ...stampAgent(b, 'groups')],
+    added: [...stampAgent(a, 'added'), ...stampAgent(b, 'added')],
   };
 }
 const CONFIDENCE_RANK = { disputed: 0, 'cross-validated': 1, consensus: 2, solo: 3 };
@@ -119,6 +216,31 @@ export function isBlocking(finding) {
   return !ADVISORY_KINDS.has(finding.kind) && finding.severity !== 'info';
 }
 
+// Did the agent making a ruling already report the finding it is ruling on?
+// The lane-level answer stands unless a payload named a half of a split lane,
+// and even then a finding the whole lane reported — `reporterAgents` carrying
+// the bare persona, which is what an unsplit or unstamped round 1 produces —
+// is still that agent's own work.
+function reportedBy(finding, persona, agent) {
+  if (!finding.reporters.includes(persona)) return false;
+  if (agent === null) return true;
+  return finding.reporterAgents.includes(agent)
+    || finding.reporterAgents.includes(persona);
+}
+
+// One entry per PERSONA, whatever agent produced it. A split lane's two halves
+// can both rule on the same finding now, and `validators.length` is what turns
+// a finding into `consensus` while the group `voices` count decides whether a
+// root cause collapses — two entries under one persona would be one lane
+// counted twice, which is precisely the inflation the halves' shared persona
+// name exists to prevent. First ruling wins; a sibling that agrees adds no
+// information, and one that disagrees is a lane arguing with itself, which is
+// not a second voice either way.
+function recordRuling(list, persona, reason) {
+  if (list.some((e) => e.persona === persona)) return;
+  list.push({ persona, reason });
+}
+
 // The stop condition and the report's headline number are the same question —
 // "is this both blocking and credible enough to hold the change open?" —
 // asked on either side of the report.json serialization boundary. Defined
@@ -130,7 +252,7 @@ export function isOpenBlocking(finding) {
     && (finding.confidence === 'cross-validated' || finding.confidence === 'consensus');
 }
 
-function buildFinding(persona, raw) {
+function buildFinding(persona, raw, agent = persona) {
   const title = coerceStr(raw?.title);
   const severity = raw?.severity;
   if (!title || !(severity in SEVERITY_RANK)) return null;
@@ -144,6 +266,12 @@ function buildFinding(persona, raw) {
     counterpart: coerceStr(raw?.counterpart),
     fix: coerceStr(raw?.fix),
     reporters: [persona],
+    // Which AGENTS reported it, beside which lanes did. A split lane's two
+    // halves write one persona name deliberately — `reporters` deduping on it
+    // is what stops two halves inflating a finding to `cross-validated` — so
+    // round 2 needs a second string to tell `auditor-a` from `auditor-b`.
+    // Confidence never reads this list; only the self-validation guard does.
+    reporterAgents: [agent],
     validators: [], // Array<{persona, reason}>
     challengers: [],
     confidence: 'solo',
@@ -287,14 +415,17 @@ export function synthesize(round1, round2 = {},
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
-  function upsert(persona, raw) {
-    const f = buildFinding(persona, raw);
+  function upsert(persona, raw, agent) {
+    const f = buildFinding(persona, raw, agent);
     if (f === null) return null;
     const norm = normTitle(f.title);
     const primaryKey = `${norm}|${f.file ?? ''}|${f.line ?? ''}`;
     let existing = byKey.get(primaryKey) ?? byNormTitle.get(norm);
     if (existing) {
       if (!existing.reporters.includes(persona)) existing.reporters.push(persona);
+      for (const a of f.reporterAgents) {
+        if (!existing.reporterAgents.includes(a)) existing.reporterAgents.push(a);
+      }
       if (severityRank(f.severity) < severityRank(existing.severity)) {
         existing.severity = f.severity;
       }
@@ -321,14 +452,14 @@ export function synthesize(round1, round2 = {},
   // 1. Phase 1 findings
   for (const [persona, review] of Object.entries(round1)) {
     for (const raw of review?.findings ?? []) {
-      if (raw && typeof raw === 'object') upsert(persona, raw);
+      if (raw && typeof raw === 'object') upsert(persona, raw, entryAgent(persona, review, raw));
     }
   }
 
   // 2. Phase 2 "added" findings (treated as first-class)
   for (const [persona, cross] of Object.entries(round2)) {
     for (const raw of cross?.added ?? []) {
-      if (raw && typeof raw === 'object') upsert(persona, raw);
+      if (raw && typeof raw === 'object') upsert(persona, raw, entryAgent(persona, cross, raw));
     }
   }
 
@@ -342,16 +473,16 @@ export function synthesize(round1, round2 = {},
     for (const v of cross?.validate ?? []) {
       if (!v || typeof v !== 'object') continue;
       const f = findByTitle(v.title);
-      if (!f || f.reporters.includes(persona)) continue; // self-validation does not count
+      if (!f || reportedBy(f, persona, rulingAgent(persona, cross, v))) continue;
       const reason = (coerceStr(v.reason) ?? '').trim();
-      f.validators.push({ persona, reason });
+      recordRuling(f.validators, persona, reason);
     }
     for (const c of cross?.challenge ?? []) {
       if (!c || typeof c !== 'object') continue;
       const f = findByTitle(c.title);
-      if (!f || f.reporters.includes(persona)) continue;
+      if (!f || reportedBy(f, persona, rulingAgent(persona, cross, c))) continue;
       const reason = (coerceStr(c.reason) ?? '').trim();
-      f.challengers.push({ persona, reason });
+      recordRuling(f.challengers, persona, reason);
     }
   }
 

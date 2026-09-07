@@ -48,6 +48,37 @@ test('ids are assigned across reviewers in the order they were passed', () => {
     ['auditor', 'auditor', 'adversary']);
 });
 
+// --- which AGENT reported it -------------------------------------------------
+//
+// A split lane's round-2 agent is handed both halves of its own persona's work.
+// Without this field it reads all of it as its own prior work and passes the
+// lot through unexamined — half the cost kfox/adverse#50 names — because the
+// persona name is identical on both halves by design.
+
+test('every finding names the agent that reported it, split lane or not', () => {
+  const { briefing } = build([
+    review('auditor', [finding()], { agent: 'auditor-a' }),
+    review('auditor', [finding()], { agent: 'auditor-b' }),
+    review('steward', [finding()]),
+  ]);
+  assert.deepEqual(briefing.findings.map((f) => f.reporterAgent),
+    ['auditor-a', 'auditor-b', 'steward']);
+  // Always present, equal to `reporter` for an unsplit lane: a field that
+  // appears only sometimes is one every consumer has to guess about.
+  assert.deepEqual(briefing.findings.map((f) => f.reporter),
+    ['auditor', 'auditor', 'steward']);
+});
+
+test('an agent id naming another lane falls back to the lane it arrived under', () => {
+  // A bad id reads as the whole lane's work, which gets examined. Trusting it
+  // would put a stranger's name on the entry instead.
+  const { briefing } = build([
+    review('auditor', [finding()], { agent: 'steward-a' }),
+    review('auditor', [finding()], { agent: 'auditor_b' }),
+  ]);
+  assert.deepEqual(briefing.findings.map((f) => f.reporterAgent), ['auditor', 'auditor']);
+});
+
 // --- annotated, never dropped ------------------------------------------------
 //
 // The property every kind check shares: a finding that fails one is reported
