@@ -57,7 +57,7 @@ const { KINDS, SEVERITIES } = await importFromSrc('taxonomy.mjs');
 // on the second path the shell expands, and the glob is the obvious thing to
 // type.
 const USAGE = 'Usage: verify.mjs --verify a.json [--verify b.json …] --outdir <dir>'
-  + ' [--briefing briefing.json]';
+  + ' [--briefing briefing.json] [--report report.json]';
 
 const { values, positionals } = parseBridgeArgs({
   prefix: 'verify',
@@ -66,6 +66,7 @@ const { values, positionals } = parseBridgeArgs({
     verify: { type: 'string', multiple: true },
     outdir: { type: 'string' },
     briefing: { type: 'string' },
+    report: { type: 'string' },
   },
   strict: true,
   allowPositionals: true,
@@ -127,6 +128,22 @@ if (values.briefing) {
   }
 }
 
+// The previous iteration's report.json, as the anchor source of last resort:
+// it is the only file that holds a finding a round-2 reviewer ADDED, because
+// triage's only finding input is `--round1` and report.json carries no ids at
+// all. Title-bound with the same ambiguity rule as the briefing index, and
+// consulted after both briefing routes — a briefed finding is this iteration's
+// statement of the same finding and wins.
+const reportedByTitle = new Map();
+if (values.report) {
+  const doc = readJson(values.report, 'verify');
+  for (const f of doc?.findings ?? []) {
+    if (!f) continue;
+    const key = normalizeTitle(f.title);
+    if (key) reportedByTitle.set(key, reportedByTitle.has(key) ? null : f);
+  }
+}
+
 
 // The briefing entry a verification is actually ABOUT, or null.
 //
@@ -143,10 +160,10 @@ if (values.briefing) {
 // the finding — but it falls back to the blocking default and says so, and an
 // id that resolves to nothing is reported the way repair.mjs reports one.
 function bindToBriefing(v, src) {
-  // BOTH indexes, or the title route is unreachable for the one anchor source
-  // that motivated it: a document whose findings carry no `id` fills
-  // `briefedByTitle` and leaves `briefed` empty, and this line returned first.
-  if (!briefed.size && !briefedByTitle.size) return null;
+  // EVERY index, or the title routes are unreachable for the anchor sources
+  // that motivated them: a document whose findings carry no `id` fills only
+  // the title maps and leaves `briefed` empty, and this line returned first.
+  if (!briefed.size && !briefedByTitle.size && !reportedByTitle.size) return null;
   let entry = briefed.get(v.id);
   if (!entry) {
     // The id named nothing. Fall back to the title, which is the join key every
@@ -154,15 +171,16 @@ function bindToBriefing(v, src) {
     // finding cited by a stale or invented id: `briefing.mjs` re-mints ids
     // positionally on every triage run, so an id copied from an earlier
     // iteration's briefing names nothing here, or worse, names a different
-    // finding. A round-2 ADDITION is a different case and this route does not
-    // reach it — it is in `briefing.json` under no key at all, because triage's
-    // only finding input is `--round1` — so its verification lands on
-    // REOPENED_FALLBACK with a null anchor. Noisy rather than silent, which is
-    // the safe direction, and a known gap rather than a covered case.
-    const byTitle = briefedByTitle.get(normalizeTitle(v.title));
+    // finding. A round-2 ADDITION is in `briefing.json` under no key at all —
+    // triage's only finding input is `--round1` — which is what `--report`
+    // exists for: the previous report.json is the one file that holds it.
+    // Without that flag its verification lands on REOPENED_FALLBACK with a
+    // null anchor: noisy rather than silent, which is the safe direction.
+    const byTitle = briefedByTitle.get(normalizeTitle(v.title))
+      ?? reportedByTitle.get(normalizeTitle(v.title));
     if (byTitle) return byTitle;
     process.stderr.write(`  ! verify: ${src}: unresolvable id ${JSON.stringify(v.id)}`
-      + ` and no briefed finding titled ${JSON.stringify(v.title)}`
+      + ` and no briefed or reported finding titled ${JSON.stringify(v.title)}`
       + ' — anchor not inherited\n');
     process.exitCode = 1;
     return null;

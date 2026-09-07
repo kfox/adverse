@@ -334,6 +334,73 @@ test('a destination that cannot be written is exit 2 and a sentence', () => {
 
 // --- a verification may not inherit an anchor it did not earn -----------------
 
+test('--report anchors a round-2 addition the briefing cannot reach', () => {
+  // The issue's measured repro: a round-2 ADDED finding is in briefing.json
+  // under no key at all (triage's only finding input is --round1), so its
+  // verification always came back blocking warning/behavioral — for an
+  // advisory addition, that contradicts the rule that design never blocks.
+  // report.json is the only file that holds it.
+  const dir = freshTmp();
+  try {
+    const report = path.join(dir, 'report.json');
+    writeFileSync(report, JSON.stringify({
+      findings: [{
+        severity: 'info', kind: 'design', file: 'src/fx.mjs', line: 7,
+        counterpart: null, title: 'the effect chain re-enters itself on a nested clip launch',
+      }],
+    }));
+    const src = path.join(dir, 'verify-steward.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'steward',
+      verified: [{ id: 'R2-add-1',
+        title: 'the effect chain re-enters itself on a nested clip launch',
+        status: 'open', reason: 'still re-enters' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--report', report]);
+    assert.equal(r.status, 0, r.stderr);
+    const [f] = JSON.parse(
+      readFileSync(path.join(dir, 'round1-steward.verified.json'), 'utf-8')).findings;
+    assert.equal(f.severity, 'info');
+    assert.equal(f.kind, 'design', 'an advisory addition must not come back blocking');
+    assert.equal(f.file, 'src/fx.mjs');
+    assert.equal(f.line, 7);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a title matching two reported findings binds to neither', () => {
+  // Same rule as the briefing index: guessing which is meant is how a severity
+  // gets copied off the wrong finding, so the ambiguous case falls back to the
+  // blocking default and says so.
+  const dir = freshTmp();
+  try {
+    const report = path.join(dir, 'report.json');
+    writeFileSync(report, JSON.stringify({
+      findings: [
+        { severity: 'info', kind: 'design', file: 'a.mjs', line: 1, title: 'twice-told' },
+        { severity: 'critical', kind: 'defect', file: 'b.mjs', line: 2, title: 'twice-told' },
+      ],
+    }));
+    const src = path.join(dir, 'verify-steward.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'steward',
+      verified: [{ id: 'R2-x', title: 'twice-told', status: 'open', reason: 'r' }],
+      added: [],
+    }));
+    const r = runVerify(['--verify', src, '--outdir', dir, '--report', report]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /anchor not inherited/);
+    const [f] = JSON.parse(
+      readFileSync(path.join(dir, 'round1-steward.verified.json'), 'utf-8')).findings;
+    assert.equal(f.severity, 'warning');
+    assert.equal(f.kind, 'behavioral');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function briefingWith(dir, entry) {
   const p = path.join(dir, 'briefing.json');
   writeFileSync(p, JSON.stringify({ findings: [entry] }));
@@ -508,7 +575,7 @@ test('an ambiguous title binds to neither finding and falls back to blocking', (
     const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
 
     assert.equal(r.status, 1, 'an unbindable verification is reported, not silent');
-    assert.match(r.stderr, /no briefed finding titled "same title"/);
+    assert.match(r.stderr, /no briefed or reported finding titled "same title"/);
     const [f] = JSON.parse(readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
     assert.equal(f.kind, 'behavioral', 'the blocking fallback, not a guess');
     assert.equal(f.severity, 'warning');
