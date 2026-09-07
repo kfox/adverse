@@ -230,10 +230,24 @@ test('a --closed-by name that resolves to no lane is refused, by value', () => {
   const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by', 'Auditor',
                  '--closed-by', 'adversary', '--json']);
   assert.equal(r.status, 2, r.stdout);
-  assert.match(r.stderr, /--closed-by "Auditor" names no lane/);
-  assert.doesNotMatch(r.stderr, /adversary" names no lane/,
+  assert.match(r.stderr, /--closed-by "Auditor" names no agent id this review produces/);
+  assert.doesNotMatch(r.stderr, /adversary" names no agent id/,
     'the name that DID resolve is not blamed');
   assert.equal(r.stdout, '', 'nothing is printed about a lane this run never chose');
+});
+
+test('a --closed-by half suffix this system cannot emit is refused too', () => {
+  // A different reject from the one above, and both have to be covered.
+  // `Auditor` fails on the registry's spelling; `auditor-ab` IS the auditor
+  // lane and fails on the suffix `agentNames` can produce — which is one
+  // lowercase letter, since a concurrent commit tightened it from `/^[a-z]+$/`.
+  // That tightening silently turned `--closed-by auditor-ab` from fail-safe
+  // (chose steward) into fail-unsafe (chose auditor), which is why the caller
+  // is refused rather than guessed at.
+  const r = run(['--repo', ROOT, '--commit', 'HEAD', '--closed-by', 'auditor-ab', '--json']);
+  assert.equal(r.status, 2, r.stdout);
+  assert.match(r.stderr, /--closed-by "auditor-ab" names no agent id this review produces/);
+  assert.equal(r.stdout, '');
 });
 
 test('a split lane\'s half is a --closed-by name the bridge accepts', () => {

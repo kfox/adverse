@@ -66,25 +66,44 @@ test('a name that belongs to no lane excludes nothing, and is reported', () => {
   assert.equal(chosen.persona, 'auditor');
   assert.equal(chosen.conflicted, false);
   assert.deepEqual(chosen.unresolved, dropped,
-    'every name the resolver could not place, in the order given');
-  assert.match(chosen.reason, /excluded nothing for/);
+    'every name the resolver could not read, in the order given');
+  assert.match(chosen.reason, /named no agent id this review produces/);
   assert.match(chosen.reason, /"AUDITOR"/);
 });
 
+test('an id that names a lane excludes it even when the id is malformed', () => {
+  // The fail-unsafe flip this exclusion has to survive: a concurrent commit
+  // tightened `isLaneAgent`'s suffix from `/^[a-z]+$/` to `/^[a-z]$/`, and
+  // exclusion keyed on that exactness silently moved `auditor-ab` from
+  // "excludes the auditor" to "excludes nobody". Both arms measured:
+  // suffix /^[a-z]+$/ chose steward, suffix /^[a-z]$/ chose auditor — the lane
+  // that reported the finding, reviewing its own fix commit. So `laneOf` is
+  // generous now: naming a lane at all is enough to be out of the running.
+  const chosen = chooseRegressionLane({ ...ROUTINE, closedBy: ['auditor-ab'] });
+  assert.equal(chosen.persona, 'steward', 'the auditor named itself and is out');
+  // And it is still reported, because it is not an id this system emits — the
+  // exclusion is generous, the accounting is exact, and neither is silent.
+  assert.deepEqual(chosen.unresolved, ['auditor-ab']);
+  assert.match(chosen.reason, /read the exclusion above as approximate/);
+});
+
 test('a resolvable list leaves nothing unresolved — the field is not always full', () => {
-  // The discriminating case for the assertion above: if `unresolved` were
-  // simply `closedBy`, or simply everything, both tests could not hold.
+  // The discriminating case for the assertions above: if `unresolved` were
+  // simply `closedBy`, or simply everything, none of the three could hold.
   const chosen = chooseRegressionLane({ ...ROUTINE, closedBy: ['auditor', 'steward-b'] });
   assert.deepEqual(chosen.unresolved, []);
   assert.equal(chosen.persona, 'adversary');
-  assert.doesNotMatch(chosen.reason, /excluded nothing/);
+  assert.doesNotMatch(chosen.reason, /named no agent id/);
 });
 
-test('unresolvedLanes keeps the unplaceable names and drops the real ones', () => {
+test('unresolvedLanes reports every name this review could not have written', () => {
   // The predicate the skill bridge refuses on, tested where it lives so the
   // bridge's exit code and the library's `unresolved` field cannot disagree.
-  assert.deepEqual(unresolvedLanes(['auditor', 'Auditor', 'adversary-a', 'adversary-A']),
-    ['Auditor', 'adversary-A']);
+  // It is the EXACT rule — a different question from `laneOf`'s generous one —
+  // so it catches the malformed-but-placeable id as well as the unplaceable.
+  assert.deepEqual(
+    unresolvedLanes(['auditor', 'Auditor', 'adversary-a', 'adversary-A', 'auditor-ab', 'referee']),
+    ['Auditor', 'adversary-A', 'auditor-ab', 'referee']);
   assert.deepEqual(unresolvedLanes(['pragmatist']), [],
     'the Pragmatist is a lane; that it cannot HOLD a pass is a different rule');
   assert.deepEqual(unresolvedLanes([]), []);

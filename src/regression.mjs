@@ -63,39 +63,80 @@ for (const [name, order] of Object.entries(CANDIDATE_ORDER)) {
   }
 }
 
-// The LANE an agent id belongs to, or null. A split lane's halves report as
-// `auditor-a` and `auditor-b`, so exclusion keyed on the raw string would let
-// `auditor-b` review the fix for `auditor-a`'s finding — the same lane checking
-// its own work under a different name, which is the silent direction and the
-// only one that matters here.
-function laneOf(agent) {
-  if (typeof agent !== 'string') return null;
-  return DEFAULT_PERSONAS.find((persona) => isLaneAgent(persona, agent)) ?? null;
+// A prefix match below decides which lane an id names, and `find` returns the
+// first hit — so a registry where one persona name prefixes another's agent
+// namespace would exclude the wrong lane, silently. Checked at module load for
+// the same reason CANDIDATE_ORDER is: a new lane should be a loud failure at
+// import, not a misrouted pass a month later.
+/* c8 ignore next 6 */
+for (const persona of DEFAULT_PERSONAS) {
+  const shadowed = DEFAULT_PERSONAS.filter((p) => p !== persona && p.startsWith(`${persona}-`));
+  if (shadowed.length) {
+    throw new Error(`regression: persona '${persona}' prefixes ${shadowed.join(', ')},`
+      + " so an agent id cannot say which lane it belongs to");
+  }
 }
 
-// The `closedBy` entries `laneOf` could not place, in the order given.
+// The LANE an agent id names — GENEROUSLY, and that is the whole design of it.
 //
-// `laneOf` returning null is the right answer for ONE name: an unrecognized
-// string must not exclude a lane it does not name, and it must not throw
-// either. Dropping the whole unresolved set and saying nothing is a different
-// thing, and it is the classifier whose unmatched input silently does nothing —
-// the shape the CANDIDATE_ORDER check above already refuses for this module's
-// own constant, left open for the one input a caller supplies.
+// A split lane's halves report as `auditor-a` and `auditor-b`, so exclusion
+// keyed on the raw string would let `auditor-b` review the fix for `auditor-a`'s
+// finding: the same lane checking its own work under a different name.
 //
-// Measured: `--closed-by Auditor --closed-by adversary` differs from the
-// accepted spelling by one capital letter, excluded the Auditor from nothing,
-// and exited 0 having put the lane that reported the finding in charge of
-// reviewing its own fix — under a `reason` that reads "it reported none of the
-// findings this commit closed". The wrong lane is recoverable; the artifact
+// This used to ask `isLaneAgent`, which is an EXACTNESS test — is this an id
+// this system could have emitted — and exactness is the wrong question here,
+// because a `null` means "exclude nobody". A concurrent commit tightened
+// `isLaneAgent`'s suffix from `/^[a-z]+$/` to `/^[a-z]$/`, and that moved a
+// whole class of strings from fail-safe to fail-unsafe with nothing in this
+// file changing. Both arms measured:
+//
+//   closedBy: ['auditor-ab']  suffix /^[a-z]+$/ -> steward   (auditor excluded)
+//                             suffix /^[a-z]$/  -> auditor   (auditor reviews
+//                                                             its own fix)
+//
+// So the rule is: if the id names a lane at all, that lane is out. Over-
+// excluding costs at worst a CONFLICTED pass, which says so out loud; under-
+// excluding hands the reporter its own fix commit under a sentence asserting
+// disinterest. Where one direction is noisy and the other silent, take noisy.
+//
+// Case is deliberately NOT folded. `Auditor` stays unresolved here, because
+// lane identity is case-sensitive in `requireKnownPersona`, `combine.mjs` and
+// `validate.mjs`, and a fifth rule that disagreed with those four is the second
+// signal table this module's own header warns against. The bridge refuses it by
+// value instead.
+function laneOf(agent) {
+  if (typeof agent !== 'string') return null;
+  return DEFAULT_PERSONAS.find((p) => agent === p || agent.startsWith(`${p}-`)) ?? null;
+}
+
+// The `closedBy` entries that are not an agent id this review produces, in the
+// order given — `Auditor` (a persona this registry does not spell that way),
+// `auditor_a` (not the id shape), `auditor-ab` (a lane, but not a half
+// `agentNames` can emit), a null, a number.
+//
+// This is the EXACT question, and it is a different one from `laneOf`'s: not
+// "which lane is out" but "did the caller name something this system could have
+// written". Both are needed and each is safe for its own question. `laneOf`
+// being generous keeps the routing fail-safe for any caller; this keeps the
+// caller from being silently guessed at.
+//
+// The silence was the defect, not the routing. `--closed-by Auditor
+// --closed-by adversary` differs from the accepted spelling by one capital
+// letter, exited 0, and put the lane that reported the finding in charge of
+// reviewing its own fix — under a `reason` reading "it reported none of the
+// findings this commit closed". A wrong lane is recoverable; an artifact
 // asserting disinterest it does not have is not.
 //
 // Returned rather than thrown because the exit code belongs to the caller: the
 // skill bridge refuses the run at exit 2 (skills/adverse-review/scripts/
-// regression.mjs), and a library caller that wants the old fail-open can have
-// it, but only by reading this field and choosing.
+// regression.mjs), and `chooseRegressionLane` carries it in both the
+// `unresolved` field and the `reason` it signs.
 export function unresolvedLanes(closedBy) {
   const names = Array.isArray(closedBy) ? closedBy : [];
-  return names.filter((agent) => laneOf(agent) === null);
+  return names.filter((agent) => {
+    const lane = laneOf(agent);
+    return lane === null || !isLaneAgent(lane, agent);
+  });
 }
 
 // `closedBy` is the set of personas (or split-lane agent ids) that reported the
@@ -122,13 +163,16 @@ export function chooseRegressionLane({ closedBy = [], files = [], diff = '' } = 
   }
 
   const unresolved = unresolvedLanes(closedBy);
-  // The caveat rides in the sentence the artifact prints, not only in the
-  // field beside it: the harm was never the lane chosen, it was a `reason`
-  // claiming the pass is disinterested while part of the exclusion list had
-  // been silently discarded.
+  // The caveat rides in the sentence the artifact prints, not only in the field
+  // beside it: the harm was never the lane chosen, it was a `reason` claiming
+  // the pass is disinterested while part of the exclusion list had been
+  // discarded in silence. It says what it could not read and makes no claim
+  // about what that did or did not exclude — `laneOf` is generous, so an id
+  // like `auditor-ab` is unreadable AND still excluded the auditor, and a
+  // sentence asserting either half would be false for the other.
   const dropped = unresolved.length
-    ? `, having excluded nothing for ${unresolved.map((n) => JSON.stringify(n)).join(', ')}`
-      + ' — which named no lane'
+    ? `, though ${unresolved.map((n) => JSON.stringify(n)).join(', ')} named no agent id this`
+      + ' review produces — read the exclusion above as approximate'
     : '';
 
   const disinterested = order.find((persona) => !reported.has(persona));

@@ -117,16 +117,27 @@ function readCommit(repo, rev) {
 
 // The registry check `readPayload` makes on a payload's persona forty lines
 // below, applied to the one input a CALLER supplies. `chooseRegressionLane`
-// resolves each name through `laneOf` and drops what it cannot place — right
-// for the library, fail-open here, because the caller is the orchestrator that
-// just fixed the code and the whole point of this bridge is that it does not
-// get to pick its own reviewer.
+// resolved each name and dropped what it could not read — tolerable for the
+// library, fail-open here, because the caller is the orchestrator that just
+// fixed the code and the whole point of this bridge is that it does not get to
+// pick its own reviewer.
 //
-// `--closed-by Auditor` (one capital) excluded nobody and printed "auditor: …
-// and it reported none of the findings this commit closed" at exit 0, over the
-// reporting lane reviewing its own fix. Refused by value rather than
-// lowercased, exactly as `requireKnownPersona` refuses a re-cased persona: a
-// name this bridge has to guess at is a name the orchestrator should retype.
+// Two different rejects, both reachable and both measured:
+//
+//   --closed-by Auditor     one capital from the registry's spelling; excluded
+//                           nobody, exited 0, printed "auditor: … and it
+//                           reported none of the findings this commit closed"
+//                           over the reporting lane reviewing its own fix.
+//   --closed-by auditor-ab  names the auditor lane but is not a half
+//                           `agentNames` emits. A concurrent commit tightened
+//                           that suffix from /^[a-z]+$/ to /^[a-z]$/ and
+//                           silently flipped this one from choosing steward to
+//                           choosing auditor.
+//
+// Refused by value rather than repaired, exactly as `requireKnownPersona`
+// refuses a re-cased persona: a name this bridge has to guess at is a name the
+// orchestrator should retype. `chooseRegressionLane` still excludes generously
+// if this guard is ever bypassed, so neither layer is the only one.
 //
 // Exit 2, not 1, per bridge-io.mjs's contract — exit 1 is a claim about a
 // review, and this run never got as far as choosing who would do one.
@@ -135,9 +146,9 @@ function requireLaneNames(closedBy) {
   if (!unresolved.length) return closedBy;
 
   process.stderr.write('regression: --closed-by '
-    + `${unresolved.map((n) => JSON.stringify(n)).join(', ')} names no lane`
-    + ` (expected one of ${DEFAULT_PERSONAS.join(', ')}, lowercase, or a split`
-    + " lane's half like auditor-a)\n");
+    + `${unresolved.map((n) => JSON.stringify(n)).join(', ')} names no agent id this`
+    + ` review produces (expected one of ${DEFAULT_PERSONAS.join(', ')}, lowercase,`
+    + " or a split lane's half like auditor-a)\n");
   process.exit(2);
 }
 
