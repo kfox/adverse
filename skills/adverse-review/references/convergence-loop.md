@@ -141,6 +141,43 @@ fields off `report.json` before they ever reach a decision. A hand-written
 decision has to be corrected by hand and re-recorded as a second entry, which
 the ledger is designed for — entries are appended, never rewritten.
 
+**A `fixed` whose commit does not support it is named too.** `fixed` is the one
+disposition that asserts a code change, and `--record` now asks git whether the
+commit that decision names contains one. This check needs no `--report` — it
+reads a commit, not a panel's output — so it runs on every `--record`,
+including the degraded ones. Only the first row is silent:
+
+| the commit… | |
+|---|---|
+| touches the file the decision cites | supported; nothing is printed |
+| touches only other files | named, and told this is often right |
+| changes no file at all | named; an empty commit closes nothing |
+| cannot be read (a merge, or git failing) | named as unread, never as empty |
+| resolves to no commit here | named loudest — see below |
+| is not named at all | named; nothing records what change was made |
+
+Recording a `fixCommit` that resolves nowhere is the one worth stopping for.
+`checkBinding` refuses a whole ledger carrying such an entry, and the ledger is
+append-only — so it makes every later `converge.mjs` run, status and record
+alike, exit 2 on a file that cannot be repaired. Fix the commit *before* you
+record.
+
+A decision may spell that commit `commit` (as the schema above documents) or
+`fixCommit`; both are read.
+
+It is one block, `FIX NOT SUPPORTED BY ITS COMMIT`, printed beside the one
+above and exiting 1 the same way — recorded, named, not refused. A fix landing
+in another file is **not** an accusation: a root cause rarely sits where the
+symptom was reported, and the block exists to make you say which case it is in
+the decision's `reason`. What it catches is the fix that was never made, whose
+only other symptom arrives an iteration later as `REGRESSED` — which sends
+whoever reads it looking for a fix that broke rather than one that is missing.
+
+A merge is reported as unreadable rather than as empty on purpose. `git show
+--name-only` lists nothing for a merge unless told which parent to read it
+against, so "no files" there means "not known", and spelling not-knowing as
+knowing-the-fix-is-absent would accuse real work of being invented.
+
 **Work the confirmed root causes first, one decision each.** A group the report
 calls `confirmed` is one fix and one disposition covering N citations. Write it
 as one entry per citation, every entry carrying the same `disposition`,

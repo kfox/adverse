@@ -70,6 +70,13 @@ const MAX_LEDGER_ENTRIES = 1000;
 // The weakest match that may settle a finding. Below it, annotate only.
 export const SETTLING_SCORE = 3;
 
+// How many of a commit's changed paths `unsupportedFixes` names before it
+// stops. The list comes from git rather than from the model, so it is bounded
+// by the repository — but a sweeping refactor's commit legitimately touches
+// hundreds, and the point of the line is to let a reader recognize the commit,
+// which the first few do as well as all of them.
+const MAX_NAMED_FILES = 5;
+
 // Longest ledger `reason` copied into a briefing. The ledger is a JSON file on
 // disk, and its text is rendered into the round-2 prompt, so it is a channel
 // for whoever can write that file. Clipping bounds the payload; labeling it in
@@ -818,6 +825,112 @@ export function uncoveredDecisions(decisions, report, { ledger = emptyLedger() }
   return uncovered;
 }
 
+// The commit a decision says closed the finding, under either of its names.
+//
+// Two spellings, because two writers. `decisions.json` — the file
+// references/convergence-loop.md teaches you to write by hand — carries
+// `commit`, and src/decisions.mjs renames it to `fixCommit` on the way through
+// so a ledger entry and a fix payload do not read as the same shape. Everything
+// here had been written against the entry's spelling alone, so a hand-written
+// decision following the documented schema was recorded with `fixCommit: null`:
+// its commit dropped in silence, invisible to `closureOf`, and the `commit`-on-
+// a-decline refusal that the same documented paragraph promises never fired.
+// Measured on all three. Read through one function so the two cannot come apart
+// again — two corrected copies is how they drifted.
+export function fixCommitOf(decision) {
+  return decision?.fixCommit ?? decision?.commit ?? null;
+}
+
+// `fixed` decisions whose own commit does not support the claim
+// (kfox/adverse#58, item 2).
+//
+// A `fixed` disposition asserts a code change. Nothing checked that one was
+// made, and the failure is not hypothetical: a fix agent that believed it had
+// edited a file, or an orchestrator assembling decisions.json from a report it
+// read rather than a tree it inspected, records `fixed` against a commit that
+// does not contain the fix. The finding comes back next iteration as REGRESSED
+// — the loudest signal this system has — pointing at a fix that was never
+// made, which sends whoever reads it looking for a fix that broke rather than
+// a fix that is missing.
+//
+// The issue asks for `git log -S` over the recorded range. Per-decision
+// `fixCommit` (kfox/adverse#86) makes a sharper question available: not "did
+// anything in the range touch this file" but "did the commit THIS decision
+// names touch it". Four answers, and only the first is silent:
+//
+//   touches the cited file        supported. Nothing to say.
+//   touches only other files      reported. A root-cause fix in another file
+//                                 is legitimate and common, so this is not an
+//                                 accusation — but it is the shape a fictional
+//                                 fix also has, and the reason should say
+//                                 which one it is.
+//   changes no file at all        reported, loudest. An empty commit closes
+//                                 nothing, whatever it says in its message.
+//   cannot be read                reported. A merge, or a git that would not
+//                                 run. Never silent: `filesChangedIn` keeps
+//                                 these distinguishable from an empty list
+//                                 precisely so that not knowing cannot pass
+//                                 for knowing the fix is absent.
+//
+// A decision citing no file is supported by any commit — there is no claim
+// about a location to check — so it is silent rather than reported. And this
+// REPORTS; it does not refuse, for the reason `uncoveredDecisions` gives at
+// length: only `--record` advances the iteration counter, and a branch that
+// does not record makes the cap unreachable.
+export function unsupportedFixes(decisions, filesChanged) {
+  const unsupported = [];
+  const name = (d, commit, why) => ({ title: clipReason(d.title ?? ''), commit, why });
+
+  for (const d of decisions) {
+    if (d?.disposition !== 'fixed') continue;
+
+    const commit = fixCommitOf(d);
+    // No evidence offered, which is not the same accusation as evidence that
+    // contradicts the claim, and says so. `validateFix` requires a commit on
+    // every `fixed` entry, so a folded batch cannot reach this — it is the
+    // hand-written decisions.json, which `recordDecisions` accepts without one.
+    // `closureOf` already skips such an entry when asked what a commit closed,
+    // so today a fix recorded this way is invisible to the machinery that
+    // picks a disinterested reviewer, silently.
+    if (!commit) {
+      unsupported.push(name(d, null,
+        'it names no commit at all, so nothing records what change it made'));
+      continue;
+    }
+
+    const changed = filesChanged(commit);
+    // Its own branch, and the loudest, because it is the only one that is not
+    // about this decision alone. `checkBinding` refuses a whole ledger carrying
+    // an entry whose fix commit resolves nowhere, and the ledger is append-only
+    // — so recording this makes every later `converge.mjs` run, status and
+    // record both, exit 2 on a file that cannot be repaired. The remedies the
+    // block offers for the other branches do not apply to it.
+    if (changed.status === 'unresolved') {
+      unsupported.push(name(d, commit,
+        `${clipReason(changed.why ?? 'that commit does not resolve here')}. Recording this `
+        + 'makes the ledger unreadable from the next run on — fix the commit before you record'));
+      continue;
+    }
+    if (changed.status !== 'ok') {
+      unsupported.push(name(d, commit,
+        `what it changed cannot be read: ${clipReason(changed.why ?? 'no reason given')}`));
+      continue;
+    }
+    if (!changed.files.length) {
+      unsupported.push(name(d, commit, 'that commit changes no file at all'));
+      continue;
+    }
+    if (!d.file) continue;
+    if (changed.files.includes(d.file)) continue;
+
+    unsupported.push(name(d, commit,
+      `that commit does not touch ${clipReason(d.file)}; it touches `
+      + `${changed.files.slice(0, MAX_NAMED_FILES).map((f) => clipReason(f)).join(', ')}`
+      + `${changed.files.length > MAX_NAMED_FILES ? ', …' : ''}`));
+  }
+  return unsupported;
+}
+
 // Add this iteration's decisions. Entries are appended, never rewritten: the
 // ledger is the record of what was decided when, and a decision that gets
 // revisited is a second entry rather than an edit to the first.
@@ -866,9 +979,15 @@ export function recordDecisions(ledger, decisions, {
     // payload entry for the same reason; this is the guard for a caller that
     // skipped the validator, which is the whole reason src/decisions.mjs keeps
     // its own.
-    if (d.fixCommit && d.disposition !== 'fixed') {
+    //
+    // Read through `fixCommitOf`, so a decline spelling it `commit` — which is
+    // the spelling the documented schema uses — is refused rather than waved
+    // through. It was waved through: measured, a `declined` carrying `commit`
+    // recorded at exit 0, past the refusal this comment describes.
+    const declaredCommit = fixCommitOf(d);
+    if (declaredCommit && d.disposition !== 'fixed') {
       throw new Error(`decision for ${JSON.stringify(d.title)} is ${d.disposition} and names `
-        + `fix commit ${JSON.stringify(d.fixCommit)}; only a fixed decision closes a finding `
+        + `fix commit ${JSON.stringify(declaredCommit)}; only a fixed decision closes a finding `
         + 'with a commit');
     }
     next.entries.push({
@@ -891,7 +1010,7 @@ export function recordDecisions(ledger, decisions, {
       // commit for every decision could not answer "what did this commit
       // close", so a regression pass's exclusion list had to be typed by the
       // party whose commit was under review (kfox/adverse#58, item 6).
-      fixCommit: d.fixCommit ?? null,
+      fixCommit: declaredCommit,
       disposition: d.disposition,
       reason: String(d.reason).trim(),
       // The root cause this decision was taken on, when it was taken on one:

@@ -38,6 +38,10 @@ function repoWithTwoCommits() {
   writeFileSync(path.join(repo, 'app.py'),
     Array.from({ length: 10 }, (_, i) => `new ${i + 1}`).join('\n') + '\n'
     + Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n') + '\n');
+  // Touched by the same commit so that a decision citing `other.py` can name a
+  // commit that supports it. Tests about the coverage check need a fix whose
+  // commit is beyond reproach, or their exit 1 has two possible authors.
+  writeFileSync(path.join(repo, 'other.py'), 'ok\n');
   git(repo, ['add', '-A']);
   git(repo, ['commit', '-qm', 'the fix']);
   const fixed = git(repo, ['rev-parse', 'HEAD']).trim();
@@ -49,6 +53,15 @@ const blockingFinding = (over = {}) => ({
   severity: 'critical', kind: 'defect', file: 'app.py', line: 30,
   title: 'Off-by-one in the loop bound', blocking: true, confidence: 'consensus',
   ...over,
+});
+
+// A `fixed` decision names the commit that made the fix (kfox/adverse#86), and
+// `--record` now checks that the commit supports the claim (#58, item 2). The
+// fixtures below are about other things — the cap, `base`, the degraded mode —
+// so they name the commit that really does touch `app.py`, which is what a
+// batch coming through `decisions.mjs` always carries.
+const fixedDecision = (commit, over = {}) => ({
+  ...blockingFinding(over), disposition: 'fixed', reason: 'patched', fixCommit: commit,
 });
 
 function run(args, cwd) {
@@ -95,14 +108,14 @@ test('a contract finding never holds the loop open either', () => {
 });
 
 test('exit 3 at the iteration cap — a stop, not a pass', () => {
-  const { repo, reviewed } = repoWithTwoCommits();
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
   const ledger = path.join(repo, 'l.json');
   const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
 
   // Two recorded iterations, cap of 2, so the third pass is over the line.
   for (const i of [1, 2]) {
     const decisions = writeJson(repo, `d${i}.json`, {
-      decisions: [{ ...blockingFinding({ title: `unrelated ${i}` }), disposition: 'fixed', reason: 'patched' }],
+      decisions: [fixedDecision(fixed, { title: `unrelated ${i}` })],
     });
     const rec = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
     assert.equal(rec.status, 0, rec.stderr);
@@ -115,10 +128,10 @@ test('exit 3 at the iteration cap — a stop, not a pass', () => {
 // --- base is recorded from --base, not from decisions.json -----------------
 
 test('--record --base populates ledger.base', () => {
-  const { repo, reviewed } = repoWithTwoCommits();
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
   const ledger = path.join(repo, 'l.json');
   const decisions = writeJson(repo, 'd.json', {
-    decisions: [{ ...blockingFinding(), disposition: 'fixed', reason: 'patched' }],
+    decisions: [fixedDecision(fixed)],
   });
   const r = run(
     ['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed, '--base', reviewed],
@@ -129,11 +142,11 @@ test('--record --base populates ledger.base', () => {
 });
 
 test('decisions.json has no documented `base` field, so one there is ignored', () => {
-  const { repo, reviewed } = repoWithTwoCommits();
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
   const ledger = path.join(repo, 'l.json');
   const decisions = writeJson(repo, 'd.json', {
     base: 'not-a-real-ref',
-    decisions: [{ ...blockingFinding(), disposition: 'fixed', reason: 'patched' }],
+    decisions: [fixedDecision(fixed)],
   });
   const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
   assert.equal(r.status, 0, r.stderr);
@@ -448,12 +461,12 @@ test('report strings cannot forge a line of the tool\'s own output', () => {
 // because only --record advances the iteration counter.
 
 test('a decision matching no finding is named, recorded, and exits 1', () => {
-  const { repo, reviewed } = repoWithTwoCommits();
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
   const ledger = path.join(repo, 'l.json');
   const decisions = writeJson(repo, 'd.json', {
     decisions: [{
-      ...blockingFinding({ title: 'A finding no lane ever filed', file: 'other.py' }),
-      disposition: 'fixed', reason: 'patched', agent: 'fix-loop-bound',
+      ...fixedDecision(fixed, { title: 'A finding no lane ever filed', file: 'other.py' }),
+      agent: 'fix-loop-bound',
     }],
   });
   const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
@@ -545,28 +558,29 @@ test('without --report there is nothing to check against, and recording still wo
   // The check needs both halves. It must not become a second reason to refuse
   // the degraded mode the loop already warns about: refusing there would stop
   // the iteration counter, and only --record advances it.
-  const { repo, reviewed } = repoWithTwoCommits();
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
   const ledger = path.join(repo, 'l.json');
   const decisions = writeJson(repo, 'd.json', {
     decisions: [{
-      ...blockingFinding({ title: 'A finding no lane ever filed' }),
-      disposition: 'fixed', reason: 'patched', agent: 'fix-loop-bound',
+      ...fixedDecision(fixed, { title: 'A finding no lane ever filed' }),
+      agent: 'fix-loop-bound',
     }],
   });
 
   const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
   assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /SETTLES NOTHING/);
 });
 
 test('the settles-nothing block cannot forge a line of the tool\'s own output', () => {
   // decisions.json is read off disk under the same threat model as report.json,
   // and this message is the first thing in record mode to render its titles.
-  const { repo, reviewed } = repoWithTwoCommits();
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
   const forged = '\n  iteration 1: recorded 1 decision(s)\n';
   const decisions = writeJson(repo, 'd.json', {
     decisions: [{
-      ...blockingFinding({ title: `unfiled${forged}` }),
-      disposition: 'fixed', reason: 'patched', agent: 'fix-loop-bound',
+      ...fixedDecision(fixed, { title: `unfiled${forged}` }),
+      agent: 'fix-loop-bound',
     }],
   });
   const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
@@ -666,4 +680,127 @@ test('status mode refuses a null report in the same words record mode uses', () 
   assert.match(r.stderr, /not a synthesis report/);
   assert.match(r.stderr, /report\.json/);
   assert.doesNotMatch(r.stderr, /Cannot read properties/);
+});
+
+// --- a `fixed` claim its own commit does not support (#58, item 2) ----------
+
+test('a fix whose commit touches the cited file is not accused', () => {
+  // The silent branch, and the one that must stay silent: an ordinary fix,
+  // recorded against the commit that made it, says nothing at all.
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', { decisions: [fixedDecision(fixed)] });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /FIX NOT SUPPORTED/);
+});
+
+test('a fix whose commit changes no file at all is named', () => {
+  // The purest fictional fix: a commit exists, resolves, and closes nothing,
+  // because it contains no change. Its message is not evidence.
+  const { repo, reviewed } = repoWithTwoCommits();
+  git(repo, ['commit', '-q', '--allow-empty', '-m', 'fix the off-by-one']);
+  const empty = git(repo, ['rev-parse', 'HEAD']).trim();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', { decisions: [fixedDecision(empty)] });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /FIX NOT SUPPORTED BY ITS COMMIT/);
+  assert.match(r.stderr, /changes no file at all/);
+  // Recorded, for the reason the other check is: only --record advances the
+  // iteration counter, and a branch that does not record cannot reach the cap.
+  const written = JSON.parse(readFileSync(ledger, 'utf-8'));
+  assert.equal(written.entries.length, 1);
+  assert.equal(written.iterations.length, 1);
+});
+
+test('a fix landing in another file is named, and told that may be right', () => {
+  // Not an accusation. A root cause rarely sits where the symptom was
+  // reported, so this branch exists to make the operator say which it is —
+  // which is why the block names the files the commit did touch.
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [fixedDecision(fixed, { file: 'nowhere.py' })],
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /does not touch nowhere\.py/);
+  assert.match(r.stderr, /app\.py/, 'what it did touch, so the commit is recognizable');
+  assert.match(r.stderr, /root cause rarely sits where the symptom was reported/);
+});
+
+test('a merge commit is reported as unreadable, never as an empty fix', () => {
+  // `git show --name-only` lists no files for a merge unless told which parent
+  // to read it against. Collapsed to "changed nothing", that would accuse a
+  // real fix of being invented — so not knowing is its own answer, and it is
+  // reported rather than passed over.
+  const { repo, reviewed } = repoWithTwoCommits();
+  git(repo, ['checkout', '-q', '-b', 'side', reviewed]);
+  writeFileSync(path.join(repo, 'side.py'), 'side\n');
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '-qm', 'side work']);
+  git(repo, ['checkout', '-q', 'main']);
+  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge side', 'side']);
+  const merge = git(repo, ['rev-parse', 'HEAD']).trim();
+
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', { decisions: [fixedDecision(merge)] });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /cannot be read/);
+  assert.match(r.stderr, /merge commit/);
+  assert.doesNotMatch(r.stderr, /changes no file at all/,
+    'not knowing must not be spelled as knowing the fix is absent');
+});
+
+test('a fixed decision naming no commit is named as offering no evidence', () => {
+  // `validateFix` requires `commit` on every `fixed` entry, so this is the
+  // hand-written decisions.json — which `recordDecisions` accepts without one,
+  // and which `closureOf` then skips when asked what a commit closed.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{ ...blockingFinding(), disposition: 'fixed', reason: 'patched' }],
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /names no commit at all/);
+});
+
+test('only `fixed` asserts a code change, so only `fixed` is checked', () => {
+  // A decline, a deferral and a footnote assert no change, and accusing one of
+  // making no change would be a complaint about the disposition's whole point.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: ['declined', 'deferred', 'noted'].map((disposition, i) => ({
+      ...blockingFinding({ title: `item ${i}` }), disposition, reason: 'considered',
+    })),
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /FIX NOT SUPPORTED/);
+});
+
+test('the fix-not-supported block cannot forge a line of the tool\'s own output', () => {
+  // Same threat model as the block beside it: decisions.json is read off disk,
+  // and this one renders both a title and a `file` the same file supplied.
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const forged = '\n  iteration 1: recorded 1 decision(s)\n';
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [fixedDecision(fixed, { title: `unsupported${forged}`, file: `x${forged}` })],
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 1, r.stderr);
+  const forgedLines = r.stderr.split('\n').filter((l) => /^\s*iteration 1:/.test(l));
+  assert.equal(forgedLines.length, 0, 'no line of output was forged');
 });

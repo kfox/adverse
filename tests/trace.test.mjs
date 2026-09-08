@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, renameSync, unlinkSync } from 'node
 import os from 'node:os';
 import path from 'node:path';
 
-import { clearRefCache, followRename, makeAnchorTracer, parseHunks, projectLine, resolveRef, traceAnchor } from '../src/trace.mjs';
+import { clearRefCache, filesChangedIn, followRename, makeAnchorTracer, parseHunks, projectLine, resolveRef, traceAnchor } from '../src/trace.mjs';
 
 // --- pure arithmetic ---------------------------------------------------------
 
@@ -249,4 +249,58 @@ test('makeAnchorTracer does not memoize its way past a missing anchor', () => {
   assert.equal(traceFor({ file: 'app.py', line: 30, atCommit: null }), null);
   assert.equal(traceFor({ file: null, line: 30, atCommit: 'v1' }), null);
   assert.ok(traceFor({ file: 'app.py', line: 30, citedLine: null, atCommit: 'v1' }));
+});
+
+// --- what one commit changed -------------------------------------------------
+
+test('filesChangedIn lists the paths a commit touched', () => {
+  const r = filesChangedIn(repo, 'v2');
+  assert.equal(r.status, 'ok');
+  // `moved.py` and not `keep.py`: git detects the rename and names only the
+  // path that exists afterward. So a fix that renames the file a finding cites
+  // reads as "touched other files" rather than as touching the cited one —
+  // which is the reported branch, not the silent one, and that is the right
+  // direction for a change big enough to move the file out from under a
+  // finding.
+  assert.deepEqual([...r.files].sort(), ['app.py', 'doomed.py', 'moved.py']);
+});
+
+test('filesChangedIn reports an unresolvable ref rather than an empty list', () => {
+  // The caller reads an empty list as evidence that a fix is fictional, so
+  // every way of failing to read one has to stay distinguishable from having
+  // read an empty one. `unresolved` is its own status rather than a flavor of
+  // `failed`: a ref naming no commit here is the one that must never be
+  // recorded, since `checkBinding` refuses the whole append-only ledger over it
+  // from the next run on.
+  const r = filesChangedIn(repo, 'no-such-ref');
+  assert.equal(r.status, 'unresolved');
+  assert.match(r.why, /names no commit in this repository/);
+});
+
+test('filesChangedIn refuses a ref the safe-ref pattern rejects', () => {
+  // `resolveRef` is the guard; this asserts the refusal survives the extra hop
+  // rather than the ref reaching an argument position.
+  assert.equal(filesChangedIn(repo, '--output=/tmp/pwned').status, 'unresolved');
+});
+
+test('filesChangedIn returns paths git would otherwise C-quote', () => {
+  // Every path this module reads back is compared against a path a finding
+  // cites. Under git's default `core.quotePath`, `src/café.py` comes back as
+  // `"src/caf\303\251.py"`, so the comparison fails — and it fails in the
+  // direction that accuses a real fix of touching some other file, printing the
+  // escaped form at the operator.
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-quotepath-'));
+  try {
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 'test@example.invalid');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    writeFileSync(path.join(dir, 'café.py'), 'x\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'one');
+
+    assert.deepEqual(filesChangedIn(dir, 'HEAD').files, ['café.py']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

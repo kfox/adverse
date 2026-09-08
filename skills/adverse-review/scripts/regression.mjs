@@ -184,8 +184,22 @@ function requireRevision(rev) {
 // like an option to the pattern (a future spelling, a caller that skips the
 // guard) still cannot become one to git.
 function readCommit(repo, rev) {
-  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8' });
+  const git = (...args) =>
+    execFileSync('git', ['-C', repo, '-c', 'core.quotePath=false', ...args], { encoding: 'utf-8' });
   try {
+    const parents = git('show', '--no-patch', '--format=%P', '--end-of-options', rev);
+    // A merge lists no files and no diff unless told which parent to read it
+    // against, so it arrives here looking exactly like a commit that changed
+    // nothing — and the lane gets chosen from that. Said out loud through the
+    // channel below rather than fixed by picking a parent, which would be this
+    // bridge inventing the answer. src/trace.mjs's `filesChangedIn` keeps the
+    // same two apart for the same reason, one caller over.
+    if (parents.trim().split(/\s+/).filter(Boolean).length > 1) {
+      process.stderr.write(`  ! regression: ${rev} is a merge, so git lists no files for it\n`
+        + '    choosing the lane from an unread diff, which fails toward the Adversary\n');
+      process.exitCode = 1;
+      return { files: [], diff: '' };
+    }
     return {
       files: git('show', '--pretty=format:', '--name-only', '--end-of-options', rev)
         .split('\n').filter(Boolean),

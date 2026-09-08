@@ -15,7 +15,7 @@ import path from 'node:path';
 import {
   DISPOSITIONS, SETTLING_SCORE, annotate, checkBinding, closureOf, convergenceStatus,
   emptyLedger, isSettled, loadLedger, matchFinding, normalizeTitle, recordDecisions,
-  saveLedger, scoreMatch, summarizeDispositions, uncoveredDecisions,
+  saveLedger, scoreMatch, summarizeDispositions, uncoveredDecisions, unsupportedFixes,
 } from '../src/ledger.mjs';
 
 const finding = (over = {}) => ({
@@ -1444,4 +1444,64 @@ test('a mis-anchored decision cannot exempt itself by having been recorded once'
     { atCommit: 'deadbee', report });
   assert.equal(uncoveredDecisions([misAnchored], report, { ledger }).length, 1,
     'recording a mistake does not make it right the second time');
+});
+
+// --- the documented spelling of a decision's fix commit ---------------------
+
+test('a hand-written decision spelling its commit `commit` records it', () => {
+  // references/convergence-loop.md documents `decisions.json` entries as
+  // carrying `commit`; src/decisions.mjs renames it to `fixCommit` on the way
+  // through, and everything here read only the renamed one. So the file the
+  // docs teach you to write recorded `fixCommit: null` — the commit dropped in
+  // silence, and `closureOf` unable to attribute the fix to anything.
+  const documented = {
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null,
+    disposition: 'fixed', reason: 'restored the guard', commit: 'abc1234',
+  };
+  const led = recordDecisions(emptyLedger(), [documented], { atCommit: 'deadbee' });
+  assert.equal(led.entries[0].fixCommit, 'abc1234');
+});
+
+test('a decline spelling its commit `commit` is refused, not waved through', () => {
+  // The other half of the same drift, and the one with teeth: `closureOf`
+  // reads `fixCommit` to decide which lanes a regression pass must exclude, so
+  // a decline asserting a commit excuses a lane from reviewing a commit that
+  // closed nothing it reported. The documented refusal existed and did not fire.
+  const declined = {
+    title: 'the retry loop is unbounded', kind: 'defect', severity: 'critical',
+    file: 'src/net.py', line: 12, counterpart: null,
+    disposition: 'declined', reason: 'the caller already caps it', commit: 'abc1234',
+  };
+  assert.throws(() => recordDecisions(emptyLedger(), [declined], { atCommit: 'deadbee' }),
+    /only a fixed decision closes a finding with a commit/);
+});
+
+test('unsupportedFixes reads the documented spelling too', () => {
+  // Or the check accuses a decision that named its commit exactly as the docs
+  // say of naming no commit at all — a false accusation produced by this
+  // check's own arrival.
+  const documented = {
+    title: 'the guard is unreachable', file: 'src/auth.py',
+    disposition: 'fixed', reason: 'restored the guard', commit: 'abc1234',
+  };
+  const touched = () => ({ status: 'ok', files: ['src/auth.py'] });
+  assert.deepEqual(unsupportedFixes([documented], touched), []);
+});
+
+test('a fix commit that resolves nowhere gets its own loudest branch', () => {
+  // Not a merge and not a git hiccup. `checkBinding` refuses a whole ledger
+  // carrying one of these, and the ledger is append-only — so recording it
+  // makes every later run exit 2 on a file that cannot be repaired. The
+  // remedies offered for the softer branches do not apply.
+  const d = {
+    title: 'the guard is unreachable', file: 'src/auth.py',
+    disposition: 'fixed', reason: 'restored the guard', fixCommit: 'nosuchref',
+  };
+  const gone = () => ({ status: 'unresolved', why: 'nosuchref names no commit in this repository' });
+  const [named] = unsupportedFixes([d], gone);
+  assert.match(named.why, /names no commit in this repository/);
+  assert.match(named.why, /makes the ledger unreadable from the next run on/);
+  // And it must not be worded as the soft "cannot be read" case beside it.
+  assert.doesNotMatch(named.why, /what it changed cannot be read/);
 });

@@ -13,10 +13,13 @@
 // exits clean on the cap would be lying about what it found.
 //
 // In --record mode the same three codes mean the record's own outcome: 0 =
-// recorded, 2 = nothing was written, 1 = recorded, and some of it settles
-// nothing (kfox/adverse#58, item 1). Exit 1 is NOT a refusal — the ledger has
-// the batch and the iteration counter has advanced, because a branch that does
-// not record makes the cap unreachable and the loop non-terminating.
+// recorded, 2 = nothing was written, 1 = recorded, and something about it does
+// not hold up — a decision that settles nothing (kfox/adverse#58, item 1), or
+// a `fixed` whose commit does not support the claim (item 2). Exit 1 is NOT a
+// refusal — the ledger has the batch and the iteration counter has advanced,
+// because a branch that does not record makes the cap unreachable and the loop
+// non-terminating. Each check prints its own named block, so "which one" is
+// read off stderr rather than guessed from the code.
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -27,9 +30,9 @@ import { importFromSrc } from './package-root.mjs';
 const {
   UNREPORTED_DISPOSITION, checkBinding, clipReason, convergenceStatus, emptyLedger,
   loadLedger, recordDecisions, requireFindings, saveLedger, summarizeDispositions,
-  uncoveredDecisions,
+  uncoveredDecisions, unsupportedFixes,
 } = await importFromSrc('ledger.mjs');
-const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
+const { filesChangedIn, makeAnchorTracer, resolveRef } = await importFromSrc('trace.mjs');
 
 const USAGE = 'Usage:\n'
   + '  converge.mjs --ledger L.json --record decisions.json --report report.json --repo DIR --at REVIEWED_REF [--base REF]\n'
@@ -152,6 +155,25 @@ if (values.record) {
     process.exit(2);
   }
 
+  // Needs no report — it asks git what a commit changed, not what a panel
+  // filed — so unlike the check above it runs on every `--record`, including
+  // the ones that pass no `--report` at all.
+  //
+  // Wrapped, and at exit 2. This became the FIRST pass over `decisions`, and
+  // it sat outside the guard that had covered every other one: a decisions.json
+  // holding `[null]` used to reach `recordDecisions` and get the clean "nothing
+  // was written" refusal, and instead died here with an uncaught TypeError at
+  // exit 1 — the record-mode code that means the batch IS in the ledger. The
+  // stack said otherwise and nothing was written, which is precisely the pair
+  // of claims the exit codes exist to keep apart.
+  let unsupported = [];
+  try {
+    unsupported = unsupportedFixes(decisions, (ref) => filesChangedIn(repo, ref));
+  } catch (e) {
+    process.stderr.write(`converge: ${oneLine(values.record)}: ${e.message}\n`);
+    process.exit(2);
+  }
+
   let next;
   try {
     next = recordDecisions(ledger, decisions, { atCommit, reportDigest, report });
@@ -197,7 +219,28 @@ if (values.record) {
       + '  for a folded batch; a hand-written decision has to be corrected by hand,\n'
       + '  and re-recorded as a second entry.\n');
   }
-  process.exit(uncovered.length ? 1 : 0);
+
+  // Its own block beside that one, never folded into it. The two are different
+  // accusations about different halves of a decision — one says it answers no
+  // finding, the other says it made no change — and a batch can trip both, on
+  // different entries or on the same one.
+  if (unsupported.length) {
+    process.stderr.write(
+      `converge: FIX NOT SUPPORTED BY ITS COMMIT — ${unsupported.length} `
+      + `\`fixed\` decision(s):\n`
+      + unsupported.map((u) => `  - ${oneLine(u.title)}`
+                             + `${u.commit ? ` [${oneLine(u.commit)}]` : ''}\n`
+                             + `      ${oneLine(u.why)}\n`).join('')
+      + '  Recorded anyway, and a fix in another file is often the right one — a\n'
+      + '  root cause rarely sits where the symptom was reported. But `fixed` is\n'
+      + '  the one disposition that asserts a code change, and next iteration one\n'
+      + '  of these coming back is announced as REGRESSED: whoever reads that goes\n'
+      + '  looking for a fix that broke, not for a fix that was never made. If the\n'
+      + '  change is real and lives elsewhere, say where in the reason. If it is\n'
+      + '  not, this is `declined` or `deferred`.\n');
+  }
+
+  process.exit(uncovered.length || unsupported.length ? 1 : 0);
 }
 
 // --- status mode -------------------------------------------------------------
