@@ -45,6 +45,10 @@
 
 import { execFileSync } from 'node:child_process';
 
+import { refuseDirectRun } from './entryGuard.mjs';
+
+refuseDirectRun(import.meta.url);
+
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 // Parse `git diff -U0` output into old/new line ranges. Counts are optional in

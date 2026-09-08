@@ -14,6 +14,13 @@ import { parseArgs } from 'node:util';
 import { importFromSrc } from './package-root.mjs';
 
 const { parsePlan, splitLanes } = await importFromSrc('scaling.mjs');
+const { refuseDirectRun } = await importFromSrc('entryGuard.mjs');
+
+// A library in a directory of executables, so `node …/scripts/bridge-io.mjs` is
+// the same silent no-op every module under src/ now refuses (kfox/adverse#71).
+// Unlike package-root.mjs beside it, this file has already located src/ and can
+// use the shared guard.
+refuseDirectRun(import.meta.url);
 
 export function readJson(file, prefix) {
   try {

@@ -16,6 +16,10 @@
 // say out loud when a lane was skipped, and the report must show it — an
 // unmentioned skipped lane reads exactly like a clean review.
 
+import { refuseDirectRun } from './entryGuard.mjs';
+
+refuseDirectRun(import.meta.url);
+
 // Path fragments that put a change near a boundary. Matched against the whole
 // repo-relative path, lowercased.
 //

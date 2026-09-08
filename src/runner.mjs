@@ -7,7 +7,10 @@
 
 import { spawn } from 'node:child_process';
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { extractJson, ParseError } from './parse.mjs';
+
+refuseDirectRun(import.meta.url);
 
 const RETRY_PREAMBLE = `\n\n---\n\n# RETRY — your previous response was rejected\n\nReason: `;
 const RETRY_TAIL = `\n\nRe-emit your response as a single JSON object that satisfies the schema above. No markdown fences. No prose outside the JSON. Match every required key exactly.`;

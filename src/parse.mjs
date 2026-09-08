@@ -17,6 +17,10 @@
 // We deliberately do NOT try to fix malformed JSON. Retry-with-feedback is the
 // contract: if the agent emits invalid JSON, the runner re-prompts it.
 
+import { refuseDirectRun } from './entryGuard.mjs';
+
+refuseDirectRun(import.meta.url);
+
 export class ParseError extends Error {
   constructor(message) {
     super(message);

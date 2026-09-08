@@ -22,8 +22,11 @@
 // asked what it would have said. `checkBinding` in ledger.mjs already answers
 // this shape.
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { DEFAULT_PERSONAS, crossReviews } from './personas.mjs';
 import { runLanes, skippedLanes, splitLanes } from './scaling.mjs';
+
+refuseDirectRun(import.meta.url);
 
 // exit 2 is deliberately not exit 1: exit 1 is a claim about a review, and
 // these are runs that could not read one. Same line converge.mjs draws.

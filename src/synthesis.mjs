@@ -33,9 +33,12 @@
 // are both credible enough (cross-validated or consensus) and consequential
 // enough (not advisory, not `info`) to hold a change open.
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { isLaneAgent } from './personas.mjs';
 import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
          assertCoversStatuses } from './taxonomy.mjs';
+
+refuseDirectRun(import.meta.url);
 
 // Verdict → score mapping. The natural symmetric choice: approve and reject
 // cancel each other out, conditional carries half-weight on the approve side.

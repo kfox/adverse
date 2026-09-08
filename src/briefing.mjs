@@ -20,6 +20,7 @@
 // rather than opened here, so this module stays pure and the bridge keeps the
 // I/O and the exit codes. Same split as ledger.mjs's `checkBinding`.
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { emptyLedger, isRegressionCandidate, annotate } from './ledger.mjs';
 import { laneAgentOf } from './personas.mjs';
 import { ADVISORY_KINDS } from './taxonomy.mjs';
@@ -28,6 +29,8 @@ import {
   groupFindings, normalizeAnchor,
 } from './triage.mjs';
 import { mergeSplitReviews, normalizeVerdict } from './synthesis.mjs';
+
+refuseDirectRun(import.meta.url);
 
 // Anchors are normalized BEFORE anything reads them. `line`, `file`,
 // `counterpart` and `detail` come out of a model, and downstream they reach a

@@ -8,7 +8,10 @@
 // briefing and makes reviewers read the repo themselves. See
 // PHASE2_BRIEFING_INSTRUCTIONS.
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { GROUP_RULINGS, KINDS, SEVERITIES } from './taxonomy.mjs';
+
+refuseDirectRun(import.meta.url);
 
 export const KIND_RUBRIC = `\`kind\` — what kind of claim this is. This selects how the finding gets
 verified and whether it can block the change, so choose it honestly rather

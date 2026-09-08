@@ -4,7 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { closeQuietly, openRegularFileSync } from './fsSafe.mjs';
+
+refuseDirectRun(import.meta.url);
 
 export const DEFAULT_MAX_TOTAL_CHARS = 250_000;
 export const DEFAULT_MAX_FILE_CHARS = 30_000;

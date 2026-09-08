@@ -39,8 +39,11 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
+import { refuseDirectRun } from './entryGuard.mjs';
 import { ADVISORY_KINDS } from './taxonomy.mjs';
 import { isBlocking, isOpenBlocking } from './synthesis.mjs';
+
+refuseDirectRun(import.meta.url);
 
 export const LEDGER_VERSION = 1;
 
