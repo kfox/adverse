@@ -13,7 +13,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,6 +23,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(ROOT, 'bin', 'adverse.mjs');
 const srcUrl = (name) => pathToFileURL(path.join(ROOT, 'src', name)).href;
+
+const FAKE_AGENT = path.join(ROOT, 'tests', 'fixtures', 'fake-agent.mjs');
+const BASE_SHA = '4d1f0c2b9a7e5d3c8b6a4f2e1d0c9b8a7f6e5d4c';
 
 const { synthesize } = await import(srcUrl('synthesis.mjs'));
 const {
@@ -103,6 +108,64 @@ test('a planned lane that sent nothing and declared nothing is recorded as silen
   assert.equal(record.lanes.adversary.reported, null);
 });
 
+test('a lane that did not look records null claim checks even when a briefing exists', () => {
+  // The first version of this tested `mine ? … : null` where `mine` was a
+  // filtered ARRAY, and an empty array is truthy — so every lane that did not
+  // look reported `disproved: 0`, which reads as "checked, and clean". The
+  // briefing here deliberately carries findings, because a run with no
+  // briefing at all cannot tell the two implementations apart.
+  const round1 = { auditor: review('auditor', [finding()]), steward: review('steward', []) };
+  const briefing = {
+    findings: [{ reporter: 'auditor', claimCheck: { status: 'ok' }, kindCheck: { status: 'ok' } }],
+    groups: [],
+  };
+  const record = buildRunRecord({
+    syn: synthesize(round1, {}, {
+      failedPersonas: ['adversary'],
+      skippedPersonas: [{ persona: 'pragmatist', reason: 'small diff' }],
+    }),
+    round1,
+    briefing,
+    plan: { lanes: [{ persona: 'auditor', run: true, agents: 1 },
+      { persona: 'adversary', run: true, agents: 1 },
+      { persona: 'steward', run: true, agents: 1 },
+      { persona: 'pragmatist', run: false, agents: 0 }] },
+  });
+
+  for (const lane of ['adversary', 'pragmatist']) {
+    assert.equal(record.lanes[lane].disproved, null, `${lane} did not look`);
+    assert.equal(record.lanes[lane].underAnchored, null, `${lane} did not look`);
+    assert.equal(record.lanes[lane].reported, null, `${lane} did not look`);
+  }
+  assert.equal(record.lanes.auditor.disproved, 0, 'it was checked and was clean');
+});
+
+test('a declared lane whose payload is still on disk counts as declared', () => {
+  // A standalone `synthesize --degraded auditor` whose round-1 file is still
+  // in the run directory: the declaration wins, because a lane the operator
+  // says failed did not review, whatever is lying beside it.
+  const round1 = { auditor: review('auditor', [finding()]), steward: review('steward', []) };
+  const record = buildRunRecord({
+    syn: synthesize(round1, {}, { failedPersonas: ['auditor'] }),
+    round1,
+  });
+  assert.equal(record.lanes.auditor.status, LANE_STATUS.degraded);
+  assert.equal(record.lanes.auditor.reported, null);
+});
+
+test('a split lane is one row, not two reviewers', () => {
+  // Raw per-agent payloads, the spelling `combine.mjs` would have merged.
+  const round1 = {
+    'auditor-a': review('auditor', [finding()]),
+    'auditor-b': review('auditor', [finding({ title: 'other half' })]),
+    steward: review('steward', []),
+  };
+  const record = buildRunRecord({ syn: synthesize(round1), round1 });
+  assert.deepEqual(record.roster.reported, ['auditor', 'steward']);
+  assert.equal(record.lanes.auditor.reported, 2, 'both halves of one lane');
+  assert.equal(record.roster.unknown, 0);
+});
+
 test('per-lane claim checks are null without a briefing and counted with one', () => {
   // "Nobody checked" is not "nothing was wrong" — the DISPROVED rate is the
   // hallucination gauge, and a zero invented for a run that never ran triage
@@ -114,7 +177,7 @@ test('per-lane claim checks are null without a briefing and counted with one', (
   assert.equal(buildRunRecord({ syn, round1 }).triage, null);
 
   const briefing = {
-    base: 'abc123',
+    base: BASE_SHA,
     findings: [
       { reporter: 'auditor', claimCheck: { status: 'DISPROVED' }, kindCheck: { status: 'ok' } },
       { reporter: 'auditor', claimCheck: { status: 'ok' }, kindCheck: { status: 'under-anchored' } },
@@ -127,7 +190,23 @@ test('per-lane claim checks are null without a briefing and counted with one', (
   assert.equal(withBriefing.lanes.auditor.underAnchored, 1);
   assert.equal(withBriefing.lanes.steward.disproved, 0, 'it was checked and was clean');
   assert.equal(withBriefing.triage.groupsProposed, 2);
-  assert.equal(withBriefing.base, 'abc123');
+  assert.equal(withBriefing.base, BASE_SHA);
+});
+
+test('a base is recorded only as a sha, never as a name somebody chose', () => {
+  // `triage.mjs --base` takes any ref, so `base` arrives as free text — the one
+  // field that was copied through rather than counted. A branch name is where
+  // a customer or an embargoed feature ends up in a file documented as safe to
+  // paste into an issue.
+  const round1 = { auditor: review('auditor', []), steward: review('steward', []) };
+  const syn = synthesize(round1);
+  const baseOf = (base) => buildRunRecord({ syn, round1, base }).base;
+
+  assert.equal(baseOf(BASE_SHA), BASE_SHA);
+  assert.equal(baseOf(BASE_SHA.slice(0, 12)), BASE_SHA.slice(0, 12), 'an abbreviated sha');
+  assert.equal(baseOf('release/acme-corp-migration'), null);
+  assert.equal(baseOf('main'), null);
+  assert.equal(baseOf(null), null);
 });
 
 test("round 2's yield is counted, including the additions round 1 missed", () => {
@@ -149,14 +228,21 @@ test("round 2's yield is counted, including the additions round 1 missed", () =>
 test('no prose reaches the record', () => {
   // The file must stay safe to paste into an issue about a threshold. Every
   // string a model or an operator wrote is a sentinel here; none may survive.
+  // `severity` is deliberately left valid: a finding with an unknown severity is
+  // dropped whole by `buildFinding`, which would take the other sentinels with
+  // it and pass this test for the wrong reason.
   const S = {
     title: 'SENTINEL-TITLE-8a1', detail: 'SENTINEL-DETAIL-8a2', fix: 'SENTINEL-FIX-8a3',
     summary: 'SENTINEL-SUMMARY-8a4', skip: 'SENTINEL-SKIP-8a5', reason: 'SENTINEL-REASON-8a6',
     file: 'SENTINEL-PATH-8a7.mjs', planReason: 'SENTINEL-PLAN-8a8', pin: 'SENTINEL-PIN-8a9',
+    // `coerceKind` accepts any non-empty string, so this one arrived as an
+    // object KEY in the tallies — 4 KB of it, when the panel measured it.
+    kind: 'SENTINEL-KIND-8b1', status: 'SENTINEL-STATUS-8b2', persona: 'SENTINEL-LANE-8b3',
+    base: 'SENTINEL-BASE-8b4',
   };
   const round1 = {
     auditor: review('auditor',
-      [finding({ title: S.title, detail: S.detail, fix: S.fix, file: S.file })],
+      [finding({ title: S.title, detail: S.detail, fix: S.fix, file: S.file, kind: S.kind })],
       { summary: S.summary }),
     steward: review('steward', [], { summary: S.summary }),
   };
@@ -169,15 +255,20 @@ test('no prose reaches the record', () => {
   const record = buildRunRecord({
     syn: synthesize(round1, round2, {
       skippedPersonas: [{ persona: 'pragmatist', reason: S.skip }],
-      rootCauseGroups: [{ id: 'G1', title: S.title, status: 'proposed', citations: [] }],
+      rootCauseGroups: [{ id: 'G1', title: S.title, status: S.status, citations: [] }],
     }),
     round1,
     round2,
-    briefing: { findings: [{ reporter: 'auditor', title: S.title, file: S.file }], groups: [] },
+    base: S.base,
+    briefing: {
+      findings: [{ reporter: S.persona, title: S.title, file: S.file }],
+      groups: [],
+    },
     plan: {
       size: { bucket: 'small', fileCount: 2, changedLines: 9 },
       pinned: [S.pin],
-      lanes: [{ persona: 'auditor', run: true, agents: 1, reason: S.planReason }],
+      lanes: [{ persona: 'auditor', run: true, agents: 1, reason: S.planReason },
+        { persona: S.persona, run: true, agents: 2, reason: S.planReason }],
     },
   });
 
@@ -186,6 +277,13 @@ test('no prose reaches the record', () => {
     assert.doesNotMatch(serialized, new RegExp(sentinel), `${field} leaked into the record`);
   }
   assert.equal(record.plan.pinned, 1, 'a pinned path is counted, never quoted');
+  // Counted, not dropped: an off-vocabulary kind is a fact about the run.
+  assert.equal(record.findings.byKind.other, 1);
+  // A group's status is recomputed by synthesis from the rulings, so the
+  // briefing's own value never reaches the record — the clamp on it is a
+  // second lock on a door that is currently shut. The sentinel stays in the
+  // set above so a change that opens it fails this test rather than shipping.
+  assert.equal(record.rootCauses.byStatus.proposed, 1);
 });
 
 // -------------------------------------------------------------- the identity
@@ -199,6 +297,9 @@ test('a remote yields owner/name and nothing else', () => {
     'kfox/adverse');
   // A local-path remote's parent segment is somebody's directory layout.
   assert.equal(repoFromRemote('/Users/someone/src/adverse'), 'adverse');
+  // The same path wearing a scheme. Without the scheme stripped it took the
+  // owner/name branch and published `src` as an owner.
+  assert.equal(repoFromRemote('file:///Users/someone/src/adverse'), 'adverse');
 });
 
 test('the destination is one file per machine, overridable', () => {
@@ -303,11 +404,85 @@ test('a telemetry file that cannot be written does not change the run', () => {
   assert.match(r.stderr, /verdict:/, 'the report was still rendered');
 });
 
-test('a non-numeric --iteration is refused rather than recorded as NaN', () => {
+test('every --iteration that is not a pass number is refused', () => {
+  // `--iteration $I` with an unset shell variable is the case this exists for,
+  // and an empty string is not NaN: `Number('') === 0` passed an
+  // `isInteger` check and recorded the missing value as pass zero.
+  // `=` form for the negative, which parseArgs would otherwise read as a flag.
+  for (const bad of [['--iteration', '$I'], ['--iteration', ''], ['--iteration', ' '],
+    ['--iteration', '0'], ['--iteration=-1'], ['--iteration', '2.5']]) {
+    const dir = freshTmp();
+    const file = path.join(dir, 'runs.jsonl');
+    const r = runSynthesize(['--round1', round1File(dir), ...bad],
+      { ADVERSE_TELEMETRY_FILE: file });
+    assert.equal(r.status, 2, `${JSON.stringify(bad)}: exit ${r.status}`);
+    assert.match(r.stderr, /--iteration must be a pass number/, JSON.stringify(bad));
+    assert.equal(existsSync(file), false, `${JSON.stringify(bad)} still wrote a line`);
+  }
+});
+
+test('a hostile round-1 key never reaches the file', () => {
+  // Measured end-to-end by the panel: `adverse synthesize --round1` validates
+  // no persona name, so a key was a free string that landed verbatim in
+  // `roster.reported` and as a key under `lanes`.
   const dir = freshTmp();
-  const r = runSynthesize(
-    ['--round1', round1File(dir), '--iteration', '$I'],
-    { ADVERSE_TELEMETRY_FILE: path.join(dir, 'runs.jsonl') });
-  assert.equal(r.status, 2);
-  assert.match(r.stderr, /--iteration must be an integer/);
+  const file = path.join(dir, 'runs.jsonl');
+  const payload = path.join(dir, 'round1.json');
+  writeFileSync(payload, JSON.stringify({
+    auditor: review('auditor', [finding()]),
+    steward: review('steward', []),
+    'SENTINEL-LEAK-9f2a1': review('auditor', [finding()]),
+  }));
+
+  const r = runSynthesize(['--round1', payload, '--out', path.join(dir, 'r.md')],
+    { ADVERSE_TELEMETRY_FILE: file });
+  assert.equal(r.status, 0, r.stderr);
+
+  const line = readFileSync(file, 'utf-8');
+  assert.doesNotMatch(line, /SENTINEL-LEAK-9f2a1/);
+  const record = JSON.parse(line);
+  assert.deepEqual(record.roster.reported, ['auditor', 'steward']);
+  assert.equal(record.roster.unknown, 1, 'counted, not quoted');
+});
+
+test('the destination directory is not followed when it is a symlink', () => {
+  // O_NOFOLLOW protects the destination FILE; mkdirSync reaches it through a
+  // directory and follows a symlink there. The panel planted
+  // `~/.cache/adverse -> attacker/dir` and the whole write landed inside it.
+  const dir = freshTmp();
+  const elsewhere = path.join(dir, 'elsewhere');
+  const planted = path.join(dir, 'cache');
+  mkdirSync(elsewhere);
+  symlinkSync(elsewhere, planted);
+
+  const result = appendRunRecord({ a: 1 }, path.join(planted, 'runs.jsonl'));
+  assert.equal(result.ok, false);
+  assert.match(result.error, /symlink/);
+  assert.deepEqual(readdirSync(elsewhere), [], 'nothing was written through the link');
+});
+
+test('`adverse review` records its run too, and honors the opt-out', () => {
+  // The other call site. It has more to say than synthesize does — it knows
+  // which lanes it spawned — and nothing pinned that it says anything at all.
+  const target = freshTmp();
+  writeFileSync(path.join(target, 'auth.py'),
+    'def check(name, conn):\n'
+    + '    return conn.execute("SELECT * FROM users WHERE name = \'" + name + "\'")\n');
+
+  const runReview = (args, env) => spawnSync(process.execPath,
+    [BIN, 'review', target, '--agent', `${process.execPath} ${FAKE_AGENT}`, ...args],
+    { cwd: ROOT, encoding: 'utf-8', timeout: 60_000,
+      env: { ...process.env, ADVERSE_NO_TELEMETRY: '', ...env } });
+
+  const file = path.join(target, 'runs.jsonl');
+  const r = runReview(['--out', path.join(target, 'r.md')], { ADVERSE_TELEMETRY_FILE: file });
+  assert.ok(r.status === 0 || r.status === 1, `unexpected status ${r.status}: ${r.stderr}`);
+  const record = JSON.parse(readFileSync(file, 'utf-8').trim().split('\n')[0]);
+  assert.ok(record.roster.reported.length >= 2, 'the lanes it spawned');
+  assert.equal(record.plan, null, 'review runs without a plan file');
+
+  const quiet = path.join(target, 'quiet.jsonl');
+  runReview(['--out', path.join(target, 'r2.md'), '--no-telemetry'],
+    { ADVERSE_TELEMETRY_FILE: quiet });
+  assert.equal(existsSync(quiet), false);
 });

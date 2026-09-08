@@ -55,24 +55,31 @@ bookkeeping must never gate a merge decision.
 |---|---|
 | `schema` | Bumped when a field changes meaning, never when one is added. |
 | `at` | ISO timestamp of the synthesis. |
-| `repo` | `owner/name` from the origin remote; a local-path remote gives its basename; `null` outside a repository. |
+| `repo` | `owner/name` from the origin remote; a local or `file://` remote gives its basename; `null` outside a repository. Read from the **working directory**, so run `synthesize` inside the repository under review — SKILL.md's Phase 6 does. |
 | `head` | HEAD sha at synthesis time. |
-| `base` | The base the briefing pinned, when `--briefing` was passed. |
-| `iteration` | Convergence-loop pass number, from `--iteration`; `null` for a single pass. |
+| `base` | The base the briefing pinned, **only if it is a commit sha**. `triage.mjs --base` accepts any ref, and a branch name is free text somebody chose; a symbolic base records `null`. |
+| `iteration` | Convergence-loop pass number, from `--iteration` — the ledger's counter (`ledger.iterations.length + 1`), not a fresh one; `null` for a single pass. |
 | `plan` | `bucket`, `files`, `changedLines`, `deletedLines`, `measured`, `pinned` (a count), `rounds`, `maxIterations`, and `agents` — agents per lane, `0` for a lane the plan ruled out. `null` without `--plan`. |
-| `roster` | `reported`, `degraded`, `skipped`, `crossReviewed` (persona lists) and `round2Skipped` (a boolean). |
-| `lanes.<persona>` | `status` (`reported` / `degraded` / `skipped` / `silent`), `reported` (findings, `null` if the lane did not look), `disproved` and `underAnchored` (`null` without a briefing). |
+| `roster` | `reported`, `degraded`, `skipped`, `crossReviewed` (lane lists — a split lane's halves collapse to their lane), `round2Skipped` (a boolean), and `unknown`: how many payload keys named nothing in the persona registry, counted rather than recorded. |
+| `lanes.<lane>` | `status` (`reported` / `degraded` / `skipped` / `silent`), `reported` (findings summed across the lane's agents), `disproved` and `underAnchored`. All three are `null` unless the lane's status is `reported`, and the last two also need a briefing to have been read. One row per LANE, so a split lane reviewed in halves is one reviewer, not two. |
 | `triage` | Totals from the briefing: `findings`, `disproved`, `underAnchored`, `outside`, `clusters`, `crossReferences`, `groupsProposed`, `settled`, `regressed`. `null` without `--briefing`. |
 | `findings` | `total`, `blocking`, `openBlocking`, and tallies `bySeverity`, `byKind`, `byConfidence`, `byProvenance`. |
 | `rootCauses` | `total` and `byStatus` (`confirmed` / `split` / `contested` / `oversized` / `proposed`). |
 | `round2` | `personas`, `validated`, `challenged`, `added`. `null` when round 2 did not run. |
 | `verdict` | `label` and `score`. |
 
-**`null` is not `0`.** A lane that was skipped or that failed records `null`
-findings, because "it did not look" and "it looked and found nothing" are
-different facts and collapsing them is the failure the roster accounting exists
-to prevent. The same rule applies to every field a run without `--briefing`
-could not observe.
+**`null` is not `0`.** A lane that was skipped, that failed, or that the plan
+ran and never heard from records `null` for every count, because "it did not
+look" and "it looked and found nothing" are different facts and collapsing them
+is the failure the roster accounting exists to prevent. The same rule applies to
+every field a run without `--briefing` could not observe.
+
+**Off the vocabulary is `other`.** Every key and value in a record is a number, a
+timestamp, a sha, or a word this tool defines — a `kind`, `severity` or group
+`status` that is not in the taxonomy is counted as `other`, and a payload key
+that is not a persona is counted in `roster.unknown`. None of those strings is
+written to the file: most of what a record is built from was written by a review
+agent, and this file is meant to be shareable.
 
 ## Reading it
 
@@ -80,8 +87,10 @@ could not observe.
 RUNS=${XDG_CACHE_HOME:-$HOME/.cache}/adverse/runs.jsonl
 
 # Does the Pragmatist skip cost anything? Its round-1 findings, when it ran.
-jq -s '[.[] | select(.lanes.pragmatist.status == "reported")
-        | .lanes.pragmatist.reported] | add' "$RUNS"
+# `// 0` because jq's `add` over an empty selection answers null, and "the lane
+# never ran in any recorded run" is a 0 worth seeing as one.
+jq -s '([.[] | select(.lanes.pragmatist.status == "reported")
+         | .lanes.pragmatist.reported] | add) // 0' "$RUNS"
 
 # Lane failure against diff size: does the two-agent split earn its keep?
 jq -s 'group_by(.plan.bucket)[]

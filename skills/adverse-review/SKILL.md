@@ -610,7 +610,8 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     # that has no payload and no --skipped/--degraded refuses the synthesis,
     # because its silence otherwise reads as a clean review.
     # in a convergence loop, name the pass so the run's counts can be read per
-    # iteration:
+    # iteration. It is the LEDGER's counter (`ledger.iterations.length + 1`,
+    # references/convergence-loop.md), never a number minted here:
     #   --iteration 2
 ```
 

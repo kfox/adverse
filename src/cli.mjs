@@ -77,9 +77,12 @@ Exit codes:
 
 Telemetry:
   Every run appends ONE line of counts — no titles, no prose, no paths — to
-  $XDG_CACHE_HOME/adverse/runs.jsonl (default ~/.cache/adverse/runs.jsonl), one
-  file for every repository, so the scaling policy can be tuned against many
-  runs. Query it with jq -s. See skills/adverse-review/references/telemetry.md.
+  $XDG_CACHE_HOME/adverse/runs.jsonl (default ~/.cache/adverse/runs.jsonl): a
+  SINGLE file that every repository on this machine writes to, each line naming
+  its own repo, so the scaling policy can be tuned across many runs. Identity
+  comes from the working directory, so run this inside the repository under
+  review. Query it with jq -s.
+  See skills/adverse-review/references/telemetry.md.
 
 Environment:
   ADVERSE_AGENT           Default value for --agent.
@@ -408,12 +411,16 @@ async function cmdSynthesize(rest) {
     die('synthesize: --round2-skipped requires a non-empty reason');
   }
 
-  // A loop iteration is a number or it is nothing. A `--iteration $I` with an
-  // unset shell variable would otherwise record `NaN` as an iteration, which
-  // reads in the file like a run that could not count its own passes.
-  const iteration = values.iteration === undefined ? null : Number(values.iteration);
-  if (iteration !== null && !Number.isInteger(iteration)) {
-    die(`synthesize: --iteration must be an integer, got ${JSON.stringify(values.iteration)}`);
+  // A loop iteration is a pass number or it is nothing. `--iteration $I` with an
+  // unset shell variable is the case this refuses, and it took two tries: an
+  // empty string is not NaN, it is `Number('') === 0`, so the first version
+  // recorded the missing value as pass zero — the same shape as the empty
+  // --round2-skipped below, which is a declaration wearing a value's clothes.
+  // Passes are counted from 1 (the ledger's `iterations.length + 1`).
+  const iteration = values.iteration === undefined ? null : Number(values.iteration.trim());
+  if (iteration !== null && !(Number.isInteger(iteration) && iteration >= 1)) {
+    die(`synthesize: --iteration must be a pass number of 1 or more, got`
+      + ` ${JSON.stringify(values.iteration)}`);
   }
 
   const syn = synthesize(round1, round2, {

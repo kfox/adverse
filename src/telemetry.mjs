@@ -29,13 +29,15 @@
 // decision, which is the worse of the two outcomes by a wide margin.
 
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, constants, mkdirSync } from 'node:fs';
+import { appendFileSync, constants, lstatSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
 import { refuseDirectRun } from './entryGuard.mjs';
-import { isBlocking } from './synthesis.mjs';
+import { DEFAULT_PERSONAS, isLaneAgent } from './personas.mjs';
+import { UNCLASSIFIED, isBlocking } from './synthesis.mjs';
+import { KINDS, ROOT_CAUSE_STATUSES, SEVERITIES } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -53,6 +55,40 @@ export const LANE_STATUS = Object.freeze({
   skipped: 'skipped',     // it was deliberately not run
   silent: 'silent',       // the plan ran it and nothing arrived, undeclared
 });
+
+// Every key and every value in this record is a number, a timestamp, a sha, or
+// a word this tool defined. Nothing else, because a payload writes most of what
+// the record is built from and the file is documented as safe to paste into an
+// issue about a threshold.
+//
+// `kind` is the one that proved it: src/synthesis.mjs's `coerceKind` accepts any
+// non-empty string, so a 4 KB `kind` carrying paths and secrets reached the file
+// verbatim as an object KEY. Two panel lanes found the same class from opposite
+// ends — the other through a round-1 payload's persona keys. So the vocabularies
+// are imported from the modules that own them and anything outside one is
+// COUNTED, never quoted. src/synthesis.mjs bounds a payload-chosen key for the
+// same reason (`nameKey`, after a 2.16 MB key reached a stderr message); here
+// there is a fixed vocabulary to fall back on, which is better than a clip.
+const OFF_VOCABULARY = 'other';
+const KNOWN_KINDS = new Set([...KINDS, UNCLASSIFIED]);
+const KNOWN_SEVERITIES = new Set(SEVERITIES);
+const KNOWN_STATUSES = new Set(ROOT_CAUSE_STATUSES);
+
+const oneOf = (allowed) => (value) => (allowed.has(value) ? value : OFF_VOCABULARY);
+
+// Which LANE a name belongs to — `auditor` and `auditor-a` are both the
+// auditor's — or null for a string that is not a persona at all. Asked through
+// src/personas.mjs's own predicate rather than by re-deriving the split-lane
+// spelling here, which is exactly the duplication that has drifted before.
+export function laneOf(name) {
+  return DEFAULT_PERSONAS.find((persona) => isLaneAgent(persona, name)) ?? null;
+}
+
+// A base is recorded only as a commit sha. `--briefing` carries whatever
+// `triage.mjs --base` was given, and that can be a branch name — which is free
+// text somebody chose, and the one field here that was copied through rather
+// than counted.
+const SHA = /^[0-9a-f]{7,64}$/;
 
 // Null prototype: the keys are payload-derived, and on a plain object
 // `counts['__proto__'] = 1` sets the prototype instead of storing a count while
@@ -81,8 +117,11 @@ export function repoFromRemote(url) {
   const trimmed = url.trim().replace(/\.git$/, '');
   if (!trimmed) return null;
   // A local-path remote is a filesystem path, and its parent segment is
-  // somebody's directory layout rather than a project name.
-  if (trimmed.startsWith('/') || trimmed.startsWith('.')) return path.basename(trimmed);
+  // somebody's directory layout rather than a project name. `file://` is that
+  // same path wearing a scheme, and without this it took the local branch's
+  // exception and published the parent directory as an owner.
+  const local = trimmed.replace(/^file:\/\//, '');
+  if (local.startsWith('/') || local.startsWith('.')) return path.basename(local);
   const segments = trimmed.split(/[/:]/).filter(Boolean);
   if (segments.length < 2) return null;
   return segments.slice(-2).join('/');
@@ -120,8 +159,9 @@ function planSummary(plan) {
     maxIterations: plan.maxIterations ?? null,
     // Agents per lane, 0 for a lane the plan ruled out. This is the row that
     // answers whether the split lane and the Pragmatist skip earn their keep.
-    agents: Object.fromEntries(
-      (plan.lanes ?? []).map((lane) => [lane.persona, lane.run ? (lane.agents ?? 1) : 0])),
+    agents: Object.fromEntries((plan.lanes ?? [])
+      .filter((lane) => laneOf(lane.persona))
+      .map((lane) => [laneOf(lane.persona), lane.run ? (lane.agents ?? 1) : 0])),
   };
 }
 
@@ -147,25 +187,47 @@ function triageSummary(briefing) {
   };
 }
 
-function laneStatus(persona, { round1, degraded, skipped, planned }) {
-  if (degraded.includes(persona)) return LANE_STATUS.degraded;
-  if (skipped.includes(persona)) return LANE_STATUS.skipped;
-  if (persona in round1) return LANE_STATUS.reported;
-  if (planned.includes(persona)) return LANE_STATUS.silent;
+function laneStatus(lane, { reporting, degraded, skipped, planned }) {
+  if (degraded.includes(lane)) return LANE_STATUS.degraded;
+  if (skipped.includes(lane)) return LANE_STATUS.skipped;
+  if (reporting.includes(lane)) return LANE_STATUS.reported;
+  if (planned.includes(lane)) return LANE_STATUS.silent;
   return null;
 }
 
+// One row per LANE, never per payload: a split lane handed to synthesize as two
+// raw payloads is one lane that was reviewed in halves, and two rows would read
+// as two reviewers.
 function laneRows({ round1, briefing, degraded, skipped, planned }) {
-  const personas = [...new Set([...planned, ...Object.keys(round1), ...degraded, ...skipped])];
+  const payloads = Object.entries(round1)
+    .map(([name, payload]) => [laneOf(name), payload])
+    .filter(([lane]) => lane);
+  const reporting = payloads.map(([lane]) => lane);
   const briefed = briefing?.findings ?? null;
   const rows = Object.create(null);
-  for (const persona of personas.sort()) {
-    const mine = briefed?.filter((f) => f.reporter === persona) ?? null;
-    rows[persona] = {
-      status: laneStatus(persona, { round1, degraded, skipped, planned }),
-      // null, not 0: a lane that did not look found nothing in a different
-      // sense than a lane that looked.
-      reported: round1[persona] ? (round1[persona].findings ?? []).length : null,
+
+  for (const lane of [...new Set([...planned, ...reporting, ...degraded, ...skipped])].sort()) {
+    const status = laneStatus(lane, { reporting, degraded, skipped, planned });
+    // ONE predicate for all three counts. `null` unless this lane actually
+    // looked — and every count also needs a briefing to have been read, since
+    // nobody checked the claims otherwise.
+    //
+    // Written as three separate ternaries first, and two of them were wrong:
+    // `mine ? … : null` tested an ARRAY, which `filter` makes truthy when it is
+    // empty, so a degraded lane's claim checks came out 0 — "we checked and it
+    // was clean" — in any run that had a briefing. A `--degraded auditor`
+    // whose payload was still on disk reported its findings as a review, too.
+    // Both are the exact collapse the rest of this file argues against.
+    const looked = status === LANE_STATUS.reported;
+    const mine = looked && briefed
+      ? briefed.filter((f) => laneOf(f.reporter) === lane)
+      : null;
+    rows[lane] = {
+      status,
+      reported: looked
+        ? payloads.filter(([reporter]) => reporter === lane)
+          .reduce((n, [, payload]) => n + (payload?.findings ?? []).length, 0)
+        : null,
       disproved: mine
         ? mine.filter((f) => f.claimCheck?.status === 'DISPROVED'
           || f.counterpartCheck?.status === 'DISPROVED').length
@@ -202,25 +264,34 @@ export function buildRunRecord({
   iteration = null,
   at = new Date(),
 } = {}) {
-  const degraded = [...(syn.degraded ?? [])];
-  const skipped = (syn.skipped ?? []).map((s) => s.persona);
-  const planned = (plan?.lanes ?? []).filter((l) => l.run).map((l) => l.persona);
+  // Lane names throughout, so a declaration naming a split lane's half
+  // (`--degraded auditor-b`) is the same lane the payloads and the plan name.
+  const named = (names) => [...new Set(names.map(laneOf).filter(Boolean))];
+  const degraded = named(syn.degraded ?? []);
+  const skipped = named((syn.skipped ?? []).map((s) => s.persona));
+  const planned = named((plan?.lanes ?? []).filter((l) => l.run).map((l) => l.persona));
   const findings = syn.findings ?? [];
+  // Names that are not personas at all, counted rather than recorded: the
+  // round-1 keys come from a file, and one of them was `SENTINEL-LEAK-9f2a1`
+  // when the panel went looking.
+  const unknown = [...Object.keys(round1), ...Object.keys(round2)]
+    .filter((name) => !laneOf(name)).length;
 
   return {
     schema: TELEMETRY_SCHEMA,
     at: at.toISOString(),
     repo: identity.repo ?? null,
     head: identity.head ?? null,
-    base,
+    base: SHA.test(base ?? '') ? base : null,
     iteration,
     plan: planSummary(plan),
     roster: {
-      reported: Object.keys(round1).sort(),
+      reported: named(Object.keys(round1)).sort(),
       degraded: degraded.sort(),
       skipped: skipped.sort(),
-      crossReviewed: Object.keys(round2).sort(),
+      crossReviewed: named(Object.keys(round2)).sort(),
       round2Skipped: (syn.round2Skipped ?? null) !== null,
+      unknown,
     },
     lanes: laneRows({ round1, briefing, degraded, skipped, planned }),
     triage: triageSummary(briefing),
@@ -228,21 +299,29 @@ export function buildRunRecord({
       total: findings.length,
       blocking: findings.filter(isBlocking).length,
       openBlocking: (syn.openBlocking ?? []).length,
-      bySeverity: countBy(findings, (f) => f.severity ?? 'unknown'),
-      byKind: countBy(findings, (f) => f.kind ?? 'unknown'),
-      byConfidence: countBy(findings, (f) => f.confidence ?? 'unknown'),
-      byProvenance: countBy(findings, (f) => f.provenance ?? 'unknown'),
+      bySeverity: countBy(findings, (f) => oneOf(KNOWN_SEVERITIES)(f.severity)),
+      byKind: countBy(findings, (f) => oneOf(KNOWN_KINDS)(f.kind)),
+      byConfidence: countBy(findings, (f) => f.confidence ?? OFF_VOCABULARY),
+      byProvenance: countBy(findings, (f) => f.provenance ?? OFF_VOCABULARY),
     },
     // Which proposals round 2 collapsed into one disposition and which it
     // dissolved: the measure of whether deterministic grouping is proposing
     // anything a panel agrees with.
     rootCauses: {
       total: (syn.rootCauses ?? []).length,
-      byStatus: countBy(syn.rootCauses ?? [], (rc) => rc.status ?? 'unknown'),
+      byStatus: countBy(syn.rootCauses ?? [], (rc) => oneOf(KNOWN_STATUSES)(rc.status)),
     },
     round2: round2Summary(round2),
     verdict: { label: syn.consensusLabel ?? null, score: syn.consensusScore ?? null },
   };
+}
+
+function isSymlink(target) {
+  try {
+    return lstatSync(target).isSymbolicLink();
+  } catch {
+    return false;   // it does not exist yet, which mkdir is about to fix
+  }
 }
 
 export function telemetryDisabled(env = process.env) {
@@ -267,7 +346,19 @@ export function telemetryPath(env = process.env) {
 // review and must not be interrupted by bookkeeping.
 export function appendRunRecord(record, file) {
   try {
-    mkdirSync(path.dirname(file), { recursive: true });
+    // O_NOFOLLOW below protects the destination FILE. `mkdirSync` reaches it
+    // through a directory, and mkdir's own existence check follows a symlink —
+    // so `~/.cache/adverse` pointed elsewhere sent the whole write into
+    // somebody else's directory with no error, which the panel reproduced. The
+    // one component this function creates and writes into is checked; an
+    // ancestor the user symlinked themselves is theirs to symlink, and
+    // ADVERSE_TELEMETRY_FILE is the supported way to put the file anywhere
+    // else on purpose.
+    const dir = path.dirname(file);
+    if (isSymlink(dir)) {
+      return { ok: false, file, error: `${dir} is a symlink, not a directory` };
+    }
+    mkdirSync(dir, { recursive: true });
     appendFileSync(file, `${JSON.stringify(record)}\n`, {
       encoding: 'utf-8',
       flag: constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW,

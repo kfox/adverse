@@ -175,12 +175,12 @@ proposed. Without it the report is one section per finding.
 ### Run telemetry
 
 Every synthesis appends **one line of counts** to
-`~/.cache/adverse/runs.jsonl` (`$XDG_CACHE_HOME` is honored) — one file for
-every repository on the machine, beside the per-branch ledgers, with the repo
-as a field. It carries no prose: no titles, no details, no summaries, no skip
-reasons, no paths. It exists so the review-budget policy in `src/scaling.mjs`
-can be argued from many runs instead of from one remembered incident, and
-`jq -s` is the whole query engine.
+`~/.cache/adverse/runs.jsonl` (`$XDG_CACHE_HOME` is honored) — a single file
+that every repository on the machine writes to, beside the per-branch ledgers,
+each line naming its own repo. It carries no prose: no titles, no details, no
+summaries, no skip reasons, no paths. It exists so the review-budget policy in
+`src/scaling.mjs` can be argued from many runs instead of from one remembered
+incident, and `jq -s` is the whole query engine.
 
 Turn it off per run with `--no-telemetry`, or everywhere with
 `ADVERSE_NO_TELEMETRY=1`. A run whose line cannot be written still publishes
