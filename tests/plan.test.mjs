@@ -510,3 +510,59 @@ test('a long documentation line runs the adversary without claiming a boundary',
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+// --- --depth: the user's own answer, carried as data ----------------------------
+
+test('--depth is recorded in plan.json, which is where the report reads it from', () => {
+  const dir = repoWith({ base: { 'a.mjs': 'x\n' }, change: { 'a.mjs': 'y\n' } });
+  try {
+    for (const depth of ['cheap', 'standard', 'thorough']) {
+      const r = runPlan(['--repo', dir, '--base', 'main', '--depth', depth, '--json']);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(JSON.parse(r.stdout).depth, depth);
+    }
+    const bare = runPlan(['--repo', dir, '--base', 'main', '--json']);
+    assert.equal(JSON.parse(bare.stdout).depth, 'standard');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a misspelled --depth is exit 2, not a quietly standard run', () => {
+  // The failure this refuses is specific: a typo that planned a standard run
+  // would then be RECORDED as one, and the report's whole claim is that it can
+  // be trusted about how much looking produced it.
+  const r = runPlan(['--repo', ROOT, '--base', 'main', '--depth', 'thourough', '--json']);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /unknown depth "thourough"/);
+  assert.equal(r.stdout, '');
+});
+
+test('--depth thorough runs a lane the same diff otherwise skips', () => {
+  // End to end, through the bridge, on a diff small enough that the default
+  // plan skips the advisory-only lane and the trust-boundary gate is quiet.
+  const dir = repoWith({ base: { 'a.mjs': 'const x = 1;\n' }, change: { 'a.mjs': 'const x = 2;\n' } });
+  try {
+    const laneOf = (out, persona) => JSON.parse(out).lanes.find((l) => l.persona === persona);
+    const bare = runPlan(['--repo', dir, '--base', 'main', '--json']);
+    assert.equal(bare.status, 0, bare.stderr);
+    assert.equal(laneOf(bare.stdout, 'pragmatist').run, false);
+
+    const deep = runPlan(['--repo', dir, '--base', 'main', '--depth', 'thorough', '--json']);
+    assert.equal(deep.status, 0, deep.stderr);
+    for (const l of JSON.parse(deep.stdout).lanes) assert.equal(l.run, true, l.persona);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the human output names the depth and the tier it implies', () => {
+  // The prose form is the one an operator actually reads, and depth is the one
+  // plan input they supplied themselves — a run planned cheap that prints
+  // identically to a standard one is the bug this field was added for.
+  const r = runPlan(['--repo', ROOT, '--base', 'main', '--depth', 'cheap']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^depth: cheap \(model tier: default tier/m);
+  assert.match(r.stdout, /note: depth cheap;/);
+});

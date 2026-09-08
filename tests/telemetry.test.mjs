@@ -486,3 +486,64 @@ test('`adverse review` records its run too, and honors the opt-out', () => {
     { ADVERSE_TELEMETRY_FILE: quiet });
   assert.equal(existsSync(quiet), false);
 });
+
+
+// --- depth: the confounder for the row beside it --------------------------------
+
+const planRowFor = (plan) => buildRunRecord({
+  syn: synthesize({ auditor: review('auditor', []) }),
+  round1: { auditor: review('auditor', []) },
+  round2: {},
+  plan,
+}).plan;
+
+test('the plan row records the depth the run was planned at', () => {
+  // The `agents` row answers whether the Pragmatist skip and the split lane
+  // earn their keep, and depth is what makes two of its rows comparable: a
+  // lane skipped because the user asked for a cheap pass is not evidence about
+  // the size policy at all, and without this field the two aggregate as one.
+  const row = planRowFor({
+    size: { bucket: 'medium' },
+    depth: 'cheap',
+    lanes: [{ persona: 'auditor', run: true, agents: 1 }],
+  });
+  assert.equal(row.depth, 'cheap');
+});
+
+test('a plan with no depth records null rather than inventing one', () => {
+  const row = planRowFor({
+    size: { bucket: 'medium' },
+    lanes: [{ persona: 'auditor', run: true, agents: 1 }],
+  });
+  assert.equal(row.depth, null);
+});
+
+test('a --plan reaches the telemetry line end to end, depth and all', () => {
+  // Through the real binary, not buildRunRecord. The `plan` row is assembled
+  // in telemetry.mjs but WIRED in cli.mjs, and a unit test on the assembler
+  // passes just as happily when the caller stops handing it a plan — measured:
+  // replacing `plan` with `null` at that call site broke no test in this file.
+  const dir = freshTmp();
+  const file = path.join(dir, 'runs.jsonl');
+  const planPath = path.join(dir, 'plan.json');
+  writeFileSync(planPath, JSON.stringify({
+    depth: 'thorough',
+    size: { bucket: 'small', fileCount: 1, changedLines: 4, measured: true },
+    pinned: [],
+    rounds: 2,
+    maxIterations: 3,
+    lanes: [{ persona: 'auditor', run: true, agents: 1 },
+      { persona: 'steward', run: true, agents: 1 }],
+  }));
+
+  const r = runSynthesize(
+    ['--round1', round1File(dir), '--plan', planPath, '--out', path.join(dir, 'r.md')],
+    { ADVERSE_TELEMETRY_FILE: file });
+
+  assert.equal(r.status, 0, r.stderr);
+  const record = JSON.parse(readFileSync(file, 'utf-8').trim());
+  assert.notEqual(record.plan, null, 'the plan never reached the record');
+  assert.equal(record.plan.depth, 'thorough');
+  assert.equal(record.plan.bucket, 'small');
+  assert.deepEqual(record.plan.agents, { auditor: 1, steward: 1 });
+});

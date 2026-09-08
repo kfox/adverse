@@ -236,6 +236,8 @@ Every step that is not a review is **deterministic Node code**, not another LLM 
 
 Per review: the CLI runs 8 invocations (4 round-1 + 4 round-2); `--single-round` halves it. The Skill runs 7 for the full shape, and its Phase 1 plan (`plan.mjs`) scales that in both directions: a small boundary-free diff whose every changed line fits the scope gate's widest bounded span runs 2 round-1 calls (Auditor + Steward) and, when round 1 reports nothing blocking, no round 2 — a floor of 2, and reachable only under that span condition, because a changed line longer than 200 characters is unreadable-therefore-evidence and runs the Adversary (34 lines of this README are past that, including this one) — while a large diff splits the Auditor and Adversary lanes across two agents each and runs round 2 per agent rather than per persona, up to 11. The Pragmatist always skips round 2 (nothing advisory can block, so cross-validating it buys nothing). Wall time is roughly twice the slowest single invocation, since personas run in parallel within each round.
 
+The diff decides all of that. What the *user* wants is `plan.mjs --depth cheap|standard|thorough`, recorded in `plan.json` and printed in the report — so a run that was told to hurry cannot be mistaken later for one that was not. It moves lanes and the model tier only: dropping round 2 up front would leave a small diff structurally unable to produce a blocking finding, and lowering the iteration cap can only manufacture false stops, so depth is not allowed to do either.
+
 ## What this fork adds
 
 ### Findings are classified by kind, not just severity
@@ -339,7 +341,7 @@ skills/adverse-review/
     validate.mjs              # Skill bridge: schema-check an agent-written round1/round2/verify/fix/regression payload
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
-    plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap
+    plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap, depth
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
     verify.mjs                # Skill bridge: validate a verify payload, reshape for triage
     regression.mjs            # Skill bridge: pick the lane for a fix commit's regression pass, fold what it found

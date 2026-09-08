@@ -64,7 +64,9 @@ Options for 'synthesize':
   --round2-skipped <reason>   Declare that round 2 did not run, and why.
   --plan <path>            plan.mjs's plan.json. Every lane it ran must be
                            accounted for by a payload, --skipped, or --degraded,
-                           or synthesize refuses. Optional.
+                           or synthesize refuses. Also carries the depth the run
+                           was planned at, which the report and the telemetry
+                           line both record. Optional.
   --iteration <n>          Which convergence-loop iteration produced this run.
                            Recorded in the telemetry line; changes nothing else.
   --no-telemetry           Do not append this run's counts to runs.jsonl.
@@ -376,14 +378,23 @@ async function cmdSynthesize(rest) {
   // looked". The set subtraction is arithmetic the orchestrator was trusted to
   // do by hand through --skipped/--degraded; with the plan on disk it is
   // checked instead.
-  const plan = values.plan ? readJsonArg(values.plan) : null;
-  if (plan) {
-    let planned;
+  //
+  // Parsed ONCE, and the parsed form is what the three readers below share: the
+  // roster check, the report's depth, and the telemetry row. Parsing it twice —
+  // or handing one reader the raw JSON and another the parsed object — lets
+  // them describe different plans, and `parsePlan` is where a lane's `agents`
+  // count and the run's depth are normalized.
+  let plan = null;
+  if (values.plan) {
     try {
-      planned = runLanes(parsePlan(plan).lanes);
+      plan = parsePlan(readJsonArg(values.plan));
     } catch (e) {
       die(`synthesize: --plan ${values.plan}: ${e.message}`);
     }
+  }
+
+  if (plan) {
+    const planned = runLanes(plan.lanes);
     const accounted = new Set([
       ...Object.keys(round1),
       ...skippedPersonas.map((s) => s.persona),
@@ -426,6 +437,11 @@ async function cmdSynthesize(rest) {
   const syn = synthesize(round1, round2, {
     skippedPersonas, failedPersonas, round2Skipped: values['round2-skipped'] ?? null,
     rootCauseGroups: briefing?.groups ?? [],
+    // Depth rides in on the plan rather than on a flag of its own: two
+    // channels would be two claims about one run, and the orchestrator already
+    // passes --plan for the roster check. Without a plan the depth is unknown,
+    // which the report says rather than guessing at.
+    depth: plan?.depth ?? null,
   });
   recordRun({
     noTelemetry: values['no-telemetry'],

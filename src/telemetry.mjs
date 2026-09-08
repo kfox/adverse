@@ -158,6 +158,13 @@ function planSummary(plan) {
     pinned: Array.isArray(plan.pinned) ? plan.pinned.length : 0,
     rounds: plan.rounds ?? null,
     maxIterations: plan.maxIterations ?? null,
+    // How much review the user asked for, which is the confounder for the
+    // question the `agents` row below exists to answer: a Pragmatist skip on a
+    // `cheap` run and one on a `standard` run are different data points, and
+    // without this field they aggregate as the same one. Safe for a file that
+    // records no reasons and no paths — it is one of three literals, validated
+    // by `parsePlan` before it ever reaches here.
+    depth: plan.depth ?? null,
     // Agents per lane, 0 for a lane the plan ruled out. This is the row that
     // answers whether the split lane and the Pragmatist skip earn their keep.
     agents: Object.fromEntries((plan.lanes ?? [])

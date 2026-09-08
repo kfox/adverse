@@ -25,6 +25,12 @@
 // literal 2 — silently wrong the day SPLIT_AGENTS in scaling.mjs changes
 // (kfox/adverse#19, items 1 and 2).
 //
+// `--depth cheap|standard|thorough` is the one input that comes from the user
+// rather than the diff. It is recorded in plan.json and read back by the
+// report, so a run that was told to hurry cannot render like one that was not.
+// It moves lanes and the model-tier recommendation only; src/scaling.mjs says
+// why it may not move rounds or the iteration cap.
+//
 // The plan is advice, not a gate: exit 0 = plan printed, 2 = usage error.
 // Size comes from `git diff --numstat`, never from the diff text — see
 // src/scaling.mjs for why the diff text cannot be trusted to measure itself.
@@ -40,9 +46,10 @@ import { readFileSync } from 'node:fs';
 import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
-const { agentNames, escalate, parsePlan, planReview, runLanes } = await importFromSrc('scaling.mjs');
+const { DEPTHS, agentNames, escalate, parseDepth, parsePlan, planReview, runLanes } =
+  await importFromSrc('scaling.mjs');
 
-const USAGE = 'Usage: plan.mjs --repo <dir> [--base <ref>] [--files <list>] [--pin <substring>]… [--json]\n'
+const USAGE = `Usage: plan.mjs --repo <dir> [--base <ref>] [--files <list>] [--pin <substring>]… [--depth ${DEPTHS.join('|')}] [--json]\n`
   + '       plan.mjs --agents <plan.json>\n'
   + '       plan.mjs --expect <plan.json>\n'
   + '       plan.mjs --escalate --expect auditor,steward,… (--json | --sh) round1-<persona>*.json …';
@@ -55,6 +62,7 @@ const { values, positionals } = parseBridgeArgs({
     base:     { type: 'string' },
     files:    { type: 'string' },
     pin:      { type: 'string', multiple: true },
+    depth:    { type: 'string' },
     escalate: { type: 'boolean' },
     expect:   { type: 'string' },
     agents:   { type: 'string' },
@@ -155,6 +163,19 @@ if (positionals.length) {
 }
 
 const repo = values.repo ?? process.cwd();
+
+// How much review the USER asked for. Exit 2 rather than a default: a typo'd
+// depth that quietly planned a standard run would then be RECORDED as one, and
+// the whole point of the field is that the report can be trusted about how much
+// looking produced it.
+let depth;
+try {
+  depth = parseDepth(values.depth);
+} catch (e) {
+  process.stderr.write(`plan: --depth: ${e.message}\n`);
+  process.exit(2);
+}
+
 const base = values.base ?? 'main';
 // A base in git's option position would be parsed as a git option — a
 // workflow-doc-supplied ref must not become `--output=…`.
@@ -218,6 +239,7 @@ const plan = planReview({
   numstat,
   numstatMatchesFiles: !values.files,
   pins: values.pin ?? [],
+  depth,
 });
 
 const sizeLine = files.length === 0
@@ -227,9 +249,12 @@ const sizeLine = files.length === 0
       + (plan.size.unscannable.length ? `, ${plan.size.unscannable.length} unmeasurable` : '') + ')'
     : `size: ${plan.size.bucket} (${plan.size.fileCount} files, unmeasured`
       + (plan.size.unscannable.length ? `, ${plan.size.unscannable.length} unmeasurable` : '') + ')';
+const tierWord = { true: 'escalate', false: 'default tier', null: "orchestrator's call" };
 const laneLine = (l) => `  ${l.persona.padEnd(11)} ${l.run ? `run   ${l.agents} agent${l.agents === 1 ? ' ' : 's'}` : 'skip          '} — ${l.reason}`;
 emit(plan,
   sizeLine + '\n'
+  + `depth: ${plan.depth} (model tier: ${tierWord[String(plan.tier.escalate)]}`
+    + ` — ${plan.tier.reason})\n`
   + (plan.reasons.length ? plan.reasons.map((r) => `note: ${r}\n`).join('') : '')
   + 'lanes:\n'
   + plan.lanes.map(laneLine).join('\n') + '\n'

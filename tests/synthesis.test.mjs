@@ -1417,3 +1417,54 @@ test('a payload-chosen key cannot forge a log line in the stamp claim', () => {
   assert.match(stampedFieldClaim({ persona: 'auditor', findings: [{ provenance: 'x' }] }),
     /`findings\[0\]\.provenance`/);
 });
+
+
+// --- depth in the report: how much looking produced this ------------------------
+//
+// Same rule as the skipped lane and the skipped round 2 one section up. The
+// report is the durable artifact, and read a month later the only readable
+// question about an absent finding is whether the panel looked.
+
+const cleanRound1 = () =>
+  ({ auditor: { persona: 'auditor', verdict: 'approve', summary: 's', findings: [] } });
+
+test('a run planned cheap says so in the markdown and the JSON', () => {
+  const syn = synthesize(cleanRound1(), {}, { depth: 'cheap' });
+  assert.equal(syn.depth, 'cheap');
+  assert.match(renderMarkdown(syn), /Planned depth: `cheap`/);
+  assert.match(renderMarkdown(syn), /weaker evidence than in a standard run/);
+  assert.equal(toJsonReport(syn).depth, 'cheap');
+});
+
+test('a run planned thorough says so too — the label cuts both ways', () => {
+  const syn = synthesize(cleanRound1(), {}, { depth: 'thorough' });
+  assert.match(renderMarkdown(syn), /Planned depth: `thorough`/);
+  assert.equal(toJsonReport(syn).depth, 'thorough');
+});
+
+test('an unrecorded depth is null and renders no claim, and standard renders none either', () => {
+  // `null` (no --plan) and `standard` are different facts, and neither is
+  // worth a banner: standard is what the rest of the report already describes,
+  // and inventing one for an unrecorded run is the claim this refuses.
+  const unknown = synthesize(cleanRound1());
+  assert.equal(unknown.depth, null);
+  assert.doesNotMatch(renderMarkdown(unknown), /Planned depth/);
+  assert.equal(toJsonReport(unknown).depth, null);
+
+  const standard = synthesize(cleanRound1(), {}, { depth: 'standard' });
+  assert.equal(standard.depth, 'standard');
+  assert.doesNotMatch(renderMarkdown(standard), /Planned depth/);
+  assert.equal(toJsonReport(standard).depth, 'standard');
+});
+
+test('a depth naming an inherited property renders no note', () => {
+  // The note table is keyed by a value that arrives from a plan.json on disk.
+  // An object literal answers `constructor` with a function, which then
+  // renders into the report as a banner nobody wrote — the same prototype sink
+  // SEVERITY_MARKER was fixed for.
+  for (const bad of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    const md = renderMarkdown(synthesize(cleanRound1(), {}, { depth: bad }));
+    assert.doesNotMatch(md, /Planned depth/, bad);
+    assert.doesNotMatch(md, /function|\[object/i, bad);
+  }
+});

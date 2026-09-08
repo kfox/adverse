@@ -587,7 +587,7 @@ function buildRootCauses(groups, round2, findByTitle) {
 
 export function synthesize(round1, round2 = {},
   { failedPersonas = [], skippedPersonas = [], round2Skipped = null,
-    rootCauseGroups = [] } = {}) {
+    rootCauseGroups = [], depth = null } = {}) {
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
@@ -748,6 +748,12 @@ export function synthesize(round1, round2 = {},
     // it is textually indistinguishable from one where the panel
     // cross-examined and found nothing.
     round2Skipped: round2Skipped || null,
+    // And once more, for the whole run: how much looking produced this report.
+    // `null` means the run did not record a depth (no --plan), which is NOT
+    // the same claim as `standard` and must not render as one — the report is
+    // the durable artifact, and a month later the only readable question is
+    // whether an absent finding means the panel looked.
+    depth: depth || null,
   };
 }
 
@@ -867,6 +873,25 @@ function verbatimCell(text) {
 // value is truthy.
 const SEVERITY_MARKER = Object.assign(Object.create(null),
   { critical: '🔴', warning: '🟡', info: '🔵' });
+
+// What the run's planned depth means for reading this report, for the two
+// depths that are not the baseline. `standard` gets no note — it is what the
+// rest of the report already describes — and an unrecorded depth gets none
+// either, because inventing one would be the claim this section refuses.
+//
+// A Map, and not an object literal, for the same reason SEVERITY_MARKER has a
+// null prototype: this is keyed by a value that arrives from a plan.json on
+// disk, and an object literal answers `constructor` with a function that then
+// renders into the report as a note nobody wrote.
+const DEPTH_NOTES = new Map([
+  ['cheap', '> **Planned depth: `cheap`.** A lane whose every kind is advisory was '
+    + 'eligible to skip one size bucket earlier than usual, and no model-tier '
+    + 'escalation was recommended. Rounds and the iteration cap were unaffected. '
+    + 'An absent finding here is weaker evidence than in a standard run.'],
+  ['thorough', '> **Planned depth: `thorough`.** Every lane ran, whatever the diff\'s '
+    + 'size and the trust-boundary gate said, and a higher model tier was '
+    + 'recommended for the panel.'],
+]);
 
 const SECTION_TITLES = {
   'cross-validated': '## Cross-validated findings (multiple reviewers reported independently)',
@@ -1059,6 +1084,11 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
       + 'Nothing below reflects that perspective.',
     );
   }
+  const depthNote = DEPTH_NOTES.get(syn.depth);
+  if (depthNote) {
+    lines.push('');
+    lines.push(depthNote);
+  }
   if (syn.round2Skipped) {
     lines.push('');
     lines.push(
@@ -1171,6 +1201,7 @@ export function toJsonReport(syn) {
     degraded: syn.degraded,
     skipped: syn.skipped ?? [],
     round2_skipped: syn.round2Skipped ?? null,
+    depth: syn.depth ?? null,
     // Report-level flag, kept only so an older consumer keeps working. It is
     // NOT what the stop condition should read: `some()` over the whole report
     // means one edge anywhere — including on an advisory finding that can never

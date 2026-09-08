@@ -34,6 +34,15 @@
 //  - The iteration cap scales UP only. Lowering it can only manufacture false
 //    exit-3 stops; raising it only costs model calls. Same one-directional
 //    bias as assessScope, for the same reason.
+//  - `depth` is the one input that comes from the USER rather than the diff,
+//    and it is deliberately the weakest dial here. It may add lanes and it may
+//    drop a lane whose every kind is advisory one bucket earlier; it may not
+//    touch `rounds` or `maxIterations`, because both of those reductions are
+//    already ruled out above on grounds that an appetite for speed does not
+//    answer. What it mostly buys is that the answer is a FIELD: recorded in
+//    plan.json, read back by the report, and therefore legible a month later
+//    when the only question is whether an absent finding means the panel
+//    looked (kfox/adverse#77).
 //
 // Size is measured from `git diff --numstat`, never from the diff text: diff
 // text is written by the author of the change, and `.gitattributes -diff`, a
@@ -83,6 +92,39 @@ export const MAX_SPLIT_AGENTS = 26;
 // plan would claim a cap the loop does not enforce.
 export const DEFAULT_MAX_ITERATIONS = 3;
 export const ESCALATED_MAX_ITERATIONS = 5;
+
+// How much review the user ASKED for, as opposed to how much the diff earns.
+// `standard` is a real name rather than the word "default" so the field reads
+// the same whether it was chosen or defaulted — a report saying `depth:
+// default` cannot be told from one whose depth was never recorded.
+export const DEPTHS = Object.freeze(['cheap', 'standard', 'thorough']);
+export const DEFAULT_DEPTH = 'standard';
+
+// The buckets a lane whose every kind is advisory may skip. This is the whole
+// of `cheap`'s lane reduction, and it is bounded on purpose: the skip costs a
+// backlog item and one potential second reporter, never a finding that could
+// block on its own, so it is the only economy available that cannot cost the
+// run a verdict.
+const ADVISORY_SKIP_BUCKETS = Object.freeze({
+  cheap:    new Set(['small', 'medium']),
+  standard: new Set(['small']),
+  thorough: new Set(),
+});
+
+// `undefined` is the legitimate absent case — planReview called without the
+// option, or a plan.json written before this field existed — and reads as the
+// default. Anything else present is a depth someone wrote down wrong, and
+// defaulting it would plan and then RENDER a run at a depth nobody chose,
+// which is the silence this field exists to remove. Same `=== undefined` split
+// as `agents` in parseLane below, for the same reason.
+export function parseDepth(depth) {
+  if (depth === undefined) return DEFAULT_DEPTH;
+  if (typeof depth !== 'string' || !DEPTHS.includes(depth)) {
+    throw new Error(`unknown depth ${JSON.stringify(depth)}`
+      + ` (expected one of ${DEPTHS.join(', ')})`);
+  }
+  return depth;
+}
 
 const PER_FILE_LANES = new Set(['auditor', 'adversary']);
 const GATED_LANES = new Set(['adversary']);
@@ -179,10 +221,15 @@ function agentsFor(persona, run, bucket, fileCount) {
 // diff — and an unread diff forces the Adversary: assessScope saw nothing, so
 // "no trust-boundary signal" would be an assertion of absence about lines
 // nobody scanned.
-export function planReview({ files = [], diff = '', numstat = null, numstatMatchesFiles = true, pins = [] } = {}) {
+export function planReview({ files = [], diff = '', numstat = null,
+  numstatMatchesFiles = true, pins = [], depth: requestedDepth } = {}) {
+  const depth = parseDepth(requestedDepth);
   const size = diffSize({ files, numstat, numstatMatchesFiles });
   const pinned = matchedPins(files, pins);
   const forced = pinned.length > 0;
+  // Pins and a thorough pass force the same thing for different reasons, and
+  // the reason is what the operator reads — so they are two names, not one.
+  const forceAllLanes = forced || depth === 'thorough';
   const reasons = [];
 
   // No file list means we were handed nothing to reason about, which is not
@@ -202,6 +249,18 @@ export function planReview({ files = [], diff = '', numstat = null, numstatMatch
   if (forced) {
     reasons.push(`pinned path present (${pinned.map((p) => `"${p.pin}" -> ${p.file}`).join(', ')}); size-based skips overridden`);
   }
+  if (depth === 'thorough') {
+    reasons.push('depth thorough; every lane runs whatever the size and the trust-boundary gate say');
+  }
+  // Said out loud, and said here, because the two economies a hurried operator
+  // reaches for first are the two this plan refuses to make. Left unsaid, the
+  // refusal reads as an oversight and gets "fixed" by hand at Phase 4.
+  if (depth === 'cheap') {
+    reasons.push('depth cheap; a lane whose every kind is advisory also skips a medium diff. '
+      + 'Rounds and the iteration cap are unchanged: skipping round 2 up front would leave this diff '
+      + 'structurally unable to produce a blocking finding, and lowering the cap can only manufacture '
+      + 'false stops. Round 2 is still dropped after round 1 when nothing blocks (escalate)');
+  }
 
   // assessScope already treats an empty file list as "run". Its signals scan
   // added AND removed lines, so what remains unscanned is content it never
@@ -210,11 +269,12 @@ export function planReview({ files = [], diff = '', numstat = null, numstatMatch
   // count as evidence of absence.
   const diffUnread = diff === null;
   const adversary = assessScope({ files, diff: diffUnread ? '' : diff });
-  const adversaryForced = forced
+  const adversaryForced = forceAllLanes
     || diffUnread
     || size.unscannable.length > 0
     || size.deletedLines >= DELETED_LINES_ADVERSARY_FLOOR;
   const adversaryForcedReason = forced ? 'pinned path forces the lane'
+    : depth === 'thorough' ? 'a thorough pass runs every lane'
     : diffUnread ? 'the diff could not be read; content signals saw nothing, which is not evidence of absence'
     : size.unscannable.length > 0 ? 'unmeasurable file content cannot prove the absence of a boundary'
     : `${size.deletedLines} deleted lines; a bulk deletion can remove a guard without matching any signal`;
@@ -232,15 +292,16 @@ export function planReview({ files = [], diff = '', numstat = null, numstatMatch
       };
     }
     if (sizeSkippable(persona)) {
-      const run = forced || blind || size.bucket !== 'small';
+      const run = forceAllLanes || blind || !ADVISORY_SKIP_BUCKETS[depth].has(size.bucket);
       return {
         persona,
         run,
         agents: agentsFor(persona, run, size.bucket, size.fileCount),
         reason: run
           ? `one agent — ${PERSONAS[persona].soloReason}`
-          : 'small diff; every kind this lane reports is advisory, so the skip costs a backlog item '
-            + 'and a potential second reporter, never a finding that could block on its own',
+          : `${size.bucket} diff at depth ${depth}; every kind this lane reports is advisory, so the `
+            + 'skip costs a backlog item and a potential second reporter, never a finding that could '
+            + 'block on its own',
       };
     }
     // The reason branches on the COMPUTED agent count, not on the bucket, so
@@ -264,6 +325,18 @@ export function planReview({ files = [], diff = '', numstat = null, numstatMatch
 
   return {
     size,
+    depth,
+    // The third place depth used to be applied from memory. Three-state on
+    // purpose: `null` is "depth makes no claim here", which leaves the
+    // orchestrator's own judgment exactly where it already is, and is not the
+    // same answer as `false`. Named as an escalation decision rather than a
+    // model, because no model name belongs in a module that plans reviews for
+    // whatever agent is running one.
+    tier: depth === 'thorough'
+      ? { escalate: true, reason: 'a thorough pass; the panel is the point of the run' }
+      : depth === 'cheap'
+        ? { escalate: false, reason: 'a cheap pass; the default tier stands' }
+        : { escalate: null, reason: 'depth makes no tier claim; judge it from the diff' },
     pinned,
     lanes,
     rounds: 2,
@@ -336,7 +409,15 @@ export function parsePlan(plan, { personas = DEFAULT_PERSONAS } = {}) {
   if (!plan || typeof plan !== 'object' || !Array.isArray(plan.lanes)) {
     throw new Error('not a plan.json (missing `lanes`)');
   }
-  return { ...plan, lanes: plan.lanes.map((l) => parseLane(l, personas)) };
+  // Normalized here rather than at each reader: the report prints this field,
+  // and a reader that defaults an unknown depth renders a run at a depth
+  // nobody planned. Absent is fine and means the default; present-and-wrong
+  // is an error, exactly as for `agents`.
+  return {
+    ...plan,
+    depth: parseDepth(plan.depth),
+    lanes: plan.lanes.map((l) => parseLane(l, personas)),
+  };
 }
 
 export const runLanes = (lanes) => lanes.filter((l) => l.run);
