@@ -136,6 +136,8 @@ The `--agent` flag accepts any command that reads a prompt from stdin and writes
 |---|---|
 | `ADVERSE_AGENT` | Default for `--agent` (e.g. `export ADVERSE_AGENT="codex exec --quiet"`). |
 | `ADVERSE_LIVE`  | Set to `1` to run the live-Claude integration tests. |
+| `ADVERSE_NO_TELEMETRY` | Set to any value to write no run telemetry. |
+| `ADVERSE_TELEMETRY_FILE` | Write the telemetry line here instead of the default path. |
 
 ### Exit codes
 
@@ -169,6 +171,21 @@ adverse synthesize \
 
 `--briefing` is optional and carries the candidate root causes triage
 proposed. Without it the report is one section per finding.
+
+### Run telemetry
+
+Every synthesis appends **one line of counts** to
+`~/.cache/adverse/runs.jsonl` (`$XDG_CACHE_HOME` is honored) — a single file
+that every repository on the machine writes to, beside the per-branch ledgers,
+each line naming its own repo. It carries no prose: no titles, no details, no
+summaries, no skip reasons, no paths. It exists so the review-budget policy in
+`src/scaling.mjs` can be argued from many runs instead of from one remembered
+incident, and `jq -s` is the whole query engine.
+
+Turn it off per run with `--no-telemetry`, or everywhere with
+`ADVERSE_NO_TELEMETRY=1`. A run whose line cannot be written still publishes
+its report and still exits on its verdict. Full schema and worked queries:
+[`skills/adverse-review/references/telemetry.md`](skills/adverse-review/references/telemetry.md).
 
 ## The personas
 
@@ -307,6 +324,7 @@ src/                          # Shared core, used by both CLI and Skill
   cli.mjs                     # Argv parsing + command dispatch
   fsSafe.mjs                  # Open-and-check without a TOCTOU gap
   entryGuard.mjs              # Nothing here is runnable: `node src/x.mjs` refuses, exit 2
+  telemetry.mjs               # One line of counts per run, appended to ~/.cache/adverse/runs.jsonl
 
 bin/
   adverse.mjs                 # CLI entrypoint (#!/usr/bin/env node)

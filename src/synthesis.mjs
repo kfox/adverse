@@ -330,7 +330,7 @@ function coerceStr(v) {
 // unclassified blocks. Defaulting the other way would let a real finding slip
 // past the gate by arriving mislabeled, which is the one failure this axis must
 // not introduce.
-const UNCLASSIFIED = 'unclassified';
+export const UNCLASSIFIED = 'unclassified';
 
 function coerceKind(v) {
   return typeof v === 'string' && v.trim() ? v.trim() : UNCLASSIFIED;

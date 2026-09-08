@@ -16,12 +16,18 @@ const ROOT = path.resolve(here, '..');
 const SYNTH = path.join(ROOT, 'skills', 'adverse-review', 'scripts', 'synthesize.mjs');
 const BIN = path.join(ROOT, 'bin', 'adverse.mjs');
 
+// See the note in tests/cli.test.mjs: the env goes on the spawn, because a
+// developer running this one file directly does not go through `npm test`.
+const QUIET = { ...process.env, ADVERSE_NO_TELEMETRY: '1' };
+
 function runSynth(args, cwd = ROOT) {
-  return spawnSync('node', [SYNTH, ...args], { cwd, encoding: 'utf-8', timeout: 30_000 });
+  return spawnSync('node', [SYNTH, ...args],
+    { cwd, encoding: 'utf-8', timeout: 30_000, env: QUIET });
 }
 
 function runCli(args) {
-  return spawnSync('node', [BIN, ...args], { cwd: ROOT, encoding: 'utf-8', timeout: 30_000 });
+  return spawnSync('node', [BIN, ...args],
+    { cwd: ROOT, encoding: 'utf-8', timeout: 30_000, env: QUIET });
 }
 
 function round1File(dir) {

@@ -609,7 +609,17 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     # --plan makes the skipped-lane accounting arithmetic: a lane the plan ran
     # that has no payload and no --skipped/--degraded refuses the synthesis,
     # because its silence otherwise reads as a clean review.
+    # in a convergence loop, name the pass so the run's counts can be read per
+    # iteration. It is the LEDGER's counter (`ledger.iterations.length + 1`,
+    # references/convergence-loop.md), never a number minted here:
+    #   --iteration 2
 ```
+
+This is also where the run leaves its one line of telemetry: counts only, no
+prose, appended to `${XDG_CACHE_HOME:-~/.cache}/adverse/runs.jsonl` for every
+repository on the machine. It is what makes the plan's own rules arguable from
+data later — see references/telemetry.md, and pass `--no-telemetry` if the user
+asks for none. A run whose line cannot be written still publishes its report.
 
 `--briefing` is what carries the candidate root causes and round 2's rulings
 into the report. Omit it and the report is exactly what it was before grouping
