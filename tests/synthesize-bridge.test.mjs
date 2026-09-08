@@ -107,8 +107,8 @@ test('the bridge and `adverse synthesize` produce byte-identical reports — the
 
 // --- the plan-to-report link: depth travels as data, not as memory -------------
 
-function planFile(dir, depth) {
-  const p = path.join(dir, 'plan.json');
+function planFile(dir, depth, { probes, name = 'plan.json' } = {}) {
+  const p = path.join(dir, name);
   const plan = {
     lanes: [
       { persona: 'auditor', run: true, agents: 1 },
@@ -116,6 +116,7 @@ function planFile(dir, depth) {
     ],
   };
   if (depth !== undefined) plan.depth = depth;
+  if (probes !== undefined) plan.probes = probes;
   writeFileSync(p, JSON.stringify(plan));
   return p;
 }
@@ -130,6 +131,91 @@ test('--plan carries the run depth into the report header', () => {
     const r = runSynth(['--round1', round1File(dir), '--plan', planFile(dir, 'cheap'), '--out', out]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(readFileSync(out, 'utf-8'), /Planned depth: `cheap`/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The declaration this whole path exists for, end to end. SKILL.md skips Phase
+// 2.5 outright when probes are off, so there is no probes.json and no
+// `--probes` — the plan is the only thing on disk that can say probes were not
+// offered, and before this the report said nothing at all.
+test('--plan alone declares that probes were never offered', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-probesoff-'));
+  try {
+    const md = path.join(dir, 'r.md');
+    const json = path.join(dir, 'r.json');
+    const plan = planFile(dir, 'cheap', {
+      probes: { allowed: false, perLane: 0, reason: 'a cheap pass; a reproduction costs wall-clock' },
+    });
+    const r = runSynth(['--round1', round1File(dir), '--plan', plan,
+      '--out', md, '--json-out', json]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(readFileSync(md, 'utf-8'), /\*\*Probes were not offered\.\*\*/);
+    assert.match(readFileSync(md, 'utf-8'), /a cheap pass; a reproduction costs wall-clock\./);
+
+    const report = JSON.parse(readFileSync(json, 'utf-8'));
+    assert.equal(report.probes.offered, false);
+    // Not zero. Nothing counted them, and a count is a claim that something did.
+    assert.equal(report.probes.enabled, null);
+    assert.equal(report.probes.attached, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a plan that offered probes, with no probes.json, says the record is missing', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-probesnone-'));
+  try {
+    const md = path.join(dir, 'r.md');
+    const plan = planFile(dir, undefined, { probes: { allowed: true, perLane: 2, reason: 'offered' } });
+    assert.equal(runSynth(['--round1', round1File(dir), '--plan', plan, '--out', md]).status, 0);
+    const body = readFileSync(md, 'utf-8');
+    assert.match(body, /No probe was recorded/);
+    assert.doesNotMatch(body, /were not offered/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--probes and --plan together declare what execution actually did', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-probesran-'));
+  try {
+    const md = path.join(dir, 'r.md');
+    const json = path.join(dir, 'r.json');
+    const plan = planFile(dir, undefined, { probes: { allowed: true, perLane: 2, reason: 'offered' } });
+    // The probed payload is the auditor's alone, so the steward the plan ran
+    // has to be accounted for — the roster check (#70) is the same class of
+    // declaration this test is about, one lane down.
+    const r = runSynth(['--round1', probedRound1(dir), '--briefing', briefingFile(dir, HEAD),
+      '--plan', plan, '--probes', probesFile(dir, HEAD),
+      '--skipped', 'steward=nothing in the diff it owns',
+      '--out', md, '--json-out', json]);
+    // 1, not 0: the probed finding is a live critical, and the bridge's exit
+    // code is a claim about the review rather than about this declaration.
+    assert.equal(r.status, 1, `${r.stderr}${r.stdout}`);
+    assert.match(readFileSync(md, 'utf-8'), /\*\*Probes ran\.\*\* 1 attached, 1 re-run, 1 reproduced/);
+
+    const report = JSON.parse(readFileSync(json, 'utf-8'));
+    assert.deepEqual({
+      offered: report.probes.offered, enabled: report.probes.enabled,
+      attached: report.probes.attached, confirmed: report.probes.confirmed,
+    }, { offered: true, enabled: true, attached: 1, confirmed: 1 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A run with neither input recorded nothing about probes, and the report says
+// nothing rather than guessing — `depth: null`'s rule, for the same reason.
+test('no plan and no probes.json declares nothing and carries null', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-probesnull-'));
+  try {
+    const md = path.join(dir, 'r.md');
+    const json = path.join(dir, 'r.json');
+    assert.equal(runSynth(['--round1', round1File(dir), '--out', md, '--json-out', json]).status, 0);
+    assert.doesNotMatch(readFileSync(md, 'utf-8'), /probe/i);
+    assert.equal(JSON.parse(readFileSync(json, 'utf-8')).probes, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

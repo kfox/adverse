@@ -54,6 +54,7 @@ import { statSync } from 'node:fs';
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import { flatten, verbatim } from './markdown.mjs';
+import { probeState } from './probe.mjs';
 import { ADVISORY_KINDS } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
@@ -465,6 +466,40 @@ const DEPTH_NOTES = new Map([
     + ' said, at a higher model tier.'],
 ]);
 
+// The plan's reason, flattened and re-punctuated. Flattened because this is
+// the one renderer whose output is public and permanent: a newline inside the
+// reason would end the paragraph and render the rest of the accounting as
+// document body, and a plan.json is a file on disk that this process did not
+// write.
+const planReason = (reason) => `${flatten(reason).replace(/\s*\.*\s*$/, '')}.`;
+
+// The probe declaration, in this renderer's words. Same table shape and same
+// null-prototype reasoning as DEPTH_NOTES above; the state itself is decided
+// once, in src/probe.mjs, for all three renderings.
+//
+// This one earns its place here more than in either local artifact: a reader of
+// a pull-request comment was not in the session, cannot see the run directory,
+// and has no other way to learn that the panel was never offered a way to run
+// the code it is reporting on.
+const PROBE_NOTES = new Map([
+  ['not-offered', (p) => '**Probes were not offered.** No finding below was settled by'
+    + ' running the code, and none could be.'
+    + `${p.reason ? ` The plan's reason: ${planReason(p.reason)}` : ''}`],
+  ['unrecorded', () => '**No probe was recorded.** Reproductions were available to the'
+    + ' panel and this run has no record of one being run — the phase was skipped, or no'
+    + ' reviewer attached one. Nothing below was settled by execution.'],
+  ['not-enabled', (p) => `**Probe execution was not enabled.** ${p.attached}`
+    + ' reproduction(s) were attached and every one was recorded as declined. Nothing'
+    + ' below was settled by execution.'],
+  ['ran', (p) => (p.attached === 0
+    ? '**Probes were enabled and none was attached.** Every lane declined, which costs a'
+      + ' reviewer nothing. Nothing below was settled by running the code.'
+    : `**Probes ran.** ${p.attached} attached, ${p.ran} re-run, ${p.confirmed} reproduced,`
+      + ` ${p.contradicted} ran without reproducing`
+      + `${p.sandboxed ? ', under the sandbox the operator supplied' : ', with no sandbox'}.`
+      + ' A reproduction that did not reproduce disproves nothing.')],
+]);
+
 const locator = (f) => (f.file
   ? verbatim(`${f.file}${f.line === null || f.line === undefined ? '' : `:${f.line}`}`)
   : '_no location_');
@@ -504,6 +539,12 @@ function accounting(report) {
   }
   const depth = DEPTH_NOTES.get(report.depth);
   if (depth) out.push(depth);
+  // Absent on a report.json written before the field existed, which is why
+  // `probes` is not in REQUIRED_REPORT_KEYS: `probeState` returns null for a
+  // missing block and this declares nothing, rather than refusing to publish
+  // an older report or — worse — asserting that probes were off.
+  const probes = PROBE_NOTES.get(probeState(report.probes));
+  if (probes) out.push(probes(report.probes));
   return out;
 }
 
