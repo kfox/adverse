@@ -1117,7 +1117,19 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   if (syn.findings.length === 0) {
     lines.push('## Findings');
     lines.push('');
-    lines.push('_No findings. All reviewers reported clean._');
+    // Which of the two empty reports this is. With no reviewer on record,
+    // "all reviewers reported clean" is vacuously true and reads as a clean
+    // bill of health for a change nobody looked at — the same failure the
+    // skipped-lane declarations a few lines above exist to prevent, restated
+    // as a reassurance underneath them.
+    //
+    // The WORDING is per renderer, the way the root-cause status labels are;
+    // what must not differ is the predicate, and `verdicts` is the only thing
+    // that records who actually reported.
+    lines.push(Object.keys(syn.verdicts).length
+      ? '_No findings. All reviewers reported clean._'
+      : '_No findings, and no reviewer reported one either: every lane is accounted'
+        + ' for above as not run or degraded. This is an empty review, not a clean one._');
     lines.push('');
     return lines.join('\n');
   }

@@ -461,6 +461,34 @@ test('render: clean review says clean', () => {
   const out = renderMarkdown(synthesize(r1, {}));
   assert.match(out, /SHIP/);
   assert.match(out, /No findings/);
+  assert.match(out, /All reviewers reported clean/);
+});
+
+// A report with no reviewer on record used to print "All reviewers reported
+// clean" — vacuously true, and a clean bill of health for a change nobody
+// looked at. It read as a reassurance directly underneath the skipped-lane
+// declarations that exist to prevent exactly that reading.
+test('render: an empty review with nobody on record does not read as a clean one', () => {
+  const out = renderMarkdown(synthesize({}, {}, {
+    skippedPersonas: [{ persona: 'auditor', reason: 'not run' }],
+  }));
+  assert.match(out, /no reviewer reported one either/);
+  assert.match(out, /empty review, not a clean one/);
+  assert.doesNotMatch(out, /All reviewers reported clean/);
+});
+
+// The dashboard said it too, and it was the one of the three sites with no
+// test at all — the reason all three are checked here rather than only the
+// one that surfaced the problem.
+test('html: an empty review with nobody on record does not read as a clean one', () => {
+  const empty = renderHtml(synthesize({}, {}, {
+    skippedPersonas: [{ persona: 'auditor', reason: 'not run' }],
+  }));
+  assert.match(empty, /no reviewer reported one either/);
+  assert.doesNotMatch(empty, /All reviewers reported clean/);
+
+  const clean = renderHtml(synthesize({ auditor: v('approve') }, {}));
+  assert.match(clean, /All reviewers reported clean/);
 });
 
 test('render: groups by confidence in correct order', () => {

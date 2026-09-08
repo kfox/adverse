@@ -540,6 +540,22 @@ test('a clean review says so rather than rendering an empty report', () => {
   assert.match(body, /All reviewers reported clean/);
 });
 
+// Found by publishing one. With every lane declared not run, the body said
+// "All reviewers reported clean" directly underneath those declarations —
+// vacuously true, and a clean bill of health for a change nobody looked at.
+// It is the failure the declarations exist to prevent, restated as a
+// reassurance below them, in a body that is public and permanent.
+test('an empty review with nobody on record does not read as a clean one', () => {
+  const body = renderComment(report({
+    verdicts: {},
+    skipped: ['auditor', 'adversary', 'steward', 'pragmatist']
+      .map((persona) => ({ persona, reason: 'not run' })),
+  }), { branch: BRANCH });
+  assert.match(body, /no reviewer reported one either/);
+  assert.match(body, /an empty review, not a clean one/);
+  assert.doesNotMatch(body, /All reviewers reported clean/);
+});
+
 test('a confirmed probe is called out in the header; an unconfirmed one is not', () => {
   const probed = (confirmed) => finding({
     confidence: 'demonstrated',

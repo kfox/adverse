@@ -145,7 +145,11 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     : '';
 
   const noFindings = syn.findings.length === 0
-    ? '<section><h2>Findings</h2><p class="empty">No findings. All reviewers reported clean.</p></section>'
+    ? `<section><h2>Findings</h2><p class="empty">${Object.keys(syn.verdicts).length
+      ? 'No findings. All reviewers reported clean.'
+      : 'No findings, and no reviewer reported one either — every lane is accounted for'
+        + ' above as not run or degraded. This is an empty review, not a clean one.'
+    }</p></section>`
     : '';
 
   return `<!doctype html>

@@ -664,7 +664,16 @@ export function renderComment(report, { branch, head = null, base = null, iterat
     + ' a reviewer can always want different structure, and prose claims never run'
     + ' out, so a loop that waits for either supply to be exhausted never ends._');
 
-  if (!findings.length) body.push('', '_No findings. All reviewers reported clean._');
+  // The same distinction the Markdown report draws, and it matters more here:
+  // this body is public and durable, and "all reviewers reported clean" over a
+  // run where nobody reported at all is the most misleading sentence this tool
+  // could publish.
+  if (!findings.length) {
+    body.push('', Object.keys(report.verdicts).length
+      ? '_No findings. All reviewers reported clean._'
+      : '_No findings, and no reviewer reported one either: every lane is accounted'
+        + ' for above as not run or degraded. This is an empty review, not a clean one._');
+  }
   if (dropped) body.push('', truncationNote(dropped));
 
   return [...head1, ...body, ...tail].join('\n');
