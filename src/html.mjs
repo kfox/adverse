@@ -126,6 +126,17 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
       </section>`);
   }
 
+  // Which tree. Same reason the Markdown report carries it: a dashboard saved
+  // to disk outlives both the run directory and the branch position, and
+  // without this the only thing naming the reviewed commit is the shell history
+  // of the session that produced it.
+  const reviewed = (syn.head || syn.base)
+    ? `<p class="summary">Reviewed: ${[
+      syn.head ? `at <code>${esc(String(syn.head).slice(0, 12))}</code>` : null,
+      syn.base ? `over <code>${esc(String(syn.base).slice(0, 12))}</code>` : null,
+    ].filter(Boolean).join(' · ')}</p>`
+    : '';
+
   const round2Skipped = syn.round2Skipped
     ? `<div class="banner-warn">Round 2 skipped: ${esc(syn.round2Skipped)}. Nothing here was cross-examined.</div>`
     : '';
@@ -205,6 +216,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     <div class="verdict">${esc(syn.consensusLabel)}</div>
     <p class="summary">${crit} critical · ${warn} warning · ${info} info — ${syn.findings.length} total across ${Object.keys(syn.verdicts).length} reviewers</p>
     <p class="summary">Open blocking: <strong>${(syn.openBlocking ?? []).length}</strong> (demonstrated, cross-validated or consensus, not advisory, not info)</p>
+    ${reviewed}
 
     ${degraded}
     ${round2Skipped}

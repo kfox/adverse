@@ -460,6 +460,12 @@ async function cmdSynthesize(rest) {
     // passes --plan for the roster check. Without a plan the depth is unknown,
     // which the report says rather than guessing at.
     depth: plan?.depth ?? null,
+    // Off the briefing, which is where triage bound them, and not off this
+    // process's own view of the checkout: a synthesis re-run after a fix batch
+    // has landed would otherwise stamp today's HEAD onto findings written
+    // against the tree before it.
+    head: briefing?.head ?? null,
+    base: briefing?.base ?? null,
   });
   recordRun({
     noTelemetry: values['no-telemetry'],
