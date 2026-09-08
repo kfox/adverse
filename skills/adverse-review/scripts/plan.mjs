@@ -255,6 +255,8 @@ emit(plan,
   sizeLine + '\n'
   + `depth: ${plan.depth} (model tier: ${tierWord[String(plan.tier.escalate)]}`
     + ` — ${plan.tier.reason})\n`
+  + `probes: ${plan.probes.allowed ? `up to ${plan.probes.perLane}/lane` : 'not offered'}`
+    + ` — ${plan.probes.reason}\n`
   + (plan.reasons.length ? plan.reasons.map((r) => `note: ${r}\n`).join('') : '')
   + 'lanes:\n'
   + plan.lanes.map(laneLine).join('\n') + '\n'

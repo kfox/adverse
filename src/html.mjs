@@ -3,7 +3,8 @@
 // Vanilla HTML + scoped CSS + a few lines of JS — no framework, no build step.
 
 import { refuseDirectRun } from './entryGuard.mjs';
-import { ADVISORY_KINDS, PROVENANCE, assertCoversStatuses } from './taxonomy.mjs';
+import { ADVISORY_KINDS, PROVENANCE, assertCoversConfidences,
+         assertCoversStatuses } from './taxonomy.mjs';
 // Not wording — identity. Which half of a split lane made a ruling is a fact
 // about the run, and this renderer printed the lane's persona for both halves.
 import { rulingVoice } from './synthesis.mjs';
@@ -32,12 +33,22 @@ const SEVERITY_BADGE = Object.assign(Object.create(null), {
   info:     { label: 'INFO',     color: '#1e40af', bg: '#dbeafe' },
 });
 
-const CONFIDENCE_LABEL = {
+// Checked against the taxonomy at module load, like the root-cause labels
+// below and for the same reason: this map is BOTH the section heading and the
+// bucket list, so a label missing here is a section that never renders and a
+// finding that quietly leaves the dashboard.
+const CONFIDENCE_LABEL = assertCoversConfidences({
+  demonstrated: 'Demonstrated · a reproduction was re-run and the behavior occurred',
   'cross-validated': 'Cross-validated · multiple reviewers, independently',
   consensus: 'Consensus · reported by one, validated by another',
   disputed: 'Disputed · reported, then challenged',
   solo: 'Solo · single perspective',
-};
+}, 'html CONFIDENCE_LABEL');
+
+// One order, read off the map above rather than spelled a second time. The two
+// lists had to agree and nothing made them: the buckets were built from one
+// literal and iterated from another, twenty lines apart.
+const CONFIDENCE_ORDER = Object.keys(CONFIDENCE_LABEL);
 
 const VERDICT_BADGE = {
   approve:     { label: 'approve',     color: '#166534', bg: '#dcfce7' },
@@ -81,7 +92,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
 
   // `byConfidence`, not `groups`: `groups` in this codebase are root-cause
   // groups, and these are confidence buckets.
-  const byConfidence = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
+  const byConfidence = Object.fromEntries(CONFIDENCE_ORDER.map((c) => [c, []]));
   const advisory = [];
   for (const f of syn.findings) {
     if (ADVISORY_KINDS.has(f.kind)) advisory.push(f);
@@ -98,7 +109,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
         ${rootCauses.map(renderRootCause).join('\n')}
       </section>`);
   }
-  for (const conf of ['cross-validated', 'consensus', 'disputed', 'solo']) {
+  for (const conf of CONFIDENCE_ORDER) {
     const items = byConfidence[conf];
     if (!items.length) continue;
     sections.push(`
@@ -172,6 +183,11 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     .card .cite-meta { font-size: 12px; color: var(--fg-muted); }
     .card .fix { background: var(--bg-alt); padding: 8px 12px; border-radius: 6px; margin: 8px 0 0; }
     .card .fix strong { color: var(--accent); }
+    .card .probe { margin: 8px 0; padding: 8px 12px; border-left: 3px solid; border-radius: 0 6px 6px 0; font-size: 13px; }
+    .card .probe p { margin: 0 0 6px; }
+    .card .probe-ok { border-color: #16a34a; background: rgba(22,163,74,0.08); }
+    .card .probe-no { border-color: #f59e0b; background: rgba(245,158,11,0.08); }
+    .card .probe-output { margin: 6px 0 0; padding: 8px; background: var(--bg-alt); border-radius: 6px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
     blockquote.validate, blockquote.challenge { margin: 6px 0; padding: 6px 12px; border-left: 3px solid; border-radius: 0 6px 6px 0; font-size: 13px; }
     blockquote.validate { border-color: #16a34a; background: rgba(22,163,74,0.08); }
     blockquote.challenge { border-color: #f59e0b; background: rgba(245,158,11,0.08); }
@@ -188,7 +204,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     <h1>${esc(title)}</h1>
     <div class="verdict">${esc(syn.consensusLabel)}</div>
     <p class="summary">${crit} critical · ${warn} warning · ${info} info — ${syn.findings.length} total across ${Object.keys(syn.verdicts).length} reviewers</p>
-    <p class="summary">Open blocking: <strong>${(syn.openBlocking ?? []).length}</strong> (cross-validated or consensus, not advisory, not info)</p>
+    <p class="summary">Open blocking: <strong>${(syn.openBlocking ?? []).length}</strong> (demonstrated, cross-validated or consensus, not advisory, not info)</p>
 
     ${degraded}
     ${round2Skipped}
@@ -259,6 +275,28 @@ function renderRootCause(rc) {
   </details>`;
 }
 
+// The dashboard's wording for a reproduction, and the same rule the Markdown
+// renderer follows: keyed on `confirmed` rather than `status`, and silent for a
+// probe nobody ran, because declining to probe has to cost a reviewer nothing.
+//
+// `esc` on the captured output is not decoration. That string is the stdout of
+// code from the diff under review, which is the most attacker-controlled text
+// this renderer handles, and it lands inside a `<pre>` in a file people open in
+// a browser.
+function renderProbe(p) {
+  if (!p || p.source !== 'measured') return '';
+  const headline = p.confirmed
+    ? `<strong>Probe reproduced.</strong> The tool re-ran it and the predicted behavior occurred.`
+    : `<strong>Probe did not reproduce</strong> — ${esc(p.why)}.`;
+  const expected = p.claim?.expect ? `<p class="probe-expect">Expected: ${esc(p.claim.expect)}</p>` : '';
+  const output = p.ran?.output ? `<pre class="probe-output">${esc(p.ran.output)}</pre>` : '';
+  return `<div class="probe ${p.confirmed ? 'probe-ok' : 'probe-no'}">
+      <p>${headline}</p>
+      ${expected}
+      ${output}
+    </div>`;
+}
+
 function renderCard(f) {
   const sev = SEVERITY_BADGE[f.severity];
   const loc = f.file ? `${f.file}${f.line !== null ? `:${f.line}` : ''}` : '';
@@ -278,6 +316,7 @@ function renderCard(f) {
     <div class="body">
       <p class="reporters">Reported by: ${esc(f.reporters.join(', '))} · confidence: ${esc(f.confidence)}${f.provenance === PROVENANCE.regression ? ` · ${REGRESSION_NOTE}` : ''}${f.counterpart ? ` · contradicts ${esc(f.counterpart)}` : ''}</p>
       <div class="detail">${esc(f.detail).replaceAll('\n', '<br>')}</div>
+      ${renderProbe(f.probe)}
       ${f.fix ? `<div class="fix"><strong>Fix:</strong> ${esc(f.fix)}</div>` : ''}
       ${validates}
       ${challenges}

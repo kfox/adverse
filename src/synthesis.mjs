@@ -30,13 +30,14 @@
 // automated stop condition possible: `design` findings are advisory, because a
 // reviewer can always want different structure and so a loop that counts them
 // never terminates. `openBlocking` is the resulting signal — the findings that
-// are both credible enough (cross-validated or consensus) and consequential
+// are both credible enough (demonstrated, cross-validated or consensus) and consequential
 // enough (not advisory, not `info`) to hold a change open.
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import { isLaneAgent } from './personas.mjs';
+import { indexProbes, probeKey } from './probe.mjs';
 import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
-         assertCoversStatuses } from './taxonomy.mjs';
+         assertCoversConfidences, assertCoversStatuses } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -303,7 +304,14 @@ export function mergeSplitCrossReviews(a, b) {
     added: [...stampAgent(a, 'added'), ...stampAgent(b, 'added')],
   };
 }
-const CONFIDENCE_RANK = { disputed: 0, 'cross-validated': 1, consensus: 2, solo: 3 };
+// Sort order within a severity, lowest first — a DIFFERENT question from
+// CONFIDENCE_ORDER below, which is the order the report's SECTIONS appear in.
+// `disputed` sits high here because a contested finding is the one a human most
+// needs to look at; `demonstrated` sits above it because a behavior that was
+// observed to happen is not in contest, whatever anyone argued.
+const CONFIDENCE_RANK = assertCoversConfidences(
+  { demonstrated: 0, disputed: 1, 'cross-validated': 2, consensus: 3, solo: 4 },
+  'synthesis CONFIDENCE_RANK');
 
 function severityRank(s) {
   return SEVERITY_RANK[s] ?? 99;
@@ -398,9 +406,33 @@ function recordRuling(list, persona, reason) {
 // over `{kind, severity, confidence}` alone (not `.blocking`, which only the
 // serialized shape carries) so it works unchanged on an in-memory finding
 // here and on one `convergenceStatus` reads back out of a report.
+// `demonstrated` joins the two counted labels rather than replacing either.
+// The question this asks is "is the evidence strong enough to hold the change
+// open", and a reproduction src/probe.mjs re-ran and watched succeed is the
+// strongest answer this flow can produce — stronger than two reviewers who
+// agree, which is what the other two labels mean. A demonstrated finding that
+// only one lane reported would otherwise be `solo` and dropped by this gate,
+// which is precisely the hole the probe exists to fill.
 export function isOpenBlocking(finding) {
   return isBlocking(finding)
-    && (finding.confidence === 'cross-validated' || finding.confidence === 'consensus');
+    && (finding.confidence === 'demonstrated'
+      || finding.confidence === 'cross-validated'
+      || finding.confidence === 'consensus');
+}
+
+// A finding's probe: the strongest one any of its reporters attached. A finding
+// two lanes reported can carry a probe from each, and one reproduction that ran
+// is what the label turns on — so a confirmed probe wins over an unconfirmed
+// one, and reporter order decides only among equals.
+function pickProbe(index, finding) {
+  let fallback = null;
+  for (const persona of finding.reporters) {
+    const p = index.get(probeKey(persona, finding.title));
+    if (!p) continue;
+    if (p.confirmed) return p;
+    fallback ??= p;
+  }
+  return fallback;
 }
 
 function buildFinding(persona, raw, agent = persona) {
@@ -437,6 +469,10 @@ function buildFinding(persona, raw, agent = persona) {
     // anything — a shape that appears only sometimes is one every consumer
     // has to guess about.
     group: null,
+    // The reproduction its reporter attached, once src/probe.mjs has re-run it
+    // — never what the reporter said about it. Declared here for the same
+    // reason as `group`, and null on every run that did not probe.
+    probe: null,
   };
 }
 
@@ -587,7 +623,7 @@ function buildRootCauses(groups, round2, findByTitle) {
 
 export function synthesize(round1, round2 = {},
   { failedPersonas = [], skippedPersonas = [], round2Skipped = null,
-    rootCauseGroups = [], depth = null } = {}) {
+    rootCauseGroups = [], depth = null, probes = [] } = {}) {
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
@@ -672,9 +708,25 @@ export function synthesize(round1, round2 = {},
     }
   }
 
-  // 4. Confidence labels
+  // 4. Probes, then confidence labels
+  //
+  // A confirmed probe outranks every counted label, including `disputed`. Four
+  // of the five labels count reviewers, and counting reviewers is a proxy for
+  // the thing anyone actually wants to know: did this happen. A probe answers
+  // that question directly, and an argument against a behavior that has been
+  // observed to occur is an argument that lost. The challenge is still printed
+  // beside the finding — nothing is hidden — it just stops deciding the label.
+  //
+  // Only `confirmed` does this. A probe that did not reproduce, could not run,
+  // or that nobody re-ran leaves the finding exactly where it would have been,
+  // because src/probe.mjs computes `confirmed` and this reads it rather than
+  // re-deciding from `status`.
+  const probeIndex = indexProbes(probes);
   for (const f of byKey.values()) {
-    if (f.challengers.length > 0) f.confidence = 'disputed';
+    f.probe = pickProbe(probeIndex, f);
+
+    if (f.probe?.confirmed) f.confidence = 'demonstrated';
+    else if (f.challengers.length > 0) f.confidence = 'disputed';
     else if (f.reporters.length >= 2) f.confidence = 'cross-validated';
     else if (f.validators.length > 0) f.confidence = 'consensus';
     else f.confidence = 'solo';
@@ -857,6 +909,47 @@ function verbatim(text) {
   return `${fence}${pad}${flat}${pad}${fence}`;
 }
 
+// A fenced block for text this file did not write and cannot flatten: a
+// probe's captured output is the stdout of code from the diff under review,
+// which is as untrusted as input gets in this flow, and it is kept multi-line
+// on purpose because reading it is the whole point of storing it.
+//
+// The fence is sized to the content the way `verbatim` sizes its code span —
+// CommonMark closes a fenced block only on a run of at least as many backticks
+// as opened it, so an output containing ``` cannot break out of a four-backtick
+// fence. `info` is the language tag, and never comes from a payload.
+function fenced(text, info = '') {
+  const body = String(text ?? '');
+  const longest = (body.match(/`+/g) ?? []).reduce((n, run) => Math.max(n, run.length), 0);
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return [`${fence}${info}`, body, fence];
+}
+
+// What the report says about a reproduction. Keyed on `confirmed` and `source`
+// and never on `status` alone: `status` is what the script did, while
+// `confirmed` is src/probe.mjs's ruling on whether that amounts to evidence,
+// and a probe bound to the wrong tree has an honest `status` and no standing.
+//
+// A probe that nobody ran renders nothing at all. Declining to probe has to
+// stay free — a reviewer that pays a visible cost for saying "this does not
+// reproduce cheaply" is a reviewer that invents a probe instead, and a
+// fabricated reproduction is worse than an honest argument.
+function renderProbe(p) {
+  if (!p || p.source !== 'measured') return [];
+
+  const out = [];
+  const script = p.claim?.script ? ` ${verbatim(p.claim.script)}` : '';
+  if (p.confirmed) {
+    out.push('', `_Probe:_ **reproduced.** The tool re-ran${script} and the predicted`
+      + ` behavior occurred (exit ${p.ran?.exitCode ?? 0}).`);
+  } else {
+    out.push('', `_Probe:_ **did not reproduce** — ${p.why}.`);
+  }
+  if (p.claim?.expect) out.push('', `_Probe expected:_ ${verbatim(p.claim.expect)}`);
+  if (p.ran?.output) out.push('', ...fenced(p.ran.output));
+  return out;
+}
+
 // The same, for a cell of the one Markdown table this file emits. A `|` splits
 // a GFM row before any inline parser runs, code span or not, so it still needs
 // the backslash — which the table reader consumes, leaving the literal
@@ -893,14 +986,17 @@ const DEPTH_NOTES = new Map([
     + 'recommended for the panel.'],
 ]);
 
-const SECTION_TITLES = {
+const SECTION_TITLES = assertCoversConfidences({
+  demonstrated: '## Demonstrated findings (a reproduction was re-run and the behavior occurred)',
   'cross-validated': '## Cross-validated findings (multiple reviewers reported independently)',
   consensus: '## Consensus findings (reported by one, validated by another)',
   disputed: '## Disputed findings (reported, then challenged)',
   solo: '## Single-reviewer findings (one perspective only)',
-};
+}, 'synthesis SECTION_TITLES');
 
-const CONFIDENCE_ORDER = ['cross-validated', 'consensus', 'disputed', 'solo'];
+const CONFIDENCE_ORDER = assertCoversConfidences(
+  ['demonstrated', 'cross-validated', 'consensus', 'disputed', 'solo'],
+  'synthesis CONFIDENCE_ORDER');
 
 const ADVISORY_SECTION =
   `## Advisory (${[...ADVISORY_KINDS].join(', ')} — recorded, never blocking)`;
@@ -1015,7 +1111,7 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   const disputedBlocking = syn.findings.filter((f) => isBlocking(f) && f.confidence === 'disputed');
   lines.push(
     `**Open blocking:** ${open.length} `
-      + `(cross-validated or consensus, not advisory, not info)`
+      + `(demonstrated, cross-validated or consensus, not advisory, not info)`
       + (open.length ? ` — ${open.map((f) => f.title).join('; ')}` : ''),
   );
   if (disputedBlocking.length) {
@@ -1113,7 +1209,7 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   // `byConfidence`, not `groups`: this file's `groups` are root-cause groups,
   // and one word naming two unrelated things in one file is how a reader ends
   // up debugging the wrong one.
-  const byConfidence = { 'cross-validated': [], consensus: [], disputed: [], solo: [] };
+  const byConfidence = Object.fromEntries(CONFIDENCE_ORDER.map((c) => [c, []]));
   const advisory = [];
   for (const f of syn.findings) {
     if (ADVISORY_KINDS.has(f.kind)) advisory.push(f);
@@ -1171,6 +1267,7 @@ function renderFinding(f) {
   }
   out.push('');
   out.push(f.detail);
+  out.push(...renderProbe(f.probe));
   if (f.fix) {
     out.push('');
     out.push(`**Fix:** ${f.fix}`);
@@ -1244,6 +1341,19 @@ export function toJsonReport(syn) {
       challengers: f.challengers,
       confidence: f.confidence,
       group: f.group ?? null,
+      // The reproduction, as this tool ran it. `confirmed` is the field with
+      // consequences — it is what bought `confidence: "demonstrated"` — and it
+      // is serialized beside the reporter's own claim so a reader can see both
+      // halves of the routing rule: what the interested party said, and what
+      // the disinterested re-run found.
+      probe: f.probe ? {
+        status: f.probe.status,
+        confirmed: f.probe.confirmed,
+        why: f.probe.why,
+        source: f.probe.source,
+        claim: f.probe.claim,
+        ran: f.probe.ran,
+      } : null,
       // Which pass found it. Serialized rather than left in memory because the
       // reader who most needs it is the operator working a ranked list out of
       // report.json one iteration later, when "a fix commit introduced this"

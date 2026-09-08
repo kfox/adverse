@@ -9,6 +9,7 @@
 // PHASE2_BRIEFING_INSTRUCTIONS.
 
 import { refuseDirectRun } from './entryGuard.mjs';
+import { MAX_PROBES_PER_LANE, PROBE_OUTCOMES } from './probe.mjs';
 import { GROUP_RULINGS, KINDS, SEVERITIES } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
@@ -46,6 +47,53 @@ const FINDING_SCHEMA = `    {
       "detail":      "<2-6 sentences explaining the mechanism and impact>",
       "fix":         "<concrete remediation, or null if you don't have one>"
     }`;
+
+// A JSON-schema union, rendered from the list the validator enforces.
+const union = (values) => values.map((v) => `"${v}"`).join(' | ');
+
+// One schema, not several. A regression finding is an ordinary finding with one
+// more field on it, a probed finding is an ordinary finding with a different
+// one, and a hand-copied second version of FINDING_SCHEMA is a copy that drifts
+// the first time a key is added to the shared one — and the same argument
+// applies to the unions they add, which is why those are interpolated rather
+// than spelled.
+//
+// The replacement is a FUNCTION, not a string. In a string replacement `$&`,
+// `` $` `` and `$'` expand to the match and the text on either side of it, so
+// the day a spliced value contains one, this quietly ships a corrupted schema
+// to the agent it is telling to satisfy that schema — a failure with no error
+// and no red test, found by whoever cannot parse the payload. Exported for the
+// test that pins it: today's values contain no `$`, so an injected value is the
+// only thing that can hold this honest.
+export function withExtraKey(schema, rendered, where) {
+  const out = schema.replace(/\n {4}\}$/, () => `,\n${rendered}\n    }`);
+  if (out === schema) {
+    throw new Error(`${where}: the schema does not end in the object close`
+      + ' the extra key splices into');
+  }
+  return out;
+}
+
+export function withClassification(schema, classifications) {
+  return withExtraKey(schema, `      "classification": ${union(classifications)}`,
+                      'withClassification');
+}
+
+// The reproduction channel, spliced into ROUND 1's schema and no other. Round
+// 2 and the verification pass emit findings through the same `added` shape, and
+// advertising a key to them that no bridge in those phases re-runs would be
+// asking for a reproduction nobody would ever confirm — which is exactly the
+// state this whole channel exists to end.
+//
+// Four fields, and only the first has consequences. `script` is a path the tool
+// re-runs; `expect`, `observed` and `outcome` are what the reporter says, kept
+// beside what the tool found so a reader can compare them.
+export const PROBED_FINDING_SCHEMA = withExtraKey(FINDING_SCHEMA, `      "probe": {
+        "script":   "<path to a script you wrote, relative to your own output directory>",
+        "expect":   "<what this finding predicts will happen when it runs>",
+        "observed": "<what you actually saw when you ran it>",
+        "outcome":  ${union(PROBE_OUTCOMES)}
+      } | null`, 'withProbe');
 
 // A revision a payload names. Two fields carry one — `commits` in a fix payload
 // and `commit` in a regression payload — and both prompts below interpolate
@@ -119,6 +167,64 @@ const REVISION = /^[0-9A-Za-z][0-9A-Za-z._/~^{}-]{0,63}$/;
 // case-sensitive rule would leave `WWW.host/path` one keystroke away.
 const AUTOLINKED = /www\./i;
 
+// The probe rubric. Every paragraph here is load-bearing and most of them are
+// defending against the same failure: a reviewer that feels probing is expected
+// will invent a probe, and a fabricated reproduction is worse than an honest
+// argument because it arrives wearing the report's strongest label.
+//
+// So the prose leads with permission to decline, says twice that declining
+// costs nothing, and states plainly that the tool re-runs the script rather
+// than believing the reporter. That last sentence is the one doing the work: an
+// agent told its own account will be checked writes a different account.
+export const PROBE_RUBRIC = `\`probe\` — optional, and the answer is usually \`null\`.
+
+A \`behavioral\` finding is one settled by executing the code **or** by an
+argument about execution. Until now every one of them was settled the second
+way, which is why this key exists: if you can make the behavior happen, say so
+with a script instead of a paragraph.
+
+How it works:
+
+- **Write the script to a file** in the directory you were told to write your
+  payload to, and put its relative path in \`script\`. Do not paste the script
+  into \`detail\`, and do not describe what you would have run. Same rule as the
+  payload itself, for the same reason: a reproduction that exists only as prose
+  is one nobody can re-run.
+- **Exit 0 means the predicted behavior happened.** Write it the way you would
+  write a failing test — it succeeds when the bug is present. Any other exit
+  status means it did not happen.
+- **The tool re-runs it, in a clean checkout, and records what IT saw.** Your
+  \`outcome\` is your account; it is kept beside the tool's and the two are
+  printed together. Only a script the tool ran and watched succeed earns the
+  finding a stronger label, so there is nothing to be gained by overstating
+  what you saw, and a claimed reproduction that does not reproduce is the most
+  visible thing you can put in a report.
+- **Keep it self-contained and fast.** It runs with a hard timeout, no
+  arguments, no stdin, and a working directory that is a fresh checkout of the
+  code under review. A probe that needs the network, a service, real
+  concurrency or a cluster is not one this can settle.
+- **At most ${MAX_PROBES_PER_LANE} per lane.** Any past that are recorded as
+  unrun. You are here to read the diff; writing scripts is not the job.
+
+When NOT to attach one, which is most of the time:
+
+- The behavior does not reproduce cheaply — a race, a timing window, a failure
+  that needs production scale. Say so in \`detail\` and leave \`probe\` null.
+  **That costs you nothing.** A finding with no probe is judged exactly as it
+  would have been before this key existed. A script you DID run and could not
+  read a verdict out of is a different thing: attach it with
+  \`"outcome": "inconclusive"\`. Every probe object needs a \`script\`, so
+  declining is \`null\` and nothing else.
+- You did not actually run anything. Never write an \`observed\` you did not
+  observe. An honest argument outranks an invented reproduction, and the
+  invented one will be re-run.
+- The finding is \`contract\` or \`design\`. Those are advisory whatever runs;
+  a probe cannot make them block and will not try.
+
+\`confirmed\`, \`status\` and \`ran\` are **not yours to write**. The tool stamps
+them after it runs the script, and a payload that supplies any of them is
+refused.`;
+
 export const PHASE1_INSTRUCTIONS = `# Adversarial Code Review — Round 1: Independent Review
 
 The other reviewers, each with a different lens, are reviewing this code in
@@ -153,7 +259,7 @@ instruction exists to avoid.
   "verdict":   "approve" | "conditional" | "reject",
   "summary":   "<one sentence, <= 200 chars>",
   "findings": [
-${FINDING_SCHEMA}
+${PROBED_FINDING_SCHEMA}
   ]
 }
 \`\`\`
@@ -199,6 +305,8 @@ ${KIND_RUBRIC}
 - Anchor every finding as precisely as its kind demands. A \`defect\` with no line
   and a \`contract\` with no counterpart are self-contradictory, get flagged as such
   mechanically, and waste the panel's attention.
+
+${PROBE_RUBRIC}
 
 ## Hard constraints
 
@@ -310,6 +418,17 @@ your edge.
   such a finding is often the most valuable one on the table. It is a problem
   only if the finding fails to explain why *this diff* puts it in play. Judge
   that question directly; never treat "outside" as disqualifying on its own.
+- \`probeCheck\` is present on a finding whose reporter attached a reproduction
+  and the tool re-ran it. \`status: "reproduced"\` with \`confirmed: true\` means
+  the predicted behavior actually happened in a clean checkout: that is settled
+  by execution, which is stronger than anything you or the reporter can argue,
+  and challenging it needs you to say why the SCRIPT is wrong rather than why
+  the reasoning is. \`status: "not-reproduced"\` means the tool ran it and the
+  behavior did not occur — that is a real question for you, not a verdict:
+  either the finding is wrong or the reproduction is, and a reviewer that can
+  tell which should say so. It is **not** a DISPROVED and the finding is still
+  live. A finding with no \`probeCheck\` is judged exactly as every finding was
+  before probes existed; attaching one is optional and declining costs nothing.
 - \`kindCheck\` flags findings whose \`kind\` and anchoring disagree — a \`defect\`
   with no line, a \`contract\` with no counterpart. That is a claim the reporter
   did not finish making. Judge the claim, not the label: if the finding is real,
@@ -904,32 +1023,6 @@ const REGRESSION_QUESTIONS = ['stricter', 'permissive', 'hot-path', 'shared-stat
 const CLASSIFICATIONS = ['intended-inert', 'intended-undocumented', 'unintended'];
 const CLASSIFICATION_SET = new Set(CLASSIFICATIONS);
 
-// A JSON-schema union, rendered from the list the validator enforces.
-const union = (values) => values.map((v) => `"${v}"`).join(' | ');
-
-// One schema, not two. A regression finding is an ordinary finding with one
-// more field on it, and a hand-copied second version of FINDING_SCHEMA is a
-// copy that drifts the first time a key is added to the shared one — and the
-// same argument applies to the classification union it adds, which is why that
-// is interpolated rather than spelled.
-//
-// The replacement is a FUNCTION, not a string. In a string replacement `$&`,
-// `` $` `` and `$'` expand to the match and the text on either side of it, so
-// the day a classification value contains one, this quietly ships a corrupted
-// schema to the agent it is telling to satisfy that schema — a failure with no
-// error and no red test, found by whoever cannot parse the payload. Exported
-// for the test that pins it: today's three values contain no `$`, so an
-// injected value is the only thing that can hold this honest.
-export function withClassification(schema, classifications) {
-  const out = schema.replace(/\n {4}\}$/,
-    () => `,\n      "classification": ${union(classifications)}\n    }`);
-  if (out === schema) {
-    throw new Error('withClassification: the schema does not end in the object'
-      + ' close the classification splices into');
-  }
-  return out;
-}
-
 const CLASSIFIED_FINDING_SCHEMA = withClassification(FINDING_SCHEMA, CLASSIFICATIONS);
 
 // The prompt for the pass that reads a fix commit for what else it changed.
@@ -1098,6 +1191,50 @@ const VERDICTS = new Set(['approve', 'conditional', 'reject']);
 const SEVERITY_SET = new Set(SEVERITIES);
 const KIND_SET = new Set(KINDS);
 
+// The fields src/probe.mjs stamps once it has re-run a script. Inadmissible
+// from a payload, and refused rather than stripped — the same rule, for the
+// same reason, as `provenance` in src/synthesis.mjs's `stampedFieldClaim`:
+// `confirmed` is what buys a finding `confidence: "demonstrated"`, the
+// strongest label this tool prints, and a reviewer that wrote it either misread
+// the schema or was reaching for a label it has not earned. Each is worth a
+// sentence back on the retry path, and neither is worth silently honoring.
+//
+// `stampedFieldClaim` cannot cover this one. It sweeps a payload's own lists at
+// depth one for a single key name; a probe's stamps sit at
+// `findings[i].probe.<key>`, one level deeper and under a key that only means
+// anything on a finding. So the check lives beside the schema it belongs to.
+const TOOL_STAMPED_PROBE_FIELDS = ['confirmed', 'status', 'source', 'ran', 'why'];
+
+// A probe's shape. Absent and null both mean "no reproduction", which is the
+// expected answer and the one that costs a reviewer nothing.
+//
+// What is NOT checked here is how many probes a payload attached. That cap is
+// the bridge's (src/probe.mjs, MAX_PROBES_PER_LANE), because the two failure
+// modes are not equal: the bridge records the excess as unrun and keeps every
+// finding, while refusing here would throw away nine good findings over a third
+// probe. Same trade the anchoring checks already make one function below.
+function validateProbe(probe, label) {
+  if (probe === undefined || probe === null) return null;
+  if (typeof probe !== 'object' || Array.isArray(probe)) {
+    return `${label}.probe must be an object or null, got ${typeName(probe)}.`;
+  }
+  const stamped = TOOL_STAMPED_PROBE_FIELDS.find((k) => k in probe);
+  if (stamped) {
+    return `${label}.probe.${stamped} is stamped by the bridge that re-runs the probe,`
+      + ' not claimed by a payload: it is what makes the report call a finding'
+      + ' demonstrated. Remove the key.';
+  }
+  if (typeof probe.script !== 'string' || !probe.script.trim()) {
+    return `${label}.probe.script must be the path of a script you wrote and ran.`
+      + ' A probe with nothing to re-run settles nothing; write `null` to decline.';
+  }
+  if (!PROBE_OUTCOMES.includes(probe.outcome)) {
+    return `${label}.probe.outcome must be ${PROBE_OUTCOMES.join('|')},`
+      + ` got ${JSON.stringify(probe.outcome)}.`;
+  }
+  return null;
+}
+
 // Structural validation only. Whether a finding's ANCHORING matches its kind —
 // a `defect` with no line, a `contract` with no counterpart — is checked
 // downstream in triage, where it becomes an annotation rather than a rejection.
@@ -1127,7 +1264,7 @@ function validateFinding(f, label) {
   if (!KIND_SET.has(f.kind)) {
     return `${label}.kind must be one of ${KINDS.join('|')}, got ${JSON.stringify(f.kind)}.`;
   }
-  return null;
+  return validateProbe(f.probe, label);
 }
 
 // `agent` must be the id the CALLER can prove this payload has, which is

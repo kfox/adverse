@@ -303,3 +303,92 @@ test('every stats list holds findings drawn from the briefing, not copies of the
   const { briefing, stats } = build([review('auditor', [finding({ line: null })])]);
   assert.equal(stats.underAnchored[0], briefing.findings[0]);
 });
+
+// --- Probes in the briefing ----------------------------------------------------
+//
+// briefing.json IS the round-2 prompt, so what arrives here is what four lanes
+// read. Two properties: a probe the tool ran reaches the reviewer that has to
+// judge it, and a probe nobody ran is indistinguishable from no probe at all —
+// declining has to cost a reviewer nothing, and a "not run" line in front of
+// three other lanes is a cost.
+
+const probeRecord = (over = {}) => ({
+  persona: 'auditor',
+  agent: 'auditor',
+  title: 't',
+  claim: { script: 'p.sh', expect: 'e', observed: 'o', outcome: 'reproduced' },
+  source: 'measured',
+  status: 'reproduced',
+  ran: { exitCode: 0, durationMs: 1, output: 'x'.repeat(5000), failure: null },
+  confirmed: true,
+  why: '',
+  ...over,
+});
+
+const probes = (list, over = {}) => ({ enabled: true, isolation: { sandbox: null }, probes: list, ...over });
+
+test('a confirmed reproduction reaches the reviewer that has to judge it', () => {
+  const { briefing } = build([review('auditor', [finding()])], { probes: probes([probeRecord()]) });
+  assert.deepEqual(briefing.findings[0].probeCheck,
+    { status: 'reproduced', confirmed: true, claimed: 'reproduced', why: '' });
+});
+
+// A prompt is paid for in every reviewer's context, so the briefing carries the
+// verdict and not the four thousand characters of program output behind it.
+test('the briefing carries the ruling, not the captured output', () => {
+  const { briefing } = build([review('auditor', [finding()])], { probes: probes([probeRecord()]) });
+  assert.equal(JSON.stringify(briefing.findings[0].probeCheck).length < 200, true);
+  assert.doesNotMatch(JSON.stringify(briefing), /x{100}/);
+});
+
+test('a reproduction that ran and failed reaches round 2 as a question', () => {
+  const { briefing, stats } = build([review('auditor', [finding()])], {
+    probes: probes([probeRecord({ status: 'not-reproduced', confirmed: false, why: 'it did not' })]),
+  });
+  assert.equal(briefing.findings[0].probeCheck.status, 'not-reproduced');
+  assert.equal(briefing.findings[0].claimCheck.status, 'ok', 'never a DISPROVED');
+  assert.equal(stats.notReproduced.length, 1);
+  assert.equal(stats.demonstrated.length, 0);
+});
+
+test('a probe nobody ran looks exactly like no probe', () => {
+  const { briefing } = build([review('auditor', [finding()])], {
+    probes: probes([probeRecord({ source: 'declined', confirmed: false, ran: null, why: 'not enabled' })]),
+  });
+  assert.equal(briefing.findings[0].probeCheck, undefined);
+});
+
+test('a run with no probes carries the field on no finding at all', () => {
+  const { briefing, stats } = build([review('auditor', [finding()])]);
+  assert.equal(briefing.findings[0].probeCheck, undefined);
+  assert.equal(briefing.probes, null);
+  assert.equal(stats.demonstrated.length, 0);
+});
+
+// Silence about probes being off reads exactly like a panel that did not want
+// one — the same reason a skipped lane has to be declared.
+test('the run-level probe record says whether they were enabled and how isolated', () => {
+  const { briefing } = build([review('auditor', [])], {
+    probes: probes([], { enabled: false, isolation: { sandbox: 'bwrap --unshare-net --' } }),
+  });
+  assert.deepEqual(briefing.probes, { enabled: false, isolation: { sandbox: 'bwrap --unshare-net --' } });
+});
+
+test('a probe attaches by lane and title, not by position', () => {
+  const { briefing } = build([
+    review('auditor', [finding({ title: 'first' }), finding({ title: 'second' })]),
+    review('steward', [finding({ title: 'second' })]),
+  ], { probes: probes([probeRecord({ persona: 'auditor', title: 'second' })]) });
+  const by = Object.fromEntries(briefing.findings.map((f) => [`${f.reporter}:${f.title}`, f.probeCheck]));
+  assert.equal(by['auditor:first'], undefined);
+  assert.equal(by['auditor:second'].confirmed, true);
+  assert.equal(by['steward:second'], undefined, 'a lane does not inherit another lane\'s probe');
+});
+
+// The commit the panel reviewed. Both the report and triage have to bind an
+// artifact to it, and `gate.head` is the commit the gate's own checks ran
+// against — the thing being checked, not the answer.
+test('the briefing records the head that was reviewed', () => {
+  const { briefing } = build([review('auditor', [])], { head: 'c'.repeat(40) });
+  assert.equal(briefing.head, 'c'.repeat(40));
+});

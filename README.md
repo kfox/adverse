@@ -30,7 +30,7 @@ $ adverse review ./src
 
 **Verdict:** SHIP-WITH-CAVEATS (3/4 ship, 1/4 block)
 **Findings:** 3 critical · 5 warning · 1 info
-**Open blocking:** 2 (cross-validated or consensus, not advisory, not info)
+**Open blocking:** 2 (demonstrated, cross-validated or consensus, not advisory, not info)
 
 ## Cross-validated findings (multiple reviewers reported independently)
 ### 🔴 [CRITICAL·defect] SQL injection in query builder — db.py:22
@@ -210,6 +210,11 @@ The **Steward** is this fork's addition, and it exists because code-versus-claim
 │  Each persona reviews the code with only its own lens.              │
 │  Output: { verdict, summary, findings[] }, each finding typed       │
 ├──────────────────────────────────────────────────────────────────────┤
+│  Probes — Deterministic                                 (no LLM)    │
+│  Re-run every reproduction a reviewer attached, each in a fresh     │
+│  detached worktree, and record the exit code. The reviewer          │
+│  proposes; the tool confirms. Optional, and off unless enabled.     │
+├──────────────────────────────────────────────────────────────────────┤
 │  Triage — Deterministic                                 (no LLM)    │
 │  Stable IDs · claim-check every cited file and line · flag          │
 │  under-anchored findings · cluster likely-duplicate reports ·       │
@@ -224,6 +229,7 @@ The **Steward** is this fork's addition, and it exists because code-versus-claim
 ├──────────────────────────────────────────────────────────────────────┤
 │  Synthesis — Deterministic                              (no LLM)    │
 │  Merge findings, score consensus, render report:                    │
+│    demonstrated    → a probe was re-run and the behavior occurred   │
 │    cross-validated → reported by ≥2 personas                        │
 │    consensus       → reported by 1, validated by another            │
 │    disputed        → reported by 1, challenged by another           │
@@ -255,6 +261,18 @@ Severity says how bad a finding is. It cannot say what would *settle* it, and th
 
 An unclassified or unrecognized kind **blocks**. Defaulting the other way would let a real finding escape the gate by arriving mislabeled.
 
+### A `behavioral` finding can be settled by running it
+
+`behavioral` is defined as a finding settled by executing the code *or* by an argument about execution, and for most of this fork's life it was always the second one. Nothing in the flow ever executed anything, so two lanes agreeing on a runtime claim was two arguments about runtime — and two reviewers can share a wrong model of runtime as easily as one can. The report could not tell that apart from two lanes reading the same line.
+
+A reviewer may now attach a **probe**: a script it wrote and ran, plus what it expected and what it saw. `probe.mjs` re-runs each one in a fresh detached worktree with a hard timeout, and records the exit code it collected itself. Exit 0 means the predicted behavior happened — a probe is written the way a failing test is. A reproduction the tool re-ran and watched succeed earns its finding `confidence: demonstrated`, which outranks `cross-validated` and can block on its own; that is the point, because it is a fact rather than a concurrence.
+
+The reviewer proposes and the tool confirms, which is the routing rule `regression.mjs` already applies to fix commits: the interested party must not be the one that confirms its own work. Nothing a payload writes can set `confirmed`, and a payload that tries is refused.
+
+Three constraints hold the rest of it up. **Declining is free** — a finding with no probe is judged exactly as it always was, because a reviewer that pays for saying "this does not reproduce cheaply" invents a probe instead, and a fabricated reproduction is worse than an honest argument. **A probe that ran and did not reproduce is annotated, never `DISPROVED`** — either the finding is wrong or the script is, nothing mechanical can tell those apart, and dropping the finding is the silent failure. And **nothing here moves an advisory kind**: a probe changes what a finding is worth, never what a lane is allowed to say.
+
+It runs untrusted code, so it is off unless two independent things say yes: `plan.json`'s probe policy, and an `--allow-execute` the operator passes after confirming a worktree can run anything at all. What is enforced is a per-probe worktree, a timeout, no stdin, a script path confined to its own reporter's directory, and scrubbed proxy variables. What is *not* enforced is the network — Node cannot unshare a namespace — so `--sandbox` takes whatever real containment the operator has, and the record says which was applied rather than claiming one that was not.
+
 ### Co-cited findings are aggregated into root causes, with the citations kept
 
 Four lanes looking at one defect report it four times — as a correctness bug, as an attack, as a stale contract, as a design smell. Triage already saw the relationship: in the run that motivated this, it reported **95 co-citation edges across 34 findings**. It just never closed it. So each finding was remediated, decided, and ledgered on its own, the fixer re-derived the shared cause by hand every time, and the report read as three times the actual defect count.
@@ -271,7 +289,7 @@ Grouping helps most where a handful of findings are tightly co-cited across two 
 
 ### The Skill can run as a convergence loop
 
-Review → fix → verify → repeat, stopping when **no blocking finding is left unsettled** — where settled means a decision was recorded on it, not that a reviewer felt good about it. Credibility (cross-validated or consensus) and cross-examination sort the remaining findings into what the loop *calls* them; they no longer decide whether it stops. That distinction is the fix for three separate leaks, each the same shape: a blocking finding that matched none of the categories the stop condition enumerated, and so converged the loop by being unclassifiable. Solo findings were dropped by the credibility gate; then a report-wide cross-examination flag disarmed the gate that replaced it; then a critical two reviewers found and one challenged fell between the two. Deriving the stop from what is unsettled — and reporting a bucket for anything unrecognized — closes the shape rather than the instance. Three pieces make that work, none of which puts a model in the loop:
+Review → fix → verify → repeat, stopping when **no blocking finding is left unsettled** — where settled means a decision was recorded on it, not that a reviewer felt good about it. Credibility (demonstrated, cross-validated or consensus) and cross-examination sort the remaining findings into what the loop *calls* them; they no longer decide whether it stops. That distinction is the fix for three separate leaks, each the same shape: a blocking finding that matched none of the categories the stop condition enumerated, and so converged the loop by being unclassifiable. Solo findings were dropped by the credibility gate; then a report-wide cross-examination flag disarmed the gate that replaced it; then a critical two reviewers found and one challenged fell between the two. Deriving the stop from what is unsettled — and reporting a bucket for anything unrecognized — closes the shape rather than the instance. Three pieces make that work, none of which puts a model in the loop:
 
 **A position tracer** ([`src/trace.mjs`](src/trace.mjs)). Between iterations the fix itself shifts every line below it, so `file:line` cannot answer "is F3 still open?". The approach is GitLab's, halved: their diff comments are addressed by a line code of `SHA1(path)` plus old and new line ([gitlab-foss!7298](https://gitlab.com/gitlab-org/gitlab-foss/-/merge_requests/7298)), which bakes position into identity — which is why their notes go "outdated" and why `PositionTracer` had to be built afterward. Keep the split between file identity and line position; drop the hash, which exists to be a DOM id and in a JSON ledger only makes the file unreadable. Hunk arithmetic over `git diff -U0` gives `touched` and `untouched`; the surrounding trace adds `unanchored`, `not-file-bound`, `file-only`, `file-gone`, `past-eof`, and `trace-failed`. The last two are split out on purpose: a projection that runs off the end of a file, and a git that could not answer at all, both used to be reported as `file-gone` — which reads as "the file was deleted", which reads as evidence of a fix.
 
@@ -318,6 +336,7 @@ src/                          # Shared core, used by both CLI and Skill
   briefing.mjs                # Assembles those into the round-2 prompt
   ledger.mjs                  # Adjudication log + the convergence stop condition
   decisions.mjs               # Fold fix-agent payloads into ledger decisions
+  probe.mjs                   # A reproduction a reviewer attached, and what re-running it found
   scope.mjs                   # Does this change have a trust boundary in it?
   regression.mjs              # Which lane asks what else a fix commit changed
   scaling.mjs                 # How much review does this change deserve? + reading a plan back
@@ -341,6 +360,7 @@ skills/adverse-review/
     validate.mjs              # Skill bridge: schema-check an agent-written round1/round2/verify/fix/regression payload
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
+    probe.mjs                 # Skill bridge: re-run each attached reproduction in a clean worktree
     plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap, depth
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
     verify.mjs                # Skill bridge: validate a verify payload, reshape for triage

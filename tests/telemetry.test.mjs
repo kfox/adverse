@@ -547,3 +547,95 @@ test('a --plan reaches the telemetry line end to end, depth and all', () => {
   assert.equal(record.plan.bucket, 'small');
   assert.deepEqual(record.plan.agents, { auditor: 1, steward: 1 });
 });
+
+// ---------------------------------------------------------------- probes
+
+const probeRow = (probes) => buildRunRecord({
+  syn: synthesize({ auditor: review('auditor', [finding()]) }),
+  round1: { auditor: review('auditor', [finding()]) },
+  probes,
+}).probes;
+
+test('a run with no probes records null, not a row of zeroes', () => {
+  assert.equal(probeRow(null), null);
+});
+
+// `enabled` is the denominator every other number here needs: zero probes on a
+// run that never enabled them is not the same data point as zero on a run that
+// did, and a row that could not tell them apart cannot answer the question it
+// exists for.
+test('the probe row separates "nothing ran" from "nothing was enabled"', () => {
+  assert.deepEqual(probeRow({ enabled: false, isolation: null, probes: [] }),
+    { enabled: false, attached: 0, ran: 0, confirmed: 0, contradicted: 0, sandboxed: false });
+  assert.deepEqual(probeRow({ enabled: true, isolation: null, probes: [] }),
+    { enabled: true, attached: 0, ran: 0, confirmed: 0, contradicted: 0, sandboxed: false });
+});
+
+test('the probe row counts what ran, what confirmed, and what contradicted', () => {
+  const p = (over) => ({ source: 'measured', confirmed: false, ...over });
+  const row = probeRow({
+    enabled: true,
+    isolation: { sandbox: 'bwrap --unshare-net --' },
+    probes: [p({ confirmed: true }), p({}), { source: 'declined', confirmed: false }],
+  });
+  assert.deepEqual(row,
+    { enabled: true, attached: 3, ran: 2, confirmed: 1, contradicted: 1, sandboxed: true });
+});
+
+// This file records counts and nothing else, so a reader can paste a line into
+// an issue while arguing about a threshold. A probe's script path and captured
+// output are the two strings most likely to carry something private.
+test('no probe path, output or reason survives into the line', () => {
+  const row = probeRow({
+    enabled: true,
+    isolation: { sandbox: null, worktree: 'detached, one per probe' },
+    probes: [{
+      persona: 'auditor',
+      title: 'SENTINEL-TITLE',
+      claim: { script: 'probes/SENTINEL-PATH.sh', expect: 'SENTINEL-EXPECT' },
+      source: 'measured',
+      status: 'not-reproduced',
+      ran: { exitCode: 1, output: 'SENTINEL-OUTPUT' },
+      confirmed: false,
+      why: 'SENTINEL-WHY',
+    }],
+  });
+  assert.doesNotMatch(JSON.stringify(row), /SENTINEL/);
+});
+
+test('a --probes file reaches the telemetry line end to end', () => {
+  // Through the real binary, for the reason the --plan test above gives: the
+  // row is assembled in telemetry.mjs but WIRED in cli.mjs, and a unit test on
+  // the assembler passes just as happily when the caller stops handing it one.
+  const dir = freshTmp();
+  const file = path.join(dir, 'runs.jsonl');
+  const probesPath = path.join(dir, 'probes.json');
+  writeFileSync(probesPath, JSON.stringify({
+    enabled: true,
+    head: null,
+    isolation: { sandbox: null },
+    probes: [{
+      persona: 'auditor',
+      agent: 'auditor',
+      title: finding().title,
+      claim: { script: 'p.sh', expect: 'e', observed: 'o', outcome: 'reproduced' },
+      source: 'measured',
+      status: 'reproduced',
+      ran: { exitCode: 0, durationMs: 1, output: '', failure: null },
+      confirmed: true,
+      why: '',
+    }],
+  }));
+
+  const r = runSynthesize(
+    ['--round1', round1File(dir), '--probes', probesPath, '--out', path.join(dir, 'r.md')],
+    { ADVERSE_TELEMETRY_FILE: file });
+
+  assert.equal(r.status, 0, r.stderr);
+  const record = JSON.parse(readFileSync(file, 'utf-8').trim());
+  assert.notEqual(record.probes, null, 'the probes file never reached the record');
+  assert.equal(record.probes.confirmed, 1);
+  // And the other half of the same wiring: the probe reached SYNTHESIS too, so
+  // the finding it belongs to carries the label it bought.
+  assert.equal(record.findings.byConfidence.demonstrated, 1);
+});
