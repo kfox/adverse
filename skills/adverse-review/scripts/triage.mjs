@@ -45,6 +45,7 @@ const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
 const { checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { buildBriefing } = await importFromSrc('briefing.mjs');
+const { worktreeDigest } = await importFromSrc('gate.mjs');
 const { checkRoster } = await importFromSrc('roster.mjs');
 const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, makeClaimChecker } =
   await importFromSrc('triage.mjs');
@@ -56,7 +57,7 @@ const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, makeClaimChecker } =
 // with strict parsing the second and later paths arrive as positionals. Node
 // then throws ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL and Phase 3 aborts before
 // any round-2 work happens. combine.mjs has always accepted them; so does this.
-const USAGE = 'Usage: triage.mjs --round1 a.json [--round1 b.json …] [--merge-personas <persona>]… [--plan plan.json] --repo <dir> [--base <ref>] [--gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>';
+const USAGE = 'Usage: triage.mjs --round1 a.json [--round1 b.json …] [--merge-personas <persona>]… [--plan plan.json] --repo <dir> [--base <ref>] [--gate-file <gate.json> | --gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>';
 
 const { values, positionals } = parseBridgeArgs({
   prefix: 'triage',
@@ -66,6 +67,7 @@ const { values, positionals } = parseBridgeArgs({
     repo:   { type: 'string' },
     base:   { type: 'string' },
     gate:   { type: 'string' },
+    'gate-file': { type: 'string' },
     ledger: { type: 'string' },
     out:    { type: 'string' },
     'merge-personas': { type: 'string', multiple: true },
@@ -162,9 +164,24 @@ if (values.ledger) {
   }
 }
 
+// Two gates would be two answers to "may reviewers suppress on this", and the
+// briefing carries one. Refuse rather than pick: an ambiguous suppression
+// channel is what this flag was added to remove.
+if (values.gate !== undefined && values['gate-file'] !== undefined) {
+  usage('triage: pass --gate-file or --gate, not both — they are two claims about one gate\n' + USAGE);
+}
+
+// A measured record if there is one; otherwise the legacy summary string, which
+// src/gate.mjs marks `asserted` and which therefore suppresses nothing.
+const gate = values['gate-file'] !== undefined
+  ? readJson(values['gate-file'], 'triage')
+  : (values.gate ?? null);
+
 const { briefing, stats } = buildBriefing(reviews, {
   base,
-  gate: values.gate ?? null,
+  head: resolveRef(repo, 'HEAD'),
+  worktree: worktreeDigest(repo),
+  gate,
   checkClaim,
   checkCounterpart,
   ledger,

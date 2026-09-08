@@ -126,11 +126,35 @@ run them before spending a single reviewer token. Two reasons:
   type-checker, linter, or test suite would already have caught are pure noise,
   and reviewers reliably produce them when they don't know the tools ran.
 
-Record a one-line summary — it rides into the briefing in Phase 3:
+**Run them with `gate.mjs`, and do not summarize them yourself.** Name each
+check; the bridge runs it, records its exit code, and binds the record to the
+commit it ran against:
 
 ```bash
-GATE="lint green · pyright/mypy clean · 1,412 tests pass (0 fail, 3 skip) · schema no drift"
+node ${SKILL_DIR}/scripts/gate.mjs --repo . \
+    --check 'lint=npm run lint' \
+    --check 'types=npx tsc --noEmit' \
+    --check 'test=npm test' \
+    --out "$ADVERSE_RUN/gate.json"
 ```
+
+Exit 1 means a check said no — that is the red gate above, so stop. Exit 0 with
+`status: partial` means a check could not be run: the panel may proceed, and the
+gate will suppress nothing.
+
+The reason this is a script and not a sentence is the same reason Phase 2 makes
+each reviewer write its own payload. `gate.json` is the only artifact in this
+flow whose job is to stop reviewers reporting things, and until it was measured
+it was a line the orchestrator typed from memory — which is green whether or not
+the checks ran, ran on this tree, or all passed. Only a gate that
+`triage.mjs` can re-bind to the reviewed HEAD is allowed to suppress anything
+(`verified: true`); every other state, a hand-written summary included, reaches
+reviewers as a claim and costs nothing but a few findings they already knew
+about. Never hand-write `gate.json`, and never describe a gate you did not run.
+
+`--gate "<summary>"` still exists for a repo whose checks cannot be scripted.
+It is honest and it is weak: it arrives as `source: "asserted"` and suppresses
+nothing, so use it to inform reviewers, never to quiet them.
 
 **Pin the base.** Every reviewer must read the same tree, and triage needs a
 stable ref for its in-diff classification:
@@ -254,8 +278,12 @@ one per persona — two for a lane the plan split. Each gets:
     $BASE..HEAD`) — commit messages are where this flow keeps rationale, so a
     decision explained there is documented;
   - the diffstat and file list from Phase 1;
-  - the gate summary `$GATE`, with the instruction **not** to report anything
-    those tools already prove;
+  - the gate: `gate.json`'s `summary`, and whether it is `verified`. Tell a
+    reviewer **not** to report what those tools already prove only when
+    `verified` is true. An unverified gate is passed along as context and
+    explicitly does not license silence — reviewers who suppress on an
+    unmeasured green produce a report with a hole in it that reads like a clean
+    lane;
   - the exact path to **write its own JSON object to** with the Write tool —
     `$ADVERSE_RUN/<agent>/round1-<agent>.json`, where `<agent>` is the persona
     (`-a`/`-b`-suffixed for a split lane's halves) — its own subdirectory, and
@@ -392,7 +420,7 @@ This is what makes round 2 cheap and what keeps cross-lane consensus alive:
 ```bash
 node ${SKILL_DIR}/scripts/triage.mjs \
     --round1 "$ADVERSE_RUN"/*/round1-*.json \
-    --repo . --base "$BASE" --gate "$GATE" \
+    --repo . --base "$BASE" --gate-file "$ADVERSE_RUN/gate.json" \
     ${LEDGER:+--ledger "$LEDGER"} \
     --plan "$ADVERSE_RUN/plan.json" \
     --out "$ADVERSE_RUN"/briefing.json
@@ -917,7 +945,7 @@ ledger, rather than only in conversation state.
 
 | Phase | Safe to compact | Why |
 |---|---|---|
-| 0 — scope, run dir, gate | At its end, before Phase 1 | Nothing has been spent yet; `$BASE` and `$GATE` are cheap to recompute if lost. |
+| 0 — scope, run dir, gate | At its end, before Phase 1 | Nothing has been spent yet; `$BASE` is cheap to recompute and the gate is a file (`gate.json`), not something to remember. |
 | 1 — file list & plan | Once `plan.json` is written | The plan is a file now, not a fact anyone has to remember. |
 | 2 — round 1 | **Never** until every persona's file passes `validate.mjs` | An unsaved or unvalidated reviewer payload is exactly the state a mid-phase compaction loses — a subagent still working has nothing durable yet. |
 | 3 — triage | Once `briefing.json` is written | Triage's whole output is a file; Phase 4 reads it, not the conversation. |
