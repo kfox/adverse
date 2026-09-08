@@ -313,7 +313,13 @@ const HAND_SPELLED_LANE_AGENT_RULE = [
 // `isLaneAgent(...)` used as a ternary CONDITION — the longhand form. A guard
 // that merely negates it, or a ternary that calls it in a branch, does not
 // match. src/personas.mjs is skipped: the one there is the implementation.
-const LONGHAND = /isLaneAgent\(.*\)\s*\?/;
+//
+// `?(?!?)`, because `??` is not a ternary: `find((p) => isLaneAgent(p, name))
+// ?? null` asks WHICH LANE a name belongs to and defaults to "none of them",
+// which is a different question from whose work an id names. Matching it sent
+// src/telemetry.mjs a message telling it to call `laneAgentOf` — advice that
+// would have made its answer wrong.
+const LONGHAND = /isLaneAgent\(.*\)\s*\?(?!\?)/;
 const SCANNED_DIRS = ['src', 'bin', 'skills/adverse-review/scripts'];
 
 function handSpelledLaneAgentRule() {
@@ -345,6 +351,9 @@ test('the longhand detector recognizes the shape, and not the guards beside it',
   assert.equal(
     LONGHAND.test('if (legal ? !legal.includes(agent) : !isLaneAgent(persona, agent)) {'), false,
     'a ternary that calls it in a BRANCH is not the rule written longhand');
+  assert.equal(
+    LONGHAND.test('return PERSONAS.find((p) => isLaneAgent(p, name)) ?? null;'), false,
+    'a nullish default on "which lane is this" is not the fallback rule');
 });
 
 test('no new module spells the lane-agent fallback by hand instead of calling laneAgentOf', () => {

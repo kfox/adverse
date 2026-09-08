@@ -17,6 +17,9 @@ import {
 import { AgentRunner, runParallel } from './runner.mjs';
 import { agentNames, parsePlan, runLanes } from './scaling.mjs';
 import { renderMarkdown, synthesize, toJsonReport } from './synthesis.mjs';
+import {
+  appendRunRecord, buildRunRecord, repoIdentity, telemetryDisabled, telemetryPath,
+} from './telemetry.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -45,6 +48,7 @@ Options for 'review':
   --single-round           Skip the cross-review round (faster, less rigorous).
   --save-artifacts <dir>   Save raw per-persona JSON for debugging.
   --verbose, -v            Log subprocess events to stderr.
+  --no-telemetry           Do not append this run's counts to runs.jsonl.
 
 Options for 'synthesize':
   --round1 <path>          Path to a JSON file: { "<persona>": <round1Payload>, … }.
@@ -61,6 +65,9 @@ Options for 'synthesize':
   --plan <path>            plan.mjs's plan.json. Every lane it ran must be
                            accounted for by a payload, --skipped, or --degraded,
                            or synthesize refuses. Optional.
+  --iteration <n>          Which convergence-loop iteration produced this run.
+                           Recorded in the telemetry line; changes nothing else.
+  --no-telemetry           Do not append this run's counts to runs.jsonl.
 
 Exit codes:
   0  approve / conditional / hold
@@ -68,8 +75,19 @@ Exit codes:
   2  bad arguments
   3  fewer than 2 reviewers produced valid output
 
+Telemetry:
+  Every run appends ONE line of counts — no titles, no prose, no paths — to
+  $XDG_CACHE_HOME/adverse/runs.jsonl (default ~/.cache/adverse/runs.jsonl): a
+  SINGLE file that every repository on this machine writes to, each line naming
+  its own repo, so the scaling policy can be tuned across many runs. Identity
+  comes from the working directory, so run this inside the repository under
+  review. Query it with jq -s.
+  See skills/adverse-review/references/telemetry.md.
+
 Environment:
-  ADVERSE_AGENT     Default value for --agent.
+  ADVERSE_AGENT           Default value for --agent.
+  ADVERSE_NO_TELEMETRY    Set to any value to write no telemetry at all.
+  ADVERSE_TELEMETRY_FILE  Write the telemetry line here instead of the default.
 `;
 
 function die(msg, code = 2) {
@@ -119,6 +137,7 @@ async function cmdReview(rest) {
       timeout:         { type: 'string' },
       'single-round':  { type: 'boolean' },
       'save-artifacts': { type: 'string' },
+      'no-telemetry':  { type: 'boolean' },
       verbose:         { type: 'boolean', short: 'v' },
       help:            { type: 'boolean', short: 'h' },
     },
@@ -142,10 +161,12 @@ async function cmdReview(rest) {
   // 1. Source collection
   logProgress('⏳ collecting source...');
   let block, files;
+  let repoDir = target;
   try {
     if (values.diff !== undefined) {
       const base = values.diff === '' ? null : values.diff;
       const dir = await import('node:fs').then((fs) => (fs.statSync(target).isDirectory() ? target : path.dirname(target)));
+      repoDir = dir;
       ({ block, files } = collectDiff(dir, base));
       logProgress(`   diff vs ${base ?? 'HEAD'} (${files.length} files)`);
     } else {
@@ -244,6 +265,7 @@ async function cmdReview(rest) {
   // 4. Synthesize and render
   logProgress('⏳ synthesizing...');
   const syn = synthesize(round1, round2, { failedPersonas: failed });
+  recordRun({ noTelemetry: values['no-telemetry'], cwd: repoDir, syn, round1, round2 });
   const md = renderMarkdown(syn);
 
   if (values.out) {
@@ -264,6 +286,19 @@ async function cmdReview(rest) {
   }
 
   return syn.consensusLabel.startsWith('BLOCK') ? 1 : 0;
+}
+
+// One appended line per run, and a run whose line could not be written still
+// publishes its report: this is an observation OF a review, not a claim about
+// one, so it must never be the thing that stops one. Said out loud rather than
+// swallowed, because a telemetry file that is quietly empty answers every
+// question it exists for with silence.
+function recordRun({ noTelemetry = false, cwd = process.cwd(), ...run }) {
+  if (noTelemetry || telemetryDisabled()) return;
+  const file = telemetryPath();
+  const result = appendRunRecord(
+    buildRunRecord({ ...run, identity: repoIdentity(cwd) }), file);
+  if (!result.ok) logProgress(`adverse: telemetry not written to ${file}: ${result.error}`);
 }
 
 function readJsonArg(file) {
@@ -288,6 +323,8 @@ async function cmdSynthesize(rest) {
       degraded:   { type: 'string', multiple: true },
       'round2-skipped': { type: 'string' },
       plan:       { type: 'string' },
+      iteration:  { type: 'string' },
+      'no-telemetry': { type: 'boolean' },
       help:       { type: 'boolean', short: 'h' },
     },
     strict: true,
@@ -339,10 +376,11 @@ async function cmdSynthesize(rest) {
   // looked". The set subtraction is arithmetic the orchestrator was trusted to
   // do by hand through --skipped/--degraded; with the plan on disk it is
   // checked instead.
-  if (values.plan) {
+  const plan = values.plan ? readJsonArg(values.plan) : null;
+  if (plan) {
     let planned;
     try {
-      planned = runLanes(parsePlan(readJsonArg(values.plan)).lanes);
+      planned = runLanes(parsePlan(plan).lanes);
     } catch (e) {
       die(`synthesize: --plan ${values.plan}: ${e.message}`);
     }
@@ -373,9 +411,25 @@ async function cmdSynthesize(rest) {
     die('synthesize: --round2-skipped requires a non-empty reason');
   }
 
+  // A loop iteration is a pass number or it is nothing. `--iteration $I` with an
+  // unset shell variable is the case this refuses, and it took two tries: an
+  // empty string is not NaN, it is `Number('') === 0`, so the first version
+  // recorded the missing value as pass zero — the same shape as the empty
+  // --round2-skipped below, which is a declaration wearing a value's clothes.
+  // Passes are counted from 1 (the ledger's `iterations.length + 1`).
+  const iteration = values.iteration === undefined ? null : Number(values.iteration.trim());
+  if (iteration !== null && !(Number.isInteger(iteration) && iteration >= 1)) {
+    die(`synthesize: --iteration must be a pass number of 1 or more, got`
+      + ` ${JSON.stringify(values.iteration)}`);
+  }
+
   const syn = synthesize(round1, round2, {
     skippedPersonas, failedPersonas, round2Skipped: values['round2-skipped'] ?? null,
     rootCauseGroups: briefing?.groups ?? [],
+  });
+  recordRun({
+    noTelemetry: values['no-telemetry'],
+    syn, round1, round2, briefing, plan, iteration, base: briefing?.base ?? null,
   });
   const md = renderMarkdown(syn);
 

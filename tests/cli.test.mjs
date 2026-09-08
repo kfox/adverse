@@ -31,9 +31,17 @@ function buildBuggyTarget() {
   return dir;
 }
 
+// ADVERSE_NO_TELEMETRY belongs on every spawn of the real CLI, not only on the
+// `npm test` script: `node --test tests/cli.test.mjs` bypasses the script, and
+// these tests then append to the developer's own ~/.cache/adverse/runs.jsonl.
+// tests/telemetry.test.mjs turns it back on where that is the subject.
 function runCli(args, opts = {}) {
   return spawnSync('node', [BIN, ...args], {
-    cwd: ROOT, encoding: 'utf-8', timeout: 60_000, ...opts,
+    cwd: ROOT,
+    encoding: 'utf-8',
+    timeout: 60_000,
+    ...opts,
+    env: { ...process.env, ADVERSE_NO_TELEMETRY: '1', ...(opts.env ?? {}) },
   });
 }
 
