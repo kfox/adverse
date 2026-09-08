@@ -119,6 +119,28 @@ paragraph is a reading of it.
 an unexplained decision cannot be reviewed later and is indistinguishable from
 an oversight.
 
+**A decision that matches nothing is recorded and named.** With `--report`
+given, `--record` checks each decision against the report's findings and the
+ledger's own entries, and **exits 1** — after writing — listing any that match
+neither, with what the report disagrees with each one about. This is the check
+for a failure that has no other symptom: a decision whose identity fields are
+subtly wrong is recorded, counted on the summary line, and settles nothing, so
+the finding it honestly decided is re-raised from scratch next iteration or
+holds the loop open until the cap.
+
+Exit 1 here is **not** a refusal. The batch is in the ledger and the counter has
+advanced, for the reason spelled out under Phase 8: a branch that does not
+record makes the cap unreachable and the loop non-terminating. Three ordinary
+things legitimately match no report finding — a `noted` item decided in a later
+iteration, a root-cause citation synthesis could not resolve, and any decision
+recorded without `--report` — and the first two are exempted by the ledger
+check rather than by refusing.
+
+The fix is upstream: pass `--report` to `decisions.mjs` and it corrects the
+fields off `report.json` before they ever reach a decision. A hand-written
+decision has to be corrected by hand and re-recorded as a second entry, which
+the ledger is designed for — entries are appended, never rewritten.
+
 **Work the confirmed root causes first, one decision each.** A group the report
 calls `confirmed` is one fix and one disposition covering N citations. Write it
 as one entry per citation, every entry carrying the same `disposition`,
@@ -210,13 +232,25 @@ Then check what landed and fold it, the same way round 1 is checked:
 node ${SKILL_DIR}/scripts/validate.mjs --phase fix "$ADVERSE_RUN"/*/fix-*.json
 
 node ${SKILL_DIR}/scripts/decisions.mjs --fix "$ADVERSE_RUN"/*/fix-*.json \
-    --out "$ADVERSE_RUN"/decisions.json
+    --report "$ADVERSE_RUN"/report.json --out "$ADVERSE_RUN"/decisions.json
 ```
 
 `decisions.mjs` folds every payload of this iteration into the `decisions.json`
 the `--record` command above reads — `fixed` and `declined` become decisions of
 those dispositions carrying the identity fields the payload already holds, so
 you never reassemble them by hand. Fold the whole iteration in one call.
+
+`--report` is what makes those fields the right ones. A fix agent copies its
+briefing entry verbatim, as `fix.txt` tells it to, and **the briefing is
+per-lane while the report is merged**: when two lanes report one title — the
+cross-validated case — synthesis promotes `kind`, `file`, `line` and
+`counterpart` from whichever lane supplied them, so the briefed entry can read
+`design` with no file where the report reads `defect` at `src/auth.py:88`. The
+ledger has to carry the report's copy, because a merged report is what every
+later pass matches against; without `--report` the decision matches nothing,
+settles nothing, and `converge.mjs --record --report` records it and names it
+at exit 1. Every field it corrects is printed, so the rewrite can be read back
+against the payload it came from.
 
 **An item a fix agent names but does not fix is a finding with no ID.** It is
 not in `report.json`, `--record` has nowhere to put it, and it exists only in

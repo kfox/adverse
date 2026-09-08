@@ -15,7 +15,7 @@ import path from 'node:path';
 import {
   DISPOSITIONS, SETTLING_SCORE, annotate, checkBinding, closureOf, convergenceStatus,
   emptyLedger, isSettled, loadLedger, matchFinding, normalizeTitle, recordDecisions,
-  saveLedger, scoreMatch, summarizeDispositions,
+  saveLedger, scoreMatch, summarizeDispositions, uncoveredDecisions,
 } from '../src/ledger.mjs';
 
 const finding = (over = {}) => ({
@@ -1366,4 +1366,82 @@ test('a foreign fix commit is a binding problem; no fix commit is not', () => {
 
   assert.deepEqual(checkBinding(ledgerWith(entry({ atCommit: 'reviewed' })), resolve), [],
     'an entry with no fix commit binds fine');
+});
+
+// --- why a decision matched nothing (kfox/adverse#58, item 1) ---------------
+
+test('a near miss elsewhere in the file cannot shadow the field that actually differs', () => {
+  // The order of the two questions is the whole test. A title-equal finding IS
+  // the finding the decision was taken on — `upsert` merges on a normalized
+  // title, so a report carries at most one — while a score-1 near miss is only
+  // the closest thing in the file. Asked the other way round, the decoy below
+  // wins and the operator is sent to fix a line number on a finding they never
+  // decided, while the counterpart that actually broke the match goes unnamed.
+  const decided = {
+    title: 'The docstring contradicts the code', kind: 'contract',
+    file: 'src/auth.py', line: 88, counterpart: null,
+    disposition: 'declined', reason: 'the doc is the stale half',
+  };
+  const report = {
+    findings: [
+      // The finding it was taken on: same title, one field off.
+      { ...finding({ title: 'The docstring contradicts the code', kind: 'contract',
+                     file: 'src/auth.py', line: 88, counterpart: 'README.md' }) },
+      // The decoy: a different contract finding in the same file, no line, so
+      // `scoreMatch` gives it score 1 rather than refusing it outright.
+      { ...finding({ title: 'A different contract claim', kind: 'contract',
+                     file: 'src/auth.py', line: null, counterpart: null }) },
+    ],
+  };
+
+  const [uncovered] = uncoveredDecisions([decided], report);
+  assert.match(uncovered.why, /the counterparts differ \(none here, README\.md in the report\)/);
+  assert.doesNotMatch(uncovered.why, /score 1/);
+});
+
+test('with no title in the report at all, the near miss is still what gets reported', () => {
+  // The fallback the reorder must not have removed: when nothing shares the
+  // title, the closest match is the only thing there is to say.
+  const decided = {
+    title: 'A title the report does not carry', kind: 'defect',
+    file: 'app.py', line: 20, severity: 'warning',
+    disposition: 'declined', reason: 'bounded upstream',
+  };
+  const [uncovered] = uncoveredDecisions([decided], { findings: [finding()] });
+  assert.match(uncovered.why, /matched at score 1 .*which annotates but does not settle/);
+});
+
+test('uncoveredDecisions refuses a file that is not a synthesis report', () => {
+  // Same rule as `recordDecisions`: "I could not find the findings" must not be
+  // spelled the way "there were none" is.
+  assert.throws(() => uncoveredDecisions([], { version: 1, entries: [] }),
+    /not a synthesis report/);
+  assert.deepEqual(uncoveredDecisions([], { findings: [] }), []);
+});
+
+test('a mis-anchored decision cannot exempt itself by having been recorded once', () => {
+  // The check names a decision, the finding it meant to answer never settles
+  // and so comes back, and the identical decision is recorded again. Keyed on
+  // ANY prior settling entry, the second recording was exempted BY THE FIRST —
+  // so the run went quiet from iteration 2 to the cap, which is the
+  // holds-open-with-no-symptom failure this check exists to catch, one
+  // iteration late. Only a `noted` entry vouches, because it is the one
+  // disposition minted for an item no report has seen.
+  const report = {
+    findings: [{
+      title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+      file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor'],
+    }],
+  };
+  const misAnchored = {
+    title: 'the guard is unreachable', kind: 'design', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null,
+    disposition: 'declined', reason: 'working as intended',
+  };
+
+  assert.equal(uncoveredDecisions([misAnchored], report).length, 1);
+  const ledger = recordDecisions(emptyLedger(), [misAnchored],
+    { atCommit: 'deadbee', report });
+  assert.equal(uncoveredDecisions([misAnchored], report, { ledger }).length, 1,
+    'recording a mistake does not make it right the second time');
 });

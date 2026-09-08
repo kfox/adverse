@@ -10,9 +10,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { NAMED_NOT_FIXED_DISPOSITION, foldFixPayloads } from '../src/decisions.mjs';
+import {
+  NAMED_NOT_FIXED_DISPOSITION, foldFixPayloads, reconciliations,
+} from '../src/decisions.mjs';
 import {
   DISPOSITIONS, convergenceStatus, emptyLedger, isSettled, matchFinding, recordDecisions,
+  uncoveredDecisions,
 } from '../src/ledger.mjs';
 
 const decision = (over = {}) => ({
@@ -234,4 +237,228 @@ test('recordDecisions accepts a folded batch whole', () => {
   const ledger = recordDecisions(emptyLedger(), decisions, { atCommit: 'deadbee' });
   assert.equal(ledger.entries.length, 3);
   assert.equal(ledger.iterations.at(-1).decided, 3);
+});
+
+test('a folded named-not-fixed item is exempt from the coverage check by construction', () => {
+  // The two halves of one fact, in the two modules that hold it. `--record`
+  // refuses a decision matching no finding in the report, and every entry this
+  // channel mints matches none: no lane reported the item, so the report has
+  // never seen it. If the disposition minted here and the one exempted there
+  // ever drift apart, every iteration that used this channel is refused and the
+  // loop stops dead — which is why neither file spells `noted` twice.
+  const decisions = foldFixPayloads([payload({
+    fixed: [], named_not_fixed: [namedItem(), namedItem({ title: 'a second footnote' })],
+  })]);
+  assert.equal(decisions.length, 2);
+  assert.deepEqual(uncoveredDecisions(decisions, { findings: [] }), []);
+});
+
+test('a folded fixed entry is NOT exempt — it asserts a change to something reported', () => {
+  // The discriminating half. An exemption that covered the whole fold would
+  // make the check unreachable from the loop's own path, which is the only
+  // path it runs on.
+  const [d] = foldFixPayloads([payload()]);
+  const [uncovered] = uncoveredDecisions([d], { findings: [] });
+  assert.equal(uncovered.disposition, 'fixed');
+  assert.match(uncovered.why, /no finding in the report carries this title/);
+});
+
+// --- the identity a decision carries is the REPORT's ------------------------
+//
+// A fix agent copies its briefing entry verbatim, because that is what
+// `fix.txt` tells it to do. The briefing is per-lane and the report is merged,
+// so the two disagree on exactly the fields `scoreMatch` guards, and it is the
+// report's copy the ledger has to carry — a merged report is what every later
+// pass matches against.
+
+const merged = {
+  findings: [{
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor', 'pragmatist'],
+  }],
+};
+
+// What the Pragmatist's lane wrote, before synthesis merged the Auditor's copy
+// over it: no file, and an advisory kind.
+const briefedByOneLane = decision({
+  kind: 'design', severity: 'warning', file: null, line: null,
+});
+
+test('a folded decision takes the report\'s identity where a lane merge moved it', () => {
+  const [d] = foldFixPayloads(
+    [payload({ fixed: [{ ...briefedByOneLane, commit: 'abc1234', mutations: [] }] })],
+    { report: merged });
+  assert.equal(d.kind, 'defect', 'an advisory kind here matches no blocking finding, ever');
+  assert.equal(d.file, 'src/auth.py');
+  assert.equal(d.line, 88);
+  // Severity is NOT corrected. `scoreMatch`'s title branch never reads it, so
+  // the match does not need it, and it is the one field here stated as a
+  // judgment rather than copied as an anchor.
+  assert.equal(d.severity, 'warning', "the operator's own severity, not the report's");
+  // The title is the binding, not a field to correct: it is what identifies the
+  // finding, and `upsert` merges on it so a report carries at most one.
+  assert.equal(d.title, 'the guard is unreachable');
+  assert.deepEqual(uncoveredDecisions([d], merged), [], 'and it now settles what it decided');
+});
+
+test('without a report the payload\'s own copy stands, and it matches nothing', () => {
+  // The measured cost of the old behavior, which is why the bridge warns when
+  // --report is absent rather than treating it as an ordinary option.
+  const [d] = foldFixPayloads(
+    [payload({ fixed: [{ ...briefedByOneLane, commit: 'abc1234', mutations: [] }] })]);
+  assert.equal(d.kind, 'design');
+  const [uncovered] = uncoveredDecisions([d], merged);
+  assert.match(uncovered.why, /the kinds differ \(design here, defect in the report\)/);
+});
+
+test('a named-not-fixed item is never reconciled — the report has never seen it', () => {
+  const [d] = foldFixPayloads(
+    [payload({ fixed: [], named_not_fixed: [namedItem()] })], { report: merged });
+  assert.equal(d.kind, 'behavioral', 'the agent\'s own classification, untouched');
+  assert.equal(d.file, 'src/budget.py');
+  assert.equal(d.severity, null, 'nobody triaged it, so it claims no severity');
+});
+
+test('reconciliations names every field it changed, so the rewrite is readable', () => {
+  const p = [payload({ fixed: [{ ...briefedByOneLane, commit: 'abc1234', mutations: [] }] })];
+  const [change] = reconciliations(p, merged);
+  assert.equal(change.bound, true);
+  assert.equal(change.agent, 'fix-auth-guard');
+  assert.deepEqual(change.fields.map((f) => f.field).sort(), ['file', 'kind', 'line']);
+  assert.deepEqual(change.fields.find((f) => f.field === 'kind'),
+    { field: 'kind', from: 'design', to: 'defect' });
+});
+
+test('an entry whose title is in no finding is named as unbound, not silently kept', () => {
+  // This is what `converge.mjs --record --report` is about to refuse. Naming it
+  // here is naming it at the earlier of the two moments the operator can act.
+  const p = [payload({ fixed: [{ ...decision({ title: 'a title nobody filed' }), commit: 'abc1234', mutations: [] }] })];
+  const [change] = reconciliations(p, merged);
+  assert.equal(change.bound, false);
+  assert.deepEqual(change.fields, []);
+});
+
+test('an unchanged entry is not reported as reconciled', () => {
+  // Otherwise every decision in an ordinary batch is listed as corrected, and a
+  // block that fires on every run is a block nobody reads.
+  const alreadyRight = decision({
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88,
+  });
+  const p = [payload({ fixed: [{ ...alreadyRight, commit: 'abc1234', mutations: [] }] })];
+  assert.deepEqual(reconciliations(p, merged), []);
+});
+
+test('the fold refuses a file that is not a synthesis report', () => {
+  assert.throws(() => foldFixPayloads([payload()], { report: { version: 1, entries: [] } }),
+    /not a synthesis report/);
+});
+
+test('a mis-copied title cannot move a decision onto the finding it names', () => {
+  // The transposition case, and the reason binding is not title-alone. A title
+  // IS the identity here, so a fix agent that copies the wrong one would have
+  // its decision rewritten onto the other finding and SETTLE it — turning the
+  // safe failure (matches nothing, comes back) into the unsafe one (a finding
+  // nobody examined, closed). A stated anchor that disagrees is the signal.
+  const report = {
+    findings: [
+      { title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+        file: 'src/a.c', line: 10, counterpart: null, reporters: ['auditor'] },
+      { title: 'the retry loop never exits', kind: 'defect', severity: 'critical',
+        file: 'src/b.c', line: 400, counterpart: null, reporters: ['adversary'] },
+    ],
+  };
+  // Decided at src/a.c:10; the title copied is the OTHER finding's.
+  const transposed = decision({
+    title: 'the retry loop never exits', file: 'src/a.c', line: 10,
+  });
+
+  const [d] = foldFixPayloads(
+    [payload({ fixed: [], declined: [transposed] })], { report });
+  assert.equal(d.file, 'src/a.c', 'the anchor the operator actually examined');
+  assert.equal(d.line, 10);
+  assert.deepEqual(reconciliations([payload({ fixed: [], declined: [transposed] })], report),
+    [{ agent: 'fix-auth-guard', title: 'the retry loop never exits', bound: false, fields: [] }]);
+
+  // And it is reported rather than silently settling the wrong finding.
+  const [uncovered] = uncoveredDecisions([d], report);
+  assert.ok(uncovered, 'a transposed title must not settle anything');
+});
+
+test('a null anchor is no claim, so the legitimate merge case still binds', () => {
+  // The discriminating half of the guard above. `upsert` fills `file`, `line`
+  // and `counterpart` from whichever lane supplied them and never overwrites a
+  // value another lane already stated — so a briefing entry's NULL anchor is
+  // the ordinary shape of the case this correction exists for.
+  const report = {
+    findings: [{
+      title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+      file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor', 'pragmatist'],
+    }],
+  };
+  const [d] = foldFixPayloads([payload({
+    fixed: [{ ...decision({ kind: 'design', file: null, line: null }), commit: 'abc1234', mutations: [] }],
+  })], { report });
+  assert.equal(d.kind, 'defect');
+  assert.equal(d.file, 'src/auth.py');
+  assert.equal(d.line, 88);
+});
+
+test('a decision already on record is covered even when the report has never seen it', () => {
+  // The `noted`-then-decided path, at the unit level: the ledger is consulted
+  // beside the report because a decision may be answering something already
+  // recorded rather than something the panel just filed.
+  const item = {
+    title: 'preflight_emu is not budgeted', kind: 'behavioral', severity: null,
+    file: 'src/budget.py', line: 41, counterpart: null,
+  };
+  const ledger = recordDecisions(emptyLedger(),
+    [{ ...item, disposition: 'noted', reason: 'out of scope' }], { atCommit: 'deadbee' });
+
+  const later = [{ ...item, disposition: 'declined', reason: 'budgeted upstream after all' }];
+  assert.deepEqual(uncoveredDecisions(later, { findings: [] }, { ledger }), []);
+  // Without the ledger it is uncovered, which is what makes the exemption real
+  // rather than the check being unable to see anything at all.
+  assert.equal(uncoveredDecisions(later, { findings: [] }).length, 1);
+});
+
+test('a line the merge moved does not refuse the correction it came for', () => {
+  // `scoreMatch`'s title branch never reads `line`, so a stale one cannot
+  // settle the wrong finding — and treating it as an anchor refused a match on
+  // title AND file, which both cried wolf and left the stale `kind` in the
+  // ledger, the one thing `--report` was added to correct.
+  const report = {
+    findings: [{
+      title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+      file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor', 'pragmatist'],
+    }],
+  };
+  const stale = decision({ kind: 'design', file: 'src/auth.py', line: 92 });
+  const payloads = [payload({ fixed: [], declined: [stale] })];
+
+  const [d] = foldFixPayloads(payloads, { report });
+  assert.equal(d.kind, 'defect', 'the correction this path exists to make');
+  assert.equal(d.line, 88);
+  assert.deepEqual(uncoveredDecisions([d], report), []);
+
+  const [change] = reconciliations(payloads, report);
+  assert.equal(change.bound, true);
+  assert.deepEqual(change.fields.map((f) => f.field).sort(), ['kind', 'line']);
+});
+
+test('a stated file that disagrees still refuses to bind', () => {
+  // The discriminating half: `file` stays an anchor because a stated one that
+  // differs can mean a different finding, and settling one nobody examined is
+  // the silent failure. Noisy over silent.
+  const report = {
+    findings: [{
+      title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+      file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor'],
+    }],
+  };
+  const elsewhere = decision({ kind: 'design', file: 'src/session.py', line: 12 });
+  const [d] = foldFixPayloads([payload({ fixed: [], declined: [elsewhere] })], { report });
+  assert.equal(d.file, 'src/session.py');
+  assert.equal(d.kind, 'design', 'nothing bound, so nothing was corrected');
+  assert.equal(uncoveredDecisions([d], report).length, 1);
 });

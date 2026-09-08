@@ -11,6 +11,12 @@
 // 2 = usage error, 3 = iteration cap reached with findings still open. 3 is
 // deliberately not 0 — a capped run is a stop, not a pass, and a loop that
 // exits clean on the cap would be lying about what it found.
+//
+// In --record mode the same three codes mean the record's own outcome: 0 =
+// recorded, 2 = nothing was written, 1 = recorded, and some of it settles
+// nothing (kfox/adverse#58, item 1). Exit 1 is NOT a refusal — the ledger has
+// the batch and the iteration counter has advanced, because a branch that does
+// not record makes the cap unreachable and the loop non-terminating.
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -19,8 +25,9 @@ import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
-  checkBinding, clipReason, convergenceStatus, emptyLedger, loadLedger, recordDecisions,
-  saveLedger, summarizeDispositions,
+  UNREPORTED_DISPOSITION, checkBinding, clipReason, convergenceStatus, emptyLedger,
+  loadLedger, recordDecisions, requireFindings, saveLedger, summarizeDispositions,
+  uncoveredDecisions,
 } = await importFromSrc('ledger.mjs');
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 
@@ -59,6 +66,15 @@ function digest(file) {
     return null;
   }
 }
+
+// Both modes below render strings out of JSON read off disk — untrusted files —
+// as PLAIN TEXT to stdout, which is what the Skill tells the orchestrating agent
+// to read and act on. `clipReason` bounds length and strips control bytes but
+// deliberately keeps newlines, because a `reason` is prose and JSON-escaping
+// contains it in briefing.json. Here there is no JSON to escape it: a newline
+// ends the line and the next one can look like the tool speaking. So every
+// interpolated value is also flattened to one line.
+const oneLine = (v) => clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
 
 const repo = values.repo ?? process.cwd();
 const head = values.head ?? 'HEAD';
@@ -118,6 +134,24 @@ if (values.record) {
       + '  cannot derive who must not run it.\n');
   }
 
+  // Computed BEFORE the write, because it is the report these decisions answer
+  // that says whether they can settle anything, and reported AFTER it, because
+  // the batch is recorded either way (kfox/adverse#58, item 1).
+  //
+  // Keyed on the FLAG, not on the parsed value: a report.json containing the
+  // literal `null` parses to null, which `report ?` and `recordDecisions`'
+  // `report !== null` both read as "no report was given" — so the run recorded
+  // a whole iteration with `reporters: []` on every entry, a real
+  // `reportDigest` beside them, and exit 0. That is the failure both of those
+  // guards exist to stop, spelled with a file instead of an argument.
+  let uncovered = [];
+  try {
+    if (values.report) uncovered = uncoveredDecisions(decisions, report, { ledger });
+  } catch (e) {
+    process.stderr.write(`converge: ${oneLine(values.report)}: ${e.message}\n`);
+    process.exit(2);
+  }
+
   let next;
   try {
     next = recordDecisions(ledger, decisions, { atCommit, reportDigest, report });
@@ -140,7 +174,30 @@ if (values.record) {
   process.stdout.write(
     `iteration ${iteration}: recorded ${decisions.length} decision(s) -> ${values.ledger}\n`
     + `  ${summarizeDispositions(decisions)}\n`);
-  process.exit(0);
+
+  // Its own block with its own heading, in the shape the other unskippable
+  // blocks in this tool use, because the whole point is that a decision
+  // settling nothing looks exactly like one that settled something.
+  if (uncovered.length) {
+    process.stderr.write(
+      // No `of ${decisions.length}`: the check skips `noted` decisions and
+      // ones already on record, so that denominator counts entries this line
+      // never examined and reads as a pass rate over the wrong batch.
+      `converge: SETTLES NOTHING — ${uncovered.length} decision(s) match no `
+      + `finding in ${oneLine(values.report)}, and none already recorded as `
+      + `${UNREPORTED_DISPOSITION}:\n`
+      + uncovered.map((u) => `  - [${oneLine(u.disposition)}] ${oneLine(u.title)}\n`
+                           + `      ${oneLine(u.why)}\n`).join('')
+      + '  Recorded anyway — only --record advances the iteration counter, and a\n'
+      + '  branch that does not record makes the cap unreachable. But each of these\n'
+      + '  decides nothing: the finding it answers is re-raised next iteration, or\n'
+      + '  holds the loop open until the cap. A decision settles a finding when its\n'
+      + '  title, kind and file are the report\'s — and for a contract finding, its\n'
+      + '  counterpart too. `decisions.mjs --report` corrects those off report.json\n'
+      + '  for a folded batch; a hand-written decision has to be corrected by hand,\n'
+      + '  and re-recorded as a second entry.\n');
+  }
+  process.exit(uncovered.length ? 1 : 0);
 }
 
 // --- status mode -------------------------------------------------------------
@@ -151,6 +208,17 @@ if (!values.report) {
 }
 
 const report = readJson(values.report, 'converge');
+
+// Same refusal record mode makes, in the same words. Without it a `report.json`
+// holding the literal `null` reached `convergenceStatus` and came back out as
+// `Cannot read properties of null (reading 'findings')` — the right exit code
+// attached to a sentence that names neither the file nor what is wrong with it.
+try {
+  requireFindings(report);
+} catch (e) {
+  process.stderr.write(`converge: ${oneLine(values.report)}: ${e.message}\n`);
+  process.exit(2);
+}
 
 // Positions in the ledger were recorded against the commit the decision was
 // made at; re-project each one to `head` before matching, or a fix that shifted
@@ -186,15 +254,6 @@ try {
   process.stderr.write(`converge: ${e.message}\n`);
   process.exit(2);
 }
-
-// Everything below renders strings out of report.json — an untrusted file read
-// off disk — as PLAIN TEXT to stdout, which is what the Skill tells the
-// orchestrating agent to read and act on. `clipReason` bounds length and strips
-// control bytes but deliberately keeps newlines, because a `reason` is prose
-// and JSON-escaping contains it in briefing.json. Here there is no JSON to
-// escape it: a newline ends the line and the next one can look like the tool
-// speaking. So every interpolated value is also flattened to one line.
-const oneLine = (v) => clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
 
 const list = (fs) => fs.map((f) => `    - [${oneLine(f.severity)}·${oneLine(f.kind)}] ${oneLine(f.title)}`
   + (f.file ? ` (${oneLine(f.file)}${f.line !== null && f.line !== undefined ? `:${oneLine(f.line)}` : ''})` : '')).join('\n');

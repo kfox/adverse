@@ -94,6 +94,16 @@ export function isSettled(disposition) {
   return SETTLED.has(disposition);
 }
 
+// The one disposition minted for an item the report never raised.
+//
+// Every other disposition answers a finding some lane filed, which is why
+// `uncoveredDecisions` reports one that matches nothing. This one matches
+// nothing BY DESIGN: src/decisions.mjs mints it for what a fix agent noticed
+// and no lane reported, and that channel exists precisely because the report
+// has never seen the item. Exported so that file states the fact once rather
+// than spelling `noted` a second time.
+export const UNREPORTED_DISPOSITION = 'noted';
+
 // One rendering of "what this batch decided", for every bridge that prints it.
 //
 // Both bridges hand-typed `fixed · declined · deferred` and both went stale the
@@ -627,6 +637,28 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
   });
 }
 
+// The report's findings, or a refusal naming what the file actually is.
+// Shared by every reader of a report so that "I could not find the findings"
+// cannot come to be spelled one way in one of them. Exported for
+// src/decisions.mjs, which reads a report for the same reason and had grown a
+// third hand-typed copy of this sentence.
+export function requireFindings(report) {
+  if (!Array.isArray(report?.findings)) {
+    throw new Error('report has no findings array; this is not a synthesis report');
+  }
+  return report.findings;
+}
+
+// The report findings a decision matches strongly enough to settle.
+//
+// Lifted out of `reportersOf`, which computed exactly this list and then kept
+// only the lanes off it. Both callers need the same bar for the same reason
+// spelled out below: under SETTLING_SCORE a match knows kind, file and that two
+// lines are close, and does not know the two findings are one.
+function settlingMatches(decision, findings) {
+  return findings.filter((f) => (scoreMatch(decision, f)?.score ?? 0) >= SETTLING_SCORE);
+}
+
 // The review lanes that reported the finding a decision answers, read off the
 // report that decision was recorded against.
 //
@@ -653,12 +685,137 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
 // reporter lists belong.
 function reportersOf(decision, findings) {
   const lanes = new Set();
-  for (const finding of findings) {
-    const m = scoreMatch(decision, finding);
-    if (!m || m.score < SETTLING_SCORE) continue;
+  for (const finding of settlingMatches(decision, findings)) {
     for (const lane of finding.reporters ?? []) lanes.add(lane);
   }
   return [...lanes].sort();
+}
+
+// Which of `scoreMatch`'s identity guards a title-equal pair fails.
+//
+// `counterpart` is named only for a `contract` decision, because that is the
+// only kind whose match depends on it — reporting it for a `defect` would send
+// an operator to edit a field that changes nothing.
+function identityGap(decision, finding) {
+  const pair = (a, b) => `(${a ?? 'none'} here, ${b ?? 'none'} in the report)`;
+  if ((decision.kind ?? null) !== (finding.kind ?? null)) {
+    return `the kinds differ ${pair(decision.kind, finding.kind)}`;
+  }
+  if ((decision.file ?? null) !== (finding.file ?? null)) {
+    return `the files differ ${pair(decision.file, finding.file)}`;
+  }
+  if (decision.kind === 'contract'
+      && (decision.counterpart ?? null) !== (finding.counterpart ?? null)) {
+    return `the counterparts differ ${pair(decision.counterpart, finding.counterpart)}`;
+  }
+  return 'they differ in a field this check does not compare';
+}
+
+// Why a decision matched nothing, in the terms its author has to act in.
+//
+// A bare "matched nothing" is not actionable, and the two bugs this check
+// exists to catch both produce a decision whose title IS in the report and
+// whose identity fields are one field off: `toNamedNotFixed` hardcoding
+// `counterpart: null` against `scoreMatch`'s contract guard, and that guard
+// testing counterpart presence rather than equality. Naming the field is the
+// difference between a refusal fixed in one edit and one that reads as the
+// tool being broken.
+// The title is asked FIRST, and the near-miss second. Both orders were written;
+// this one is right because a title-equal finding IS the finding the decision
+// was taken on — `upsert` merges on a normalized title, so a report carries at
+// most one — while a score-1 near-miss is only the closest thing in the file.
+// With the near-miss first, one unrelated contract finding elsewhere in the
+// same file (score 1, "no line on one side") shadowed the counterpart
+// diagnostic for the finding actually decided, and sent the operator to fix a
+// line number on a finding they never touched.
+function whyUncovered(decision, findings) {
+  const norm = normalizeTitle(decision.title);
+  const sameTitle = norm && findings.find((f) => normalizeTitle(f.title) === norm);
+  if (sameTitle) return `the report carries this title, but ${identityGap(decision, sameTitle)}`;
+
+  let best = null;
+  for (const finding of findings) {
+    const m = scoreMatch(decision, finding);
+    if (m && (!best || m.score > best.score)) best = m;
+  }
+  if (best) {
+    return `matched at score ${best.score} (${best.why}), which annotates but does not settle`;
+  }
+  return 'no finding in the report carries this title';
+}
+
+// Is this decision answering an item the ledger recorded as unreported?
+//
+// The one exemption `uncoveredDecisions` grants, and it is narrow on purpose.
+// Keyed on ANY prior settling entry, it exempted a mis-anchored decision with
+// its own first recording: iteration 1 named it, the finding it meant to
+// answer never settled and so came back, the identical decision was recorded
+// again, and from iteration 2 the run went quiet all the way to the cap.
+// Measured. That is exactly the holds-open-with-no-symptom failure this check
+// exists to catch, arriving one iteration late — and a loop iterates by
+// definition, so the second recording is the likely one.
+//
+// UNREPORTED_DISPOSITION is the one disposition minted for an item no report
+// has seen, which is what makes it the one that can vouch for another. Every
+// other entry is itself an answer to a finding, and an answer nothing matched
+// has no standing to excuse the next one.
+function onNotedRecord(ledger, decision) {
+  return (ledger.entries ?? []).some((entry) =>
+    entry.disposition === UNREPORTED_DISPOSITION
+    && (scoreMatch(entry, decision)?.score ?? 0) >= SETTLING_SCORE);
+}
+
+// Decisions that will settle nothing, because nothing they could be answering
+// matches them at SETTLING_SCORE (kfox/adverse#58, item 1).
+//
+// A decision whose identity fields are subtly wrong is recorded, matches
+// nothing, and settles nothing — so the finding it honestly decided is either
+// re-raised from scratch next iteration or holds the loop open until the cap.
+// Both failures are SILENT at the moment they are caused: the decision is in
+// the ledger, the summary counts it, and only the finding's stubborn
+// reappearance, iterations later, ever hints at it. This names it while its
+// author is still holding the report it was written against.
+//
+// REPORTED, never refused, and the batch is recorded either way. Three
+// documented paths produce a decision that legitimately matches no report
+// finding — a `noted` item decided in a later iteration, a root-cause citation
+// synthesis could not resolve, and any decision recorded against a report this
+// run was not given — and a check that stopped the write would freeze the
+// iteration counter on all three. `iterations` grows only under `--record`, so
+// a branch that does not record makes the cap unreachable and the loop
+// non-terminating; see references/convergence-loop.md. A decision matching
+// nothing never settles the WRONG finding, which is the failure worth a
+// refusal — it only fails to settle the right one.
+//
+// The ledger is consulted beside the report because a decision may be
+// answering something already on record rather than something the panel just
+// filed. That is the ordinary shape of deciding a `noted` item, which the loop
+// reference says still needs a decision and which is in no report by
+// construction. Only a `noted` entry vouches, for the reason `onNotedRecord`
+// gives: any-prior-match let a mistake exempt itself one iteration later.
+//
+// The whole report, never its `findings` array, for the reason `recordDecisions`
+// spells out: a caller doing the extraction itself spells "this is not a
+// report" as "I was given no report".
+export function uncoveredDecisions(decisions, report, { ledger = emptyLedger() } = {}) {
+  const findings = requireFindings(report);
+  const uncovered = [];
+  for (const d of decisions) {
+    // A disposition this vocabulary does not have is `recordDecisions`' refusal
+    // to make, and it makes it in one line naming the field. Reporting such a
+    // decision here instead would answer a question nobody asked — whether it
+    // matched a finding — about an entry that is not a decision yet.
+    if (!DISPOSITIONS.includes(d.disposition)) continue;
+    if (d.disposition === UNREPORTED_DISPOSITION) continue;
+    if (settlingMatches(d, findings).length) continue;
+    if (onNotedRecord(ledger, d)) continue;
+    uncovered.push({
+      title: clipReason(d.title ?? ''),
+      disposition: d.disposition ?? null,
+      why: clipReason(whyUncovered(d, findings)),
+    });
+  }
+  return uncovered;
 }
 
 // Add this iteration's decisions. Entries are appended, never rewritten: the
@@ -681,9 +838,7 @@ export function recordDecisions(ledger, decisions, {
   // briefing — would derive no lane for anything and record a whole iteration
   // whose fix commits can never say who must not review them. A genuinely
   // finding-less report writes `findings: []` and passes.
-  if (report !== null && !Array.isArray(report.findings)) {
-    throw new Error('report has no findings array; this is not a synthesis report');
-  }
+  if (report !== null) requireFindings(report);
 
   const next = { ...ledger, entries: [...(ledger.entries ?? [])] };
   for (const d of decisions) {

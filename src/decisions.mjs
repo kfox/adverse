@@ -26,6 +26,7 @@
 // from memory that had never been written to a file at all.
 
 import { refuseDirectRun } from './entryGuard.mjs';
+import { UNREPORTED_DISPOSITION, normalizeTitle, requireFindings } from './ledger.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -61,7 +62,12 @@ const namedItemId = (agent, n) => `NF-${agent}-${n}`;
 // What the channel is FOR survives unchanged, and it is why this file exists at
 // all: the item reaches the next iteration's briefing with the agent's own
 // reasoning attached, so nobody re-derives it. See `annotate`'s noted branch.
-export const NAMED_NOT_FIXED_DISPOSITION = 'noted';
+// Taken from src/ledger.mjs rather than spelled again, because the ledger has
+// to know the same fact from the other side: `uncoveredDecisions` reports a
+// decision matching no finding in the report, and every entry this file mints
+// matches none by design. Two spellings of one disposition is how the summary
+// line stopped counting `noted` at all.
+export const NAMED_NOT_FIXED_DISPOSITION = UNREPORTED_DISPOSITION;
 
 // `recordDecisions` throws on a decision with no reason, three frames
 // downstream, in a message that names the ledger rather than the payload that
@@ -82,20 +88,81 @@ function requireTitle(title, what) {
   return t;
 }
 
-// The identity fields `scoreMatch` reads next iteration. Copied straight
-// through: an entry written from a shorter example matches nothing, and the
-// finding it decided is re-raised from scratch on the next pass.
-function toDecision(d, disposition, agent) {
+// The identity fields `scoreMatch` reads next iteration, taken from the REPORT
+// where the report has this finding and from the payload where it does not.
+//
+// The payload's copy comes from the briefing, and the briefing is per-lane
+// while the report is merged — so the two legitimately disagree, and the ledger
+// has to carry the merged one because a merged report is what every later pass
+// matches against. `upsert` in src/synthesis.mjs promotes `kind`, `file`,
+// `line` and `counterpart` from whichever lane supplied them, so two lanes
+// reporting one title — the `cross-validated` case the whole design is built
+// around — produce a briefing entry reading `design`/no file and a report
+// finding reading `defect`/`src/auth.py`. Measured: a fix agent copying its
+// briefing entry verbatim, exactly as `fix.txt` tells it to, recorded a
+// decision that `scoreMatch` refused on kind before it looked at the title, so
+// the finding was re-raised from scratch every iteration and no honest decision
+// could ever settle it.
+//
+// A normalized title identifies a report finding uniquely — `upsert` merges on
+// exactly that key, so two findings sharing one are one finding — which is why
+// the title is the binding and the fields around it are what gets corrected.
+// `severity` is deliberately NOT among them. `scoreMatch`'s title branch never
+// reads it, so correcting it buys the match nothing — and it is the one field
+// here an operator states as a judgment rather than copies as an anchor, so
+// rewriting a `warning` into the report's `critical` would put a claim in the
+// ledger nobody made.
+function identityOf(d, finding) {
+  const source = finding ?? d;
+  return {
+    kind: source.kind ?? null,
+    file: source.file ?? null,
+    line: source.line ?? null,
+    counterpart: source.counterpart ?? null,
+  };
+}
+
+// Does every anchor this entry actually STATES agree with the report finding's?
+//
+// The guard against binding a decision onto the wrong finding. A title is the
+// identity here, so a mis-copied one — two entries transposed in a payload —
+// would otherwise have its decision silently MOVED onto the other finding and
+// settle it, turning the safe failure this whole file is about (matches
+// nothing, settles nothing, comes back) into the unsafe one (settles a finding
+// nobody examined). Measured before this guard: a `declined` on `src/a.c:10`
+// whose title was copied from the other finding was rewritten to `src/b.c:400`
+// and printed as settling it.
+//
+// A null on the payload's side is no claim, not a disagreement, which is what
+// makes the legitimate case still bind: `upsert` fills `file` and `counterpart`
+// from whichever lane supplied them and never overwrites a value another lane
+// already stated, so a briefing entry's stated anchor can only equal the
+// report's or belong to a different finding.
+//
+// The set is exactly what `scoreMatch` guards on beside `kind` — a stated
+// disagreement here is the only kind that could mean "different finding".
+// `kind` itself is excluded because it is what synthesis rewrites, promoting a
+// blocking kind over an advisory one and a classified one over UNCLASSIFIED:
+// treating it as an anchor would refuse the correction this whole path exists
+// to make. `line` is excluded because `scoreMatch`'s title branch never reads
+// it, so a stale one cannot settle the wrong finding — while including it
+// refused a title-and-file match over a line the merge had moved, which both
+// cried wolf and left the stale `kind` in the ledger. Measured.
+function anchorsAgree(d, finding) {
+  return ['file', 'counterpart'].every((field) => {
+    const claimed = d[field] ?? null;
+    return claimed === null || claimed === (finding[field] ?? null);
+  });
+}
+
+function toDecision(d, disposition, agent, finding = null) {
   const label = `${disposition} decision ${JSON.stringify(d?.title)} from ${agent}`;
   return {
     id: d.id ?? null,
     title: requireTitle(d.title, label),
-    kind: d.kind ?? null,
+    ...identityOf(d, finding),
     severity: d.severity ?? null,
     confidence: d.confidence ?? null,
-    file: d.file ?? null,
-    line: d.line ?? null,
-    counterpart: d.counterpart ?? null,
     disposition,
     reason: requireReason(d.reason, label),
     // The batch, and no claim about who reported anything. This label was
@@ -164,6 +231,21 @@ function toNamedNotFixed(item, agent, n) {
   };
 }
 
+// Look up a report finding by the one field that identifies it.
+//
+// Returns a function rather than the Map so the no-report case has one spelling
+// — every caller asks the same question and gets null — instead of each of them
+// deciding what an absent report means.
+function reportIndex(report) {
+  if (report === null || report === undefined) return () => null;
+  const byTitle = new Map();
+  for (const f of requireFindings(report)) byTitle.set(normalizeTitle(f.title), f);
+  return (d) => {
+    const f = byTitle.get(normalizeTitle(d.title)) ?? null;
+    return f && anchorsAgree(d, f) ? f : null;
+  };
+}
+
 function requireAgent(payload) {
   const agent = payload?.agent;
   if (typeof agent !== 'string' || !agent.trim()) {
@@ -180,15 +262,49 @@ function requireAgent(payload) {
 // validator must not be able to mint an entry that dies inside the ledger; that
 // is the failure the whole channel exists to stop, and it would arrive wearing
 // the ledger's name.
-export function foldFixPayloads(payloads) {
+export function foldFixPayloads(payloads, { report = null } = {}) {
+  const findingFor = reportIndex(report);
   const decisions = [];
   for (const payload of payloads) {
     const agent = requireAgent(payload);
-    for (const d of payload.fixed ?? []) decisions.push(toDecision(d, 'fixed', agent));
-    for (const d of payload.declined ?? []) decisions.push(toDecision(d, 'declined', agent));
+    for (const d of payload.fixed ?? []) {
+      decisions.push(toDecision(d, 'fixed', agent, findingFor(d)));
+    }
+    for (const d of payload.declined ?? []) {
+      decisions.push(toDecision(d, 'declined', agent, findingFor(d)));
+    }
+    // Never reconciled, because there is nothing to reconcile against: no lane
+    // reported these, so the report has never seen them. `reportIndex` would
+    // return null for every one of them anyway; saying so here is what stops a
+    // later reader assuming the omission was an oversight.
     (payload.named_not_fixed ?? []).forEach((item, i) => {
       decisions.push(toNamedNotFixed(item, agent, i + 1));
     });
   }
   return decisions;
+}
+
+// Which entries `foldFixPayloads` would correct against this report, and what
+// it would change. The bridge prints this: a fold that silently rewrites the
+// fields a fix agent supplied is a fold whose output nobody can read back
+// against the payload it came from.
+export function reconciliations(payloads, report) {
+  const findingFor = reportIndex(report);
+  const changes = [];
+  for (const payload of payloads) {
+    const agent = payload?.agent ?? null;
+    for (const d of [...(payload.fixed ?? []), ...(payload.declined ?? [])]) {
+      const finding = findingFor(d);
+      if (!finding) {
+        changes.push({ agent, title: d.title, bound: false, fields: [] });
+        continue;
+      }
+      const before = identityOf(d, null);
+      const after = identityOf(d, finding);
+      const fields = Object.keys(after).filter((k) => before[k] !== after[k])
+        .map((k) => ({ field: k, from: before[k], to: after[k] }));
+      if (fields.length) changes.push({ agent, title: d.title, bound: true, fields });
+    }
+  }
+  return changes;
 }

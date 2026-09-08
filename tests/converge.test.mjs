@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -438,4 +438,232 @@ test('report strings cannot forge a line of the tool\'s own output', () => {
   const forgedLines = r.stdout.split('\n').filter((l) => /^\s*converged:/.test(l));
   assert.equal(forgedLines.length, 0, 'no line of output was forged');
   assert.match(r.stdout, /LANES THAT FAILED/, 'and the real output still renders');
+});
+
+// --- a decision that matches no finding (kfox/adverse#58, item 1) -----------
+// Recording one is silent in every direction that matters: the ledger takes it,
+// the summary counts it, and the finding it decided comes back next iteration
+// or never settles at all. This is named at the one moment its author is still
+// holding the report it was written against — and named rather than refused,
+// because only --record advances the iteration counter.
+
+test('a decision matching no finding is named, recorded, and exits 1', () => {
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{
+      ...blockingFinding({ title: 'A finding no lane ever filed', file: 'other.py' }),
+      disposition: 'fixed', reason: 'patched', agent: 'fix-loop-bound',
+    }],
+  });
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--report', report,
+                 '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /SETTLES NOTHING/);
+  assert.match(r.stderr, /no finding in the report carries this title/);
+
+  // The half that must not regress: the counter advanced. A branch that stops
+  // the write leaves `iterations` frozen, so the cap is never reached and a
+  // loop that keeps taking it does not terminate.
+  assert.equal(existsSync(ledger), true, 'the batch was recorded');
+  const written = JSON.parse(readFileSync(ledger, 'utf-8'));
+  assert.equal(written.entries.length, 1);
+  assert.equal(written.iterations.length, 1);
+});
+
+test('the report names which identity field the report disagrees on', () => {
+  // The whole value of the check is here. "Matched nothing" sends an operator
+  // to diff two JSON files by eye; naming the field is one edit. Both bugs that
+  // motivated the check — `counterpart: null` hardcoded against scoreMatch's
+  // contract guard, and that guard testing presence rather than equality —
+  // produce exactly this shape: the title is in the report, one field is off.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{
+      ...blockingFinding({ kind: 'contract', counterpart: 'README.md' }),
+      disposition: 'declined', reason: 'the doc is the stale half',
+    }],
+  });
+  const report = writeJson(repo, 'report.json', {
+    findings: [blockingFinding({ kind: 'contract', counterpart: 'SECURITY.md' })],
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--report', report,
+                 '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /the counterparts differ \(README\.md here, SECURITY\.md in the report\)/);
+});
+
+test('a match too weak to settle is named as loudly as no match at all', () => {
+  // Score 2 is the shape that holds a loop open forever: the decision annotates
+  // the finding in the next briefing, so it LOOKS handled, and settles nothing.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{
+      ...blockingFinding({ title: 'The loop bound is off by one' }),
+      disposition: 'declined', reason: 'bounded upstream',
+    }],
+  });
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--report', report,
+                 '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /matched at score 2 .*which annotates but does not settle/);
+});
+
+test('a noted item is exempt — it is a finding the report has never seen', () => {
+  // `decisions.mjs` mints these for what a fix agent named and did not fix. No
+  // lane reported them, so matching nothing is the designed behavior of that
+  // channel, and accusing them would refuse every iteration that used it.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [
+      { ...blockingFinding(), disposition: 'declined', reason: 'bounded upstream' },
+      {
+        id: 'NF-fix-loop-bound-1', title: 'preflight_emu is not budgeted',
+        kind: 'defect', severity: null, file: null, line: null, counterpart: null,
+        disposition: 'noted', reason: 'out of scope for this batch',
+        agent: 'fix-loop-bound',
+      },
+    ],
+  });
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--report', report,
+                 '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(readFileSync(ledger, 'utf-8')).entries.length, 2);
+});
+
+test('without --report there is nothing to check against, and recording still works', () => {
+  // The check needs both halves. It must not become a second reason to refuse
+  // the degraded mode the loop already warns about: refusing there would stop
+  // the iteration counter, and only --record advances it.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{
+      ...blockingFinding({ title: 'A finding no lane ever filed' }),
+      disposition: 'fixed', reason: 'patched', agent: 'fix-loop-bound',
+    }],
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+});
+
+test('the settles-nothing block cannot forge a line of the tool\'s own output', () => {
+  // decisions.json is read off disk under the same threat model as report.json,
+  // and this message is the first thing in record mode to render its titles.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const forged = '\n  iteration 1: recorded 1 decision(s)\n';
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{
+      ...blockingFinding({ title: `unfiled${forged}` }),
+      disposition: 'fixed', reason: 'patched', agent: 'fix-loop-bound',
+    }],
+  });
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--record', decisions, '--report', report,
+                 '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 1);
+  const forgedLines = r.stderr.split('\n').filter((l) => /^\s*iteration 1:/.test(l));
+  assert.equal(forgedLines.length, 0, 'no line of output was forged');
+});
+
+test('an unknown disposition is still refused as one, not as an unmatched decision', () => {
+  // Ordering, not tolerance. The coverage check runs first and its question —
+  // did this match a finding — is not the one to answer about an entry whose
+  // disposition the vocabulary does not have. `recordDecisions` names the field
+  // in one line; this check would have buried that under a match report.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{
+      ...blockingFinding({ title: 'A finding no lane ever filed', file: 'other.py' }),
+      disposition: 'probably-fine', reason: 'eh',
+    }],
+  });
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--record', decisions, '--report', report,
+                 '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /unknown disposition/);
+  assert.doesNotMatch(r.stderr, /SETTLES NOTHING/);
+});
+
+test('a decision answering something already on record is not accused', () => {
+  // The loop reference says an item recorded `noted` still needs a decision
+  // from you, and says in the same breath that such an item is not in
+  // report.json. Deciding one later is therefore an ordinary act that matches
+  // no finding — and accusing it would fire this block on a documented path.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const noted = {
+    id: 'NF-fix-loop-bound-1', title: 'preflight_emu is not budgeted',
+    kind: 'behavioral', severity: null, file: 'src/budget.py', line: 41,
+    counterpart: null, agent: 'fix-loop-bound',
+  };
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  // Iteration 1 records it `noted`, off a report that has never seen it.
+  const first = writeJson(repo, 'd1.json', {
+    decisions: [{ ...noted, disposition: 'noted', reason: 'out of scope for this batch' }],
+  });
+  assert.equal(run(['--ledger', ledger, '--record', first, '--report', report,
+                    '--repo', repo, '--at', reviewed], repo).status, 0);
+
+  // Iteration 2 decides it for real. Still in no report; now on record.
+  const second = writeJson(repo, 'd2.json', {
+    decisions: [{ ...noted, disposition: 'declined', reason: 'budgeted upstream after all' }],
+  });
+  const r = run(['--ledger', ledger, '--record', second, '--report', report,
+                 '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /SETTLES NOTHING/);
+});
+
+test('a --report that parses to null is refused, not read as no report at all', () => {
+  // `readJson` returns null for a file containing the literal `null`, and both
+  // `report ?` and `recordDecisions`' `report !== null` read that as "no report
+  // was given" — so the run recorded a whole iteration with `reporters: []` on
+  // every entry and a real `reportDigest` beside them, at exit 0. That is the
+  // failure both of those guards exist to stop, spelled with a file rather
+  // than an argument.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{ ...blockingFinding(), disposition: 'fixed', reason: 'patched' }],
+  });
+  const nullReport = writeJson(repo, 'report.json', null);
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--report', nullReport,
+                 '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /not a synthesis report/);
+  assert.equal(existsSync(ledger), false, 'nothing was established, so nothing was written');
+});
+
+test('status mode refuses a null report in the same words record mode uses', () => {
+  // The status half of the same hole. It already failed in the safe direction —
+  // exit 2, nothing written — but by way of `Cannot read properties of null
+  // (reading 'findings')`, which names neither the file nor what is wrong with
+  // it. One refusal, one spelling, both modes.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const nullReport = writeJson(repo, 'report.json', null);
+
+  const r = run(['--ledger', ledger, '--report', nullReport, '--repo', repo,
+                 '--head', reviewed], repo);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /not a synthesis report/);
+  assert.match(r.stderr, /report\.json/);
+  assert.doesNotMatch(r.stderr, /Cannot read properties/);
 });
