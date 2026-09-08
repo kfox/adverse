@@ -14,10 +14,11 @@ import assert from 'node:assert/strict';
 
 import { DEFAULT_PERSONAS } from '../src/personas.mjs';
 import {
-  DEFAULT_MAX_ITERATIONS, DELETED_LINES_ADVERSARY_FLOOR, ESCALATED_MAX_ITERATIONS,
+  DEFAULT_DEPTH, DEFAULT_MAX_ITERATIONS, DELETED_LINES_ADVERSARY_FLOOR, DEPTHS,
+  ESCALATED_MAX_ITERATIONS,
   LARGE_MIN_CHANGED_LINES, LARGE_MIN_FILES, SMALL_MAX_CHANGED_LINES, SMALL_MAX_FILES,
-  MAX_SPLIT_AGENTS, SPLIT_AGENTS, agentNames, diffSize, escalate, parseNumstat, parsePlan, planReview,
-  runLanes, sizeSkippable, skippedLanes, splitLanes,
+  MAX_SPLIT_AGENTS, SPLIT_AGENTS, agentNames, diffSize, escalate, parseDepth, parseNumstat,
+  parsePlan, planReview, runLanes, sizeSkippable, skippedLanes, splitLanes,
 } from '../src/scaling.mjs';
 
 const filesOf = (n) => Array.from({ length: n }, (_, i) => `src/render/mod${i}.mjs`);
@@ -492,4 +493,147 @@ test('size-skippability is the advisory-only question, asked of the registry', (
   // it is recorded here rather than fixed, and the assertion is deliberately
   // about the helper alone.
   assert.equal(sizeSkippable('nobody', { personas: registry }), false);
+});
+
+
+// --- depth: the one input that comes from the user, not the diff ----------------
+//
+// The properties that matter are mostly NEGATIVE. `depth` exists so an
+// appetite for speed stops being prose applied from memory at three points in
+// a long file — but the two economies a hurried operator reaches for first,
+// dropping round 2 and lowering the iteration cap, are the two this module
+// already refuses on grounds that speed does not answer. So the tests that
+// earn their place are the ones asserting `cheap` did NOT get them, and that
+// whatever depth did is legible afterward rather than inferable only from a
+// lane that quietly did not run.
+
+const mediumFiles = filesOf(8);
+const mediumPlan = (over = {}) => planReview({
+  files: mediumFiles,
+  numstat: evenNumstat(mediumFiles, 200),
+  diff: '',
+  ...over,
+});
+
+test('an absent depth is the default, and every named depth round-trips', () => {
+  assert.equal(parseDepth(undefined), DEFAULT_DEPTH);
+  assert.ok(DEPTHS.includes(DEFAULT_DEPTH));
+  for (const d of DEPTHS) assert.equal(parseDepth(d), d);
+});
+
+test('a depth that is present and unrecognized throws rather than defaulting', () => {
+  // Defaulting it would plan a standard run AND record one, which is the
+  // silence this field exists to remove: the report would then claim a depth
+  // nobody chose. `null` is present-and-wrong, not absent.
+  for (const bad of [null, '', 'default', 'THOROUGH', 'fast', 2, {}]) {
+    assert.throws(() => parseDepth(bad), /unknown depth/, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test('the plan records the depth it was planned at, defaulting to the default', () => {
+  assert.equal(smallPlan().depth, DEFAULT_DEPTH);
+  for (const d of DEPTHS) assert.equal(smallPlan({ depth: d }).depth, d);
+});
+
+test('thorough un-skips the advisory-only lane on a small diff', () => {
+  assert.equal(lane(smallPlan(), 'pragmatist').run, false);
+  const plan = smallPlan({ depth: 'thorough' });
+  assert.equal(lane(plan, 'pragmatist').run, true);
+  assert.equal(lane(plan, 'pragmatist').agents, 1);
+});
+
+test('thorough runs the adversary even where the trust-boundary gate found nothing', () => {
+  // The gate is not size-based, so a depth that only widened the size buckets
+  // would leave the one lane whose absence an attacker most wants unrun.
+  assert.equal(lane(smallPlan(), 'adversary').run, false);
+  const plan = smallPlan({ depth: 'thorough' });
+  assert.equal(lane(plan, 'adversary').run, true);
+  assert.match(lane(plan, 'adversary').reason, /thorough/);
+});
+
+test('thorough runs every lane in the registry', () => {
+  for (const l of smallPlan({ depth: 'thorough' }).lanes) {
+    assert.equal(l.run, true, l.persona);
+    assert.ok(l.agents >= 1, l.persona);
+  }
+});
+
+test('cheap drops the advisory-only lane one bucket earlier, and no further', () => {
+  assert.equal(lane(mediumPlan(), 'pragmatist').run, true);
+  assert.equal(lane(mediumPlan({ depth: 'cheap' }), 'pragmatist').run, false);
+  // Large is where a design reviewer earns the most, so the economy stops.
+  assert.equal(lane(planReview({
+    files: largeFiles, numstat: evenNumstat(largeFiles, 100), diff: '', depth: 'cheap',
+  }), 'pragmatist').run, true);
+});
+
+test('no depth can drop a lane that reports a blocking kind', () => {
+  // The economy is bounded by `sizeSkippable`, not by depth: skipping an
+  // advisory-only lane costs a backlog item and a potential second reporter.
+  // Skipping the Auditor or the Steward costs a finding that could block.
+  for (const depth of DEPTHS) {
+    for (const plan of [smallPlan({ depth }), mediumPlan({ depth })]) {
+      assert.equal(lane(plan, 'auditor').run, true, `${depth} auditor`);
+      assert.equal(lane(plan, 'steward').run, true, `${depth} steward`);
+    }
+  }
+});
+
+test('cheap moves neither the rounds nor the iteration cap', () => {
+  // The whole reason depth is a weak dial. A pre-flight round-2 skip leaves a
+  // small diff structurally unable to produce a blocking finding (a solo
+  // finding never blocks), and lowering the cap can only manufacture false
+  // exit-3 stops. Round 2 is still dropped after round 1 by `escalate`, when
+  // round 1 has earned it.
+  const cheap = mediumPlan({ depth: 'cheap' });
+  assert.equal(cheap.rounds, mediumPlan().rounds);
+  assert.equal(cheap.rounds, 2);
+  assert.equal(cheap.maxIterations, DEFAULT_MAX_ITERATIONS);
+});
+
+test('thorough moves neither the rounds nor the iteration cap either', () => {
+  // The cap is re-decided at Phase 4 from what round 1 actually found
+  // (`escalate` raises it on a critical), which is criticality, not appetite.
+  // A plan that raised it here would be lowered back by that same call.
+  const thorough = mediumPlan({ depth: 'thorough' });
+  assert.equal(thorough.rounds, 2);
+  assert.equal(thorough.maxIterations, DEFAULT_MAX_ITERATIONS);
+  assert.notEqual(DEFAULT_MAX_ITERATIONS, ESCALATED_MAX_ITERATIONS);
+});
+
+test('a depth that reduced the review says so in the plan reasons', () => {
+  // The declaration is the point. A lane that quietly did not run is the
+  // failure this whole module is written against, and `cheap` is the only
+  // input that can cause one without the diff having asked for it.
+  assert.ok(mediumPlan({ depth: 'cheap' }).reasons.some((r) => r.startsWith('depth cheap')));
+  assert.ok(smallPlan({ depth: 'thorough' }).reasons.some((r) => r.startsWith('depth thorough')));
+  assert.deepEqual(mediumPlan().reasons.filter((r) => r.startsWith('depth ')), []);
+});
+
+test('a pin overrides cheap, exactly as it overrides a small bucket', () => {
+  const plan = mediumPlan({ depth: 'cheap', pins: ['render/mod2'] });
+  assert.equal(plan.pinned.length, 1);
+  for (const l of plan.lanes) assert.equal(l.run, true, l.persona);
+});
+
+test('the tier recommendation is three-state — null is not false', () => {
+  // `false` says the default tier stands; `null` says depth made no claim and
+  // the orchestrator's own judgment is untouched. Collapsing them would turn
+  // every unspecified run into an explicit refusal to escalate.
+  assert.equal(smallPlan({ depth: 'thorough' }).tier.escalate, true);
+  assert.equal(smallPlan({ depth: 'cheap' }).tier.escalate, false);
+  assert.equal(smallPlan().tier.escalate, null);
+  for (const d of DEPTHS) assert.equal(typeof smallPlan({ depth: d }).tier.reason, 'string');
+});
+
+test('parsePlan reads a depth back, defaults an absent one, and refuses a wrong one', () => {
+  const lanes = [{ persona: 'auditor', run: true, agents: 1 }];
+  assert.equal(parsePlan({ lanes }).depth, DEFAULT_DEPTH);
+  assert.equal(parsePlan({ lanes, depth: 'cheap' }).depth, 'cheap');
+  assert.throws(() => parsePlan({ lanes, depth: 'quick' }), /unknown depth/);
+});
+
+test('a plan round-trips its depth through JSON, which is how the report gets it', () => {
+  const plan = mediumPlan({ depth: 'cheap' });
+  assert.equal(parsePlan(JSON.parse(JSON.stringify(plan))).depth, 'cheap');
 });

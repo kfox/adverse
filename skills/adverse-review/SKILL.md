@@ -180,6 +180,13 @@ node ${SKILL_DIR}/scripts/plan.mjs --repo . --base "$BASE" --json \
 node ${SKILL_DIR}/scripts/plan.mjs --repo . --base "$BASE"
 ```
 
+**If the user asked for more or less review than usual, that goes here**, as
+`--depth thorough` or `--depth cheap`, and nowhere else. It is the one input
+the diff cannot supply, it is easy to forget by Phase 4, and a run planned at a
+depth nobody recorded renders exactly like a run at the default one. Pass it
+once and every later decision reads `plan.json` instead of your memory of what
+the user said.
+
 `plan.json` is the run's manifest: the worktree loop below, Phase 4's expected
 roster, and the split-lane bookkeeping all read it, so the plan's decisions
 travel as data instead of prose someone retypes.
@@ -214,8 +221,9 @@ that must not get the cheap pass.
 
 The plan is a **budget policy, not a judgment**, and it is biased toward
 running: a false positive costs model calls, a false negative ships a problem
-nobody looked for. Skip a lane only when the plan says skip AND the user has
-not asked for a thorough pass. Every skipped lane must be **said out loud** and
+nobody looked for. Skip a lane only when the plan says skip — a thorough pass
+is `--depth thorough` above, which un-skips the lanes itself, so there is
+nothing to remember here. Every skipped lane must be **said out loud** and
 passed to the synthesizer in Phase 6 — a lane that was skipped and not
 mentioned reads exactly like a lane that looked and found nothing.
 
@@ -288,10 +296,11 @@ one per persona — two for a lane the plan split. Each gets:
     `$ADVERSE_RUN/<agent>/round1-<agent>.json`, where `<agent>` is the persona
     (`-a`/`-b`-suffixed for a split lane's halves) — its own subdirectory, and
     not a reply with the JSON in chat. The Write tool creates the directory.
-- **Model**: `sonnet` by default. Escalate the panel to a higher tier when the
-  review warrants it — that is your judgment call, and the diff makes the case:
-  pinned paths, credential or sandbox handling, subtle concurrency, a change
-  whose failure ships something. The user's explicit choice wins over both.
+- **Model**: `sonnet` by default. `plan.json`'s `tier.escalate` carries the
+  user's own answer: `true` means escalate the panel, `false` means the default
+  tier stands, and `null` means depth made no claim and the call is yours — the
+  diff makes the case, and it is pinned paths, credential or sandbox handling,
+  subtle concurrency, a change whose failure ships something.
   Whatever the tier, pass the SAME model to every persona — mixing models
   across personas defeats the single-model design. That rule is about the
   panel, whose whole method is one model wearing four lenses. The roles outside
@@ -495,9 +504,12 @@ One dial moves, deterministically:
 see [references/convergence-loop.md](references/convergence-loop.md).)
 
 
-If `$ROUNDS` is 1, phases 4–5 collapse the same way the "faster review" path
-does — but the skip rides into the report via `--round2-skipped`. Otherwise:
-for each **round-1 agent** that produced a valid review **except the
+If `$ROUNDS` is 1, phases 4–5 collapse, and the skip rides into the report via
+`--round2-skipped`. That is the **only** way round 2 is dropped: it is earned
+by a round 1 that found nothing blocking, never asked for up front. A
+pre-flight skip would leave a small diff structurally unable to produce a
+blocking finding at all, which is why `--depth cheap` does not touch rounds.
+Otherwise: for each **round-1 agent** that produced a valid review **except the
 Pragmatist's**, spawn a subagent with the same persona system prompt and:
 
 1. `${SKILL_DIR}/scripts/prompts/round2.txt`
@@ -565,8 +577,9 @@ the orchestrator does not retype it. Validate before repair:
 node ${SKILL_DIR}/scripts/validate.mjs --phase round2 "$ADVERSE_RUN"/*/round2-*.json
 ```
 
-If the user asked for a faster review, skip phases 4–5. The synthesizer treats
-a missing round 2 as an empty cross-review.
+The synthesizer treats a missing round 2 as an empty cross-review — which is
+why a round 2 that did not run is declared with `--round2-skipped` rather than
+simply left out.
 
 ## Phase 5 — repair, then combine
 
@@ -634,6 +647,8 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     #   --skipped pragmatist="small diff; design findings are advisory"
     # and, when Phase 4 skipped round 2:
     #   --round2-skipped "$R2_REASON"
+    # --plan also carries the run's depth into the report header, so a run
+    # planned `cheap` cannot render like one planned at the default.
     # --plan makes the skipped-lane accounting arithmetic: a lane the plan ran
     # that has no payload and no --skipped/--degraded refuses the synthesis,
     # because its silence otherwise reads as a clean review.
@@ -956,7 +971,7 @@ ledger, rather than only in conversation state.
 | Phase | Safe to compact | Why |
 |---|---|---|
 | 0 — scope, run dir, gate | At its end, before Phase 1 | Nothing has been spent yet; `$BASE` is cheap to recompute and the gate is a file (`gate.json`), not something to remember. |
-| 1 — file list & plan | Once `plan.json` is written | The plan is a file now, not a fact anyone has to remember. |
+| 1 — file list & plan | Once `plan.json` is written | The plan is a file now, not a fact anyone has to remember — including `--depth`, which came from something the user said and would otherwise have to survive as conversation. |
 | 2 — round 1 | **Never** until every persona's file passes `validate.mjs` | An unsaved or unvalidated reviewer payload is exactly the state a mid-phase compaction loses — a subagent still working has nothing durable yet. |
 | 3 — triage | Once `briefing.json` is written | Triage's whole output is a file; Phase 4 reads it, not the conversation. |
 | 4 — round 2 | **Never** until every `round2-<agent>.json` passes `validate.mjs` — both halves of a split lane, not one file per persona, and never between triage and synthesize | Same unsaved-payload risk as Phase 2, plus `$ROUNDS`/`$CAP`/`$R2_REASON` exist only as shell variables until Phase 6 writes the report that carries them forward. |

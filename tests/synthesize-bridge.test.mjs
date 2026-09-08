@@ -103,3 +103,85 @@ test('the bridge and `adverse synthesize` produce byte-identical reports — the
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+// --- the plan-to-report link: depth travels as data, not as memory -------------
+
+function planFile(dir, depth) {
+  const p = path.join(dir, 'plan.json');
+  const plan = {
+    lanes: [
+      { persona: 'auditor', run: true, agents: 1 },
+      { persona: 'steward', run: true, agents: 1 },
+    ],
+  };
+  if (depth !== undefined) plan.depth = depth;
+  writeFileSync(p, JSON.stringify(plan));
+  return p;
+}
+
+test('--plan carries the run depth into the report header', () => {
+  // One channel, not two: the orchestrator already passes --plan for the
+  // roster check, and a second --depth flag would be a second claim about one
+  // run — the ambiguity triage.mjs refuses for the gate.
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-depth-'));
+  try {
+    const out = path.join(dir, 'r.md');
+    const r = runSynth(['--round1', round1File(dir), '--plan', planFile(dir, 'cheap'), '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(readFileSync(out, 'utf-8'), /Planned depth: `cheap`/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a plan.json with no depth renders no depth claim, and neither does no plan at all', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-nodepth-'));
+  try {
+    const withPlan = path.join(dir, 'a.md');
+    assert.equal(runSynth(['--round1', round1File(dir), '--plan', planFile(dir), '--out', withPlan]).status, 0);
+    assert.doesNotMatch(readFileSync(withPlan, 'utf-8'), /Planned depth/);
+
+    const noPlan = path.join(dir, 'b.md');
+    assert.equal(runSynth(['--round1', round1File(dir), '--out', noPlan]).status, 0);
+    assert.doesNotMatch(readFileSync(noPlan, 'utf-8'), /Planned depth/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a plan.json naming a depth that is not one refuses the synthesis', () => {
+  // Exit rather than default. The report's claim about how much looking
+  // happened is only worth making if a depth nobody chose cannot produce one.
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-baddepth-'));
+  try {
+    const r = runSynth(['--round1', round1File(dir), '--plan', planFile(dir, 'quick'),
+      '--out', path.join(dir, 'r.md')]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /unknown depth "quick"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the roster check still fires when a plan also carries a depth', () => {
+  // Reading the plan once for two answers must not lose either of them: the
+  // unaccounted-lane refusal is the older and the more load-bearing.
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-synth-both-'));
+  try {
+    const p = path.join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({
+      depth: 'thorough',
+      lanes: [
+        { persona: 'auditor', run: true, agents: 1 },
+        { persona: 'steward', run: true, agents: 1 },
+        { persona: 'adversary', run: true, agents: 1 },
+      ],
+    }));
+    const r = runSynth(['--round1', round1File(dir), '--plan', p, '--out', path.join(dir, 'r.md')]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /the plan ran adversary/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
