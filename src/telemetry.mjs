@@ -36,6 +36,7 @@ import process from 'node:process';
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import { DEFAULT_PERSONAS, isLaneAgent } from './personas.mjs';
+import { probeSummary } from './probe.mjs';
 import { runLanes } from './scaling.mjs';
 import { UNCLASSIFIED, isBlocking } from './synthesis.mjs';
 import { KINDS, ROOT_CAUSE_STATUSES, SEVERITIES } from './taxonomy.mjs';
@@ -173,31 +174,6 @@ function planSummary(plan) {
   };
 }
 
-// What the run's reproductions cost and bought, in counts. The question this
-// row exists to answer is whether the probe channel earns its wall-clock: how
-// often a panel attaches one at all, how often re-running it confirms what the
-// reporter said, and how often it contradicts them. If `confirmed` stays near
-// zero across a hundred runs the channel is theater; if `contradicted` is high
-// the reviewers are overstating and the cap should tighten.
-//
-// Counts only, like everything else in this file — no script paths, no probe
-// output, no `why` strings. `enabled` is the operator's own flag and is the
-// denominator every other number here needs: zero probes on a run that never
-// enabled them is not the same data point as zero on a run that did.
-function probeSummary(probes) {
-  if (!probes) return null;
-  const list = probes.probes ?? [];
-  const measured = list.filter((p) => p.source === 'measured');
-  return {
-    enabled: probes.enabled === true,
-    attached: list.length,
-    ran: measured.length,
-    confirmed: measured.filter((p) => p.confirmed).length,
-    contradicted: measured.filter((p) => !p.confirmed).length,
-    sandboxed: Boolean(probes.isolation?.sandbox),
-  };
-}
-
 // A claim the checkout contradicted: the reviewer-hallucination gauge, and the
 // one predicate both summaries below count with. It was spelled twice here
 // before, which is one copy short of the number it takes to drift.
@@ -324,6 +300,13 @@ export function buildRunRecord({
     base: SHA.test(base ?? '') ? base : null,
     iteration,
     plan: planSummary(plan),
+    // What the run's reproductions cost and bought, in counts. The question
+    // this row exists to answer is whether the probe channel earns its
+    // wall-clock: if `confirmed` stays near zero across a hundred runs the
+    // channel is theater, and if `contradicted` is high the reviewers are
+    // overstating and the cap should tighten. Shared with the report's own
+    // declaration (src/probe.mjs) rather than spelled twice, which is the
+    // number of copies it takes to drift.
     probes: probeSummary(probes),
     roster: {
       reported: named(Object.keys(round1)).sort(),

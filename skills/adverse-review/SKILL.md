@@ -271,6 +271,13 @@ silent about probes being unavailable reads exactly like a panel that did not
 want one — the same reason a skipped lane has to be declared. `plan.json`'s
 `probes.allowed` is the other half of the answer; both must say yes.
 
+Both halves reach the report on their own now: `synthesize --plan` carries the
+policy and `--probes` carries what execution did, and the three renderings
+declare which of the four states the run was in — never offered, offered and
+unrecorded, attached but not enabled, or run. That is the mechanism, not a
+sentence to remember; what still needs saying out loud is the *reason* the
+check failed, which no file records.
+
 ## Phase 2 — round 1: independent reviews
 
 Spawn the reviewers the plan selected **in parallel** using the Agent tool,
@@ -760,8 +767,12 @@ Present a **summary**, not the full report:
 5. Advisory findings as a separate, clearly non-blocking list.
 6. Any **demonstrated** finding, called that: the tool re-ran a reproduction
    and the behavior happened. It is the strongest thing in the report and it
-   deserves to be read before anything settled by argument. Say plainly when
-   probes were off for the run, and why.
+   deserves to be read before anything settled by argument. What execution was
+   offered and what it did is now declared by the tool — the report and the
+   dashboard carry it beside the skipped lanes and the depth, off `plan.json`'s
+   `probes.allowed` and the probe record's own `enabled` — so read that line
+   rather than writing one from memory. Add only what neither can know: if the
+   Phase 1 worktree check is why probes were off, say so.
 7. A pointer to the report and the HTML dashboard.
 
 ## Phase 7 — decide, and act

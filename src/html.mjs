@@ -5,6 +5,7 @@
 import { refuseDirectRun } from './entryGuard.mjs';
 import { ADVISORY_KINDS, PROVENANCE, assertCoversConfidences,
          assertCoversStatuses } from './taxonomy.mjs';
+import { probeState } from './probe.mjs';
 // Not wording — identity. Which half of a split lane made a ruling is a fact
 // about the run, and this renderer printed the lane's persona for both halves.
 import { rulingVoice } from './synthesis.mjs';
@@ -66,6 +67,38 @@ const ROOT_CAUSE_STATUS = assertCoversStatuses({
   proposed: 'Candidate — round 2 did not rule; decide each citation',
   split: 'Dissolved by round 2 — separate problems',
 }, 'src/html.mjs');
+
+// The two note tables this page renders beside its banners. Maps rather than
+// object literals for the reason SEVERITY_MARKER has a null prototype
+// elsewhere: both are keyed by a value that arrives from a plan.json on disk,
+// and an object literal answers `constructor` with a function.
+//
+// The WORDING is this renderer's own, the way the root-cause status labels are.
+// What is shared is the PREDICATE — `probeState` in src/probe.mjs decides which
+// of the four a run is in, once, for all three renderers.
+const DEPTH_NOTES = new Map([
+  ['cheap', 'Planned depth cheap: a lane whose every kind is advisory was eligible to'
+    + ' skip one size bucket earlier than usual. An absent finding here is weaker'
+    + ' evidence than in a standard run.'],
+  ['thorough', 'Planned depth thorough: every lane ran whatever the diff\'s size and the'
+    + ' trust-boundary gate said, at a higher model tier.'],
+]);
+
+const PROBE_NOTES = new Map([
+  ['not-offered', (p) => 'Probes were not offered: nothing here was settled by running'
+    + ` the code, and nothing could be.${p.reason ? ` Plan's reason: ${p.reason}` : ''}`],
+  ['unrecorded', () => 'No probe was recorded: reproductions were available to the panel,'
+    + ' and this run has no record of one being run. Nothing here was settled by execution.'],
+  ['not-enabled', (p) => `Probe execution was not enabled: ${p.attached} reproduction(s)`
+    + ' were attached and every one was recorded as declined. Nothing here was settled by'
+    + ' execution.'],
+  ['ran', (p) => (p.attached === 0
+    ? 'Probes were enabled and none was attached: every lane declined, which costs a'
+      + ' reviewer nothing. Nothing here was settled by running the code.'
+    : `Probes ran: ${p.attached} attached, ${p.ran} re-run, ${p.confirmed} reproduced,`
+      + ` ${p.contradicted} ran without reproducing`
+      + `${p.sandboxed ? ', under the operator\'s sandbox' : ', with no sandbox'}.`)],
+]);
 
 function esc(s) {
   return String(s ?? '')
@@ -144,6 +177,25 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     ? `<div class="banner-warn">Degraded run: <strong>${esc(syn.degraded.join(', '))}</strong> failed and were excluded.</div>`
     : '';
 
+  // The other three reductions this dashboard did not render. It banners a
+  // degraded lane and a skipped round 2 and stops, while the empty-findings
+  // text below tells the reader that every lane is accounted for "above as not
+  // run or degraded" — a sentence that was false in this renderer, because a
+  // skipped lane appeared nowhere in the page. A dashboard is the artifact most
+  // likely to be read by someone who was not in the session, which is the
+  // reader the declaration exists for.
+  const skipped = (syn.skipped ?? []).length
+    ? `<div class="banner-warn">Lane not run: <strong>${esc((syn.skipped ?? [])
+      .map((sk) => `${sk.persona ?? sk}${sk.reason ? ` — ${sk.reason}` : ''}`)
+      .join('; '))}</strong>. Nothing here reflects that perspective.</div>`
+    : '';
+  const depthNote = DEPTH_NOTES.get(syn.depth);
+  const depth = depthNote ? `<div class="banner-note">${esc(depthNote)}</div>` : '';
+  const probeNote = PROBE_NOTES.get(probeState(syn.probes));
+  const probes = probeNote
+    ? `<div class="banner-note">${esc(probeNote(syn.probes))}</div>`
+    : '';
+
   const noFindings = syn.findings.length === 0
     ? `<section><h2>Findings</h2><p class="empty">${Object.keys(syn.verdicts).length
       ? 'No findings. All reviewers reported clean.'
@@ -198,6 +250,7 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     .card .cite-meta { font-size: 12px; color: var(--fg-muted); }
     .card .fix { background: var(--bg-alt); padding: 8px 12px; border-radius: 6px; margin: 8px 0 0; }
     .card .fix strong { color: var(--accent); }
+    .banner-note { margin: 12px 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--bg-alt); border-radius: 0 6px 6px 0; color: var(--fg-muted); font-size: 13px; }
     .card .probe { margin: 8px 0; padding: 8px 12px; border-left: 3px solid; border-radius: 0 6px 6px 0; font-size: 13px; }
     .card .probe p { margin: 0 0 6px; }
     .card .probe-ok { border-color: #16a34a; background: rgba(22,163,74,0.08); }
@@ -223,7 +276,10 @@ export function renderHtml(syn, { title = 'Adversarial Code Review' } = {}) {
     ${reviewed}
 
     ${degraded}
+    ${skipped}
     ${round2Skipped}
+    ${depth}
+    ${probes}
 
     <h2>Reviewer verdicts</h2>
     <table class="verdicts">

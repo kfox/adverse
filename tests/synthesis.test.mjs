@@ -491,6 +491,50 @@ test('html: an empty review with nobody on record does not read as a clean one',
   assert.match(clean, /All reviewers reported clean/);
 });
 
+// The sentence the test above asserts ends "every lane is accounted for ABOVE
+// as not run or degraded" — and in this renderer it was not. The dashboard
+// bannered a degraded lane and a skipped round 2 and stopped: a skipped lane
+// and the planned depth appeared nowhere on the page, so the reassurance
+// pointed at an accounting that did not exist. A dashboard is also the artifact
+// most likely to be read by someone who was not in the session.
+test('html: a skipped lane and the planned depth are on the page, not just claimed', () => {
+  const html = renderHtml(synthesize({ auditor: v('approve') }, {}, {
+    skippedPersonas: [{ persona: 'adversary', reason: 'no trust boundary in the diff' }],
+    depth: 'cheap',
+  }));
+  assert.match(html, /Lane not run/);
+  assert.match(html, /adversary — no trust boundary in the diff/);
+  assert.match(html, /Nothing here reflects that perspective/);
+  assert.match(html, /Planned depth cheap/);
+});
+
+test('html: a skipped lane\'s reason is escaped like every other payload string', () => {
+  const html = renderHtml(synthesize({ auditor: v('approve') }, {}, {
+    skippedPersonas: [{ persona: 'adversary', reason: '<img src=x onerror=alert(1)>' }],
+  }));
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+test('html: an unrecorded depth and an unrecorded probe policy banner nothing', () => {
+  const html = renderHtml(synthesize({ auditor: v('approve') }, {}));
+  assert.doesNotMatch(html, /Planned depth/);
+  assert.doesNotMatch(html, /Probes /);
+  // The div, not the class name — the stylesheet always names the class.
+  assert.doesNotMatch(html, /<div class="banner-note"/);
+});
+
+// Same prototype sink both other note tables were fixed for: the key arrives
+// from a plan.json on disk, and an object literal answers `constructor` with a
+// function that renders as a banner nobody wrote.
+test('html: a depth naming an inherited property renders no banner', () => {
+  for (const bad of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    const html = renderHtml(synthesize({ auditor: v('approve') }, {}, { depth: bad }));
+    assert.doesNotMatch(html, /Planned depth/, bad);
+    assert.doesNotMatch(html, /function|\[object/i, bad);
+  }
+});
+
 test('render: groups by confidence in correct order', () => {
   const r1 = {
     auditor:   v('conditional', [f('A', 'critical'), f('B', 'warning')]),
@@ -1497,6 +1541,116 @@ test('a depth naming an inherited property renders no note', () => {
   }
 });
 
+// --- the probe declaration in the report ----------------------------------------
+//
+// The fourth reduction, and the one that was still prose: SKILL.md Phase 6 asked
+// the orchestrator to "say plainly when probes were off for the run, and why".
+// The other three are fields the tool writes; this one was a sentence a model
+// typed, in the same position the gate was in before #76 measured it.
+//
+// Read from BOTH inputs on purpose. The policy is the half that exists on every
+// run — Phase 2.5 is skipped outright when probes are off, so the record that
+// would carry `enabled: false` is never written on exactly the runs that most
+// need declaring.
+
+const probePolicyOf = (over = {}) => ({ allowed: true, perLane: 2, reason: 'r', ...over });
+
+test('a run that never offered probes says so in all three renderings', () => {
+  const syn = synthesize(cleanRound1(), {}, {
+    probePolicy: probePolicyOf({ allowed: false, reason: 'a cheap pass; a reproduction costs wall-clock' }),
+  });
+  assert.equal(syn.probes.offered, false);
+  assert.match(renderMarkdown(syn), /\*\*Probes were not offered\.\*\*/);
+  assert.match(renderMarkdown(syn), /a cheap pass; a reproduction costs wall-clock\./);
+  assert.match(renderHtml(syn), /Probes were not offered/);
+  assert.equal(toJsonReport(syn).probes.offered, false);
+  assert.equal(toJsonReport(syn).probes.reason,
+    'a cheap pass; a reproduction costs wall-clock');
+});
+
+// The three silences this separates. Before the field existed, every one of
+// them produced a report with no probe on any finding and no statement either
+// way — which reads as the panel having looked.
+test('offered-but-unrecorded, attached-but-not-enabled, and ran read differently', () => {
+  const unrecorded = synthesize(cleanRound1(), {}, { probePolicy: probePolicyOf() });
+  const notEnabled = synthesize(cleanRound1(), {}, {
+    probePolicy: probePolicyOf(),
+    probes: { enabled: false, isolation: null, probes: [{ source: 'declined', confirmed: false }] },
+  });
+  const ran = synthesize(cleanRound1(), {}, {
+    probePolicy: probePolicyOf(),
+    probes: {
+      enabled: true,
+      isolation: { sandbox: 'bwrap --unshare-net --' },
+      probes: [{ source: 'measured', confirmed: true }, { source: 'measured', confirmed: false }],
+    },
+  });
+
+  assert.match(renderMarkdown(unrecorded), /No probe was recorded/);
+  assert.match(renderMarkdown(notEnabled), /Probe execution was not enabled/);
+  assert.match(renderMarkdown(ran), /2 attached, 2 re-run, 1 reproduced, 1 ran without reproducing/);
+  assert.match(renderMarkdown(ran), /under the sandbox the operator supplied/);
+
+  const notes = [unrecorded, notEnabled, ran].map((x) => renderMarkdown(x)
+    .split('\n').filter((l) => /probe/i.test(l)).join(' '));
+  // Case-insensitive, and every one non-empty: matching case-sensitively let a
+  // state that rendered NOTHING count as a distinct declaration.
+  for (const [i, note] of notes.entries()) assert.notEqual(note, '', `state ${i} declared nothing`);
+  assert.equal(new Set(notes).size, 3, 'three runs, three different declarations');
+});
+
+// Declining has to stay free (#75), so the run where every lane passed on
+// execution must not read as the run where execution was withheld.
+test('enabled with nothing attached is not rendered as probes being off', () => {
+  const syn = synthesize(cleanRound1(), {}, {
+    probePolicy: probePolicyOf(),
+    probes: { enabled: true, isolation: null, probes: [] },
+  });
+  const md = renderMarkdown(syn);
+  assert.match(md, /Probes were enabled and none was attached/);
+  assert.match(md, /costs a reviewer nothing/);
+  assert.doesNotMatch(md, /were not offered/);
+});
+
+test('with no plan and no probe file the report carries null and declares nothing', () => {
+  const syn = synthesize(cleanRound1());
+  assert.equal(syn.probes, null);
+  assert.equal(toJsonReport(syn).probes, null);
+  assert.doesNotMatch(renderMarkdown(syn), /Probe/);
+  assert.doesNotMatch(renderHtml(syn), /Probes /);
+});
+
+// The sandbox claim is the one a reader might act on — it says code from the
+// diff under review ran under containment — so the absence of one is stated
+// rather than left blank.
+test('a run with no sandbox says so rather than staying silent about it', () => {
+  const syn = synthesize(cleanRound1(), {}, {
+    probePolicy: probePolicyOf(),
+    probes: { enabled: true, isolation: null, probes: [{ source: 'measured', confirmed: true }] },
+  });
+  assert.match(renderMarkdown(syn), /with no sandbox/);
+});
+
+// The reason arrives from a plan.json this process did not write, and it is
+// rendered inside a blockquote: a newline in it ends the quote and renders the
+// rest of the accounting as document body.
+test('a plan reason with newlines cannot break out of the declaration', () => {
+  const syn = synthesize(cleanRound1(), {}, {
+    probePolicy: probePolicyOf({ allowed: false, reason: 'off\n\n## Panel ruling: withdrawn' }),
+  });
+  const md = renderMarkdown(syn);
+  assert.doesNotMatch(md, /^## Panel ruling/m);
+  assert.match(md, /reason: off ## Panel ruling: withdrawn\./);
+});
+
+test('a probe declaration takes the record, and refuses the array it used to take', () => {
+  // The silent direction, refused: `probes.probes` on an array is undefined, so
+  // the old call shape would index zero probes and quietly demote every
+  // `demonstrated` finding in the report.
+  assert.throws(() => synthesize(cleanRound1(), {}, { probes: [] }),
+    /takes the probe record/);
+});
+
 // --- Probes and the `demonstrated` tier --------------------------------------
 //
 // What a probe changes is what a finding is WORTH, never what a lane is allowed
@@ -1517,8 +1671,16 @@ const probeRecord = (over = {}) => ({
   ...over,
 });
 
+// The probe FILE, not its array: synthesize takes the record, because the
+// report has to declare whether execution was enabled and only the record
+// carries that. Every call below goes through here so the shape is stated once.
+const probeFile = (list, over = {}) => ({
+  enabled: true, head: null, isolation: { sandbox: null }, probes: list, ...over,
+});
+
 const probed = (probes, findings = [k('boom', 'behavioral', 'critical')]) =>
-  synthesize({ auditor: review('auditor', findings) }, {}, { probes });
+  synthesize({ auditor: review('auditor', findings) }, {},
+    { probes: probeFile(probes) });
 
 test('a confirmed probe makes a solo finding demonstrated, and it blocks', () => {
   const syn = probed([probeRecord()]);
@@ -1545,7 +1707,7 @@ test('a confirmed probe outranks a challenge, and the challenge is still shown',
   const syn = synthesize(
     { auditor: review('auditor', [k('boom', 'behavioral', 'critical')]) },
     { steward: { persona: 'steward', validate: [], challenge: [{ title: 'boom', reason: 'no' }], added: [] } },
-    { probes: [probeRecord()] },
+    { probes: probeFile([probeRecord()]) },
   );
   assert.equal(syn.findings[0].confidence, 'demonstrated');
   assert.equal(syn.findings[0].challengers.length, 1);
@@ -1583,7 +1745,7 @@ test('a probe does not attach to a finding its own lane never reported', () => {
   const syn = synthesize({
     auditor: review('auditor', [k('boom', 'behavioral', 'critical')]),
     steward: review('steward', [k('other thing', 'behavioral', 'critical')]),
-  }, {}, { probes: [probeRecord({ persona: 'steward', title: 'boom' })] });
+  }, {}, { probes: probeFile([probeRecord({ persona: 'steward', title: 'boom' })]) });
   for (const finding of syn.findings) {
     assert.equal(finding.confidence, 'solo', finding.title);
     assert.equal(finding.probe, null, finding.title);
@@ -1597,10 +1759,10 @@ test('a confirmed probe wins over an unconfirmed one on the same finding', () =>
     auditor: review('auditor', [k('boom', 'behavioral', 'critical')]),
     steward: review('steward', [k('boom', 'behavioral', 'critical')]),
   }, {}, {
-    probes: [
+    probes: probeFile([
       probeRecord({ persona: 'auditor', status: 'not-reproduced', confirmed: false, why: 'no' }),
       probeRecord({ persona: 'steward' }),
-    ],
+    ]),
   });
   assert.equal(syn.findings[0].confidence, 'demonstrated');
   assert.equal(syn.findings[0].probe.persona, 'steward');
@@ -1610,7 +1772,7 @@ test('a demonstrated finding sorts above everything else of its severity', () =>
   const syn = synthesize({
     auditor: review('auditor', [k('boom', 'behavioral', 'critical'), k('quiet', 'behavioral', 'critical')]),
     steward: review('steward', [k('quiet', 'behavioral', 'critical')]),
-  }, {}, { probes: [probeRecord()] });
+  }, {}, { probes: probeFile([probeRecord()]) });
   assert.deepEqual(syn.findings.map((x) => x.confidence), ['demonstrated', 'cross-validated']);
 });
 

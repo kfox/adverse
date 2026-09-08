@@ -17,8 +17,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  INTERPRETERS, MAX_PROBE_OUTPUT_CHARS, declinedProbe, indexProbes, normalizeProbes,
-  parseProbeClaim, probeKey, resolveScript, runProbe,
+  INTERPRETERS, MAX_PROBE_OUTPUT_CHARS, PROBE_STATES, declinedProbe, indexProbes,
+  normalizeProbes, parseProbeClaim, probeDeclaration, probeKey, probeState,
+  resolveScript, runProbe, probeSummary,
 } from '../src/probe.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -334,4 +335,116 @@ test('no record, or one that is not a record, is null rather than an empty confi
 test('a record with no head is taken as given when the caller names no head either', () => {
   const n = normalizeProbes(recordFile({ head: null }));
   assert.equal(n.probes[0].confirmed, true);
+});
+
+
+// --- The declaration a report carries --------------------------------------
+//
+// #75's rule, for the last of the four reductions that was still prose: "a
+// skipped lane, a skipped round 2, a reduced depth, or probes being off must be
+// declared, or it reads exactly like a lane that looked and found nothing."
+//
+// Four runs produce a report with no probe on any finding — one that never
+// offered them, one that offered and recorded nothing, one that attached some
+// and ran none, and one that ran them and reproduced nothing — and only the
+// last means the panel tried. The two inputs are two facts: the plan says what
+// was allowed and is on disk for EVERY run, and the record says what execution
+// did and exists only when Phase 2.5 ran at all.
+
+const policy = (over = {}) => ({ allowed: true, perLane: 2, reason: 'the plan said so', ...over });
+
+const record = (over = {}) => ({
+  enabled: true,
+  isolation: { sandbox: null },
+  probes: [
+    { persona: 'auditor', title: 'a', source: 'measured', confirmed: true },
+    { persona: 'auditor', title: 'b', source: 'measured', confirmed: false },
+    { persona: 'steward', title: 'c', source: 'declined', confirmed: false },
+  ],
+  ...over,
+});
+
+test('a run that recorded neither a plan nor a probe file declares nothing', () => {
+  assert.equal(probeDeclaration(null, null), null);
+  assert.equal(probeState(null), null);
+});
+
+// The case the issue is about, and the one a flag carried on the record cannot
+// reach: SKILL.md Phase 2.5 is skipped outright when probes are off, so there
+// is no probes.json to carry an `enabled: false`. The policy is what survives.
+test('probes off with no probe file at all is still a declaration', () => {
+  const d = probeDeclaration(null, policy({ allowed: false, reason: 'a cheap pass' }));
+  assert.equal(probeState(d), 'not-offered');
+  assert.equal(d.offered, false);
+  assert.equal(d.reason, 'a cheap pass');
+  // Not zero: nothing counted them, and a count of 0 is a claim that something
+  // did. This is `depth: null`'s rule for every number in the block.
+  assert.equal(d.enabled, null);
+  assert.equal(d.attached, null);
+  assert.equal(d.ran, null);
+});
+
+test('a probe file with no plan declares what execution did and claims no policy', () => {
+  const d = probeDeclaration(record(), null);
+  assert.equal(probeState(d), 'ran');
+  assert.equal(d.offered, null, 'no plan makes no claim about what was offered');
+  assert.equal(d.reason, null);
+  assert.deepEqual(
+    { attached: d.attached, ran: d.ran, confirmed: d.confirmed, contradicted: d.contradicted },
+    { attached: 3, ran: 2, confirmed: 1, contradicted: 1 },
+  );
+});
+
+test('offered, and no record of anything running, is its own state', () => {
+  assert.equal(probeState(probeDeclaration(null, policy())), 'unrecorded');
+});
+
+test('attached but not enabled is not the same claim as never offered', () => {
+  const d = probeDeclaration(record({ enabled: false }), policy());
+  assert.equal(probeState(d), 'not-enabled');
+  assert.equal(d.attached, 3, 'the reviewers did attach reproductions');
+  assert.equal(d.ran, 2, 'and the counts still describe the file as written');
+});
+
+// Enabled and nothing attached is the state that must not read as "off". #75 is
+// emphatic that declining costs a reviewer nothing, so this is the run where
+// the panel was offered execution and every lane passed.
+test('enabled with nothing attached is distinguishable from probes being off', () => {
+  const on = probeDeclaration(record({ probes: [] }), policy());
+  const off = probeDeclaration(null, policy({ allowed: false, reason: 'no' }));
+  assert.equal(probeState(on), 'ran');
+  assert.equal(on.attached, 0);
+  assert.equal(probeState(off), 'not-offered');
+  assert.notEqual(probeState(on), probeState(off));
+});
+
+// The contradiction, and the direction it has to fail in. A policy describes
+// what was allowed; counts describe what happened. Reporting "nothing here was
+// settled by running the code" beside a finding a reproduction confirmed is the
+// one wrong answer available.
+test('a plan that forbade probes cannot deny an execution the record says happened', () => {
+  const d = probeDeclaration(record(), policy({ allowed: false, reason: 'a cheap pass' }));
+  assert.equal(probeState(d), 'ran');
+  assert.equal(d.offered, false, 'the policy is still carried, it just does not win');
+});
+
+test('every state probeState can return is one the renderers know', () => {
+  const states = [
+    probeState(probeDeclaration(null, policy({ allowed: false }))),
+    probeState(probeDeclaration(null, policy())),
+    probeState(probeDeclaration(record({ enabled: false }), policy())),
+    probeState(probeDeclaration(record(), policy())),
+  ];
+  assert.deepEqual([...states].sort(), [...PROBE_STATES].sort());
+});
+
+// The summary is shared with the telemetry row, whose contract is counts only.
+// A string reaching it is a `why` or a script path reaching telemetry.
+test('the shared summary carries counts and no strings', () => {
+  const summary = probeSummary(record({ isolation: { sandbox: 'bwrap --unshare-net --' } }));
+  assert.equal(summary.sandboxed, true);
+  for (const [key, value] of Object.entries(summary)) {
+    assert.ok(typeof value === 'number' || typeof value === 'boolean',
+      `${key} is ${typeof value}; this summary is counts only`);
+  }
 });

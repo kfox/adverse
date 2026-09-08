@@ -34,9 +34,9 @@
 // enough (not advisory, not `info`) to hold a change open.
 
 import { refuseDirectRun } from './entryGuard.mjs';
-import { fenced, verbatim, verbatimCell } from './markdown.mjs';
+import { fenced, flatten, verbatim, verbatimCell } from './markdown.mjs';
 import { isLaneAgent } from './personas.mjs';
-import { indexProbes, probeKey } from './probe.mjs';
+import { indexProbes, probeDeclaration, probeKey, probeState } from './probe.mjs';
 import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
          assertCoversConfidences, assertCoversStatuses } from './taxonomy.mjs';
 
@@ -624,7 +624,17 @@ function buildRootCauses(groups, round2, findByTitle) {
 
 export function synthesize(round1, round2 = {},
   { failedPersonas = [], skippedPersonas = [], round2Skipped = null,
-    rootCauseGroups = [], depth = null, probes = [], head = null, base = null } = {}) {
+    rootCauseGroups = [], depth = null, probes = null, probePolicy = null,
+    head = null, base = null } = {}) {
+  // The probe RECORD, not its array — the report has to declare whether
+  // execution was enabled, and only the record carries that. An array reaches
+  // `probes.probes` as undefined and would index zero probes in silence,
+  // demoting every `demonstrated` finding in the report with no error, so the
+  // old call shape is refused rather than tolerated.
+  if (Array.isArray(probes)) {
+    throw new TypeError('synthesize: `probes` takes the probe record'
+      + ' (normalizeProbes output), not its array');
+  }
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
@@ -722,7 +732,7 @@ export function synthesize(round1, round2 = {},
   // or that nobody re-ran leaves the finding exactly where it would have been,
   // because src/probe.mjs computes `confirmed` and this reads it rather than
   // re-deciding from `status`.
-  const probeIndex = indexProbes(probes);
+  const probeIndex = indexProbes(probes?.probes ?? []);
   for (const f of byKey.values()) {
     f.probe = pickProbe(probeIndex, f);
 
@@ -807,6 +817,11 @@ export function synthesize(round1, round2 = {},
     // the durable artifact, and a month later the only readable question is
     // whether an absent finding means the panel looked.
     depth: depth || null,
+    // And the fourth reduction, which until now was the one nobody could read
+    // off the artifact: what execution the panel was offered, and what it did.
+    // Same rule as the three above, and the same shape — `null` is "this run
+    // recorded nothing about probes", which is not "probes were off".
+    probes: probeDeclaration(probes, probePolicy),
     // Which tree this report is about. Carried on the record rather than left
     // to whoever reads it, because a report is durable and a checkout is not:
     // once a fix batch has landed, the working directory's HEAD is no longer
@@ -896,6 +911,52 @@ const DEPTH_NOTES = new Map([
     + 'size and the trust-boundary gate said, and a higher model tier was '
     + 'recommended for the panel.'],
 ]);
+
+// The plan's own words for why, as a sentence. Flattened and re-punctuated
+// because it arrives from a plan.json on disk: a newline inside it ends the
+// blockquote and renders the rest of the note as document body, and the two
+// reasons this repo generates carry no terminating period.
+const planReason = (p) => (p.reason
+  ? ` The plan's reason: ${flatten(p.reason).replace(/\s*\.*\s*$/, '')}.`
+  : '');
+
+// The probe declaration as one line of report prose, per state. This is the
+// declaration #75's rule asked for and SKILL.md Phase 6 asked the orchestrator
+// to type: a report with no probe on any finding is produced by four different
+// runs, and only one of them means "the panel looked and nothing reproduced".
+//
+// A run that recorded nothing renders nothing, which is `depth: null`'s rule
+// exactly — inventing a claim is worse than declining to make one, and the
+// field is in report.json either way for anyone asking the artifact directly.
+function probeNote(syn) {
+  const p = syn.probes;
+  const state = probeState(p);
+  if (state === null) return null;
+
+  if (state === 'not-offered') {
+    return '> **Probes were not offered.** No finding below was settled by running '
+      + `the code, and none could be.${planReason(p)}`;
+  }
+  if (state === 'unrecorded') {
+    return '> **No probe was recorded.** Reproductions were available to the panel, '
+      + 'and this run has no record of any being run — the phase was skipped, or no '
+      + 'reviewer attached one. Nothing below was settled by execution.';
+  }
+  if (state === 'not-enabled') {
+    return `> **Probe execution was not enabled.** ${p.attached} reproduction(s) were `
+      + 'attached and every one was recorded as declined. Nothing below was settled by '
+      + 'execution, and no reviewer is being faulted for that.';
+  }
+  if (p.attached === 0) {
+    return '> **Probes were enabled and none was attached.** Execution was available '
+      + 'and every lane declined it, which costs a reviewer nothing. Nothing below was '
+      + 'settled by running the code.';
+  }
+  return `> **Probes ran.** ${p.attached} attached, ${p.ran} re-run, ${p.confirmed} `
+    + `reproduced, ${p.contradicted} ran without reproducing`
+    + `${p.sandboxed ? ', under the sandbox the operator supplied' : ', with no sandbox'}. `
+    + 'A reproduction that did not reproduce disproves nothing.';
+}
 
 const SECTION_TITLES = assertCoversConfidences({
   demonstrated: '## Demonstrated findings (a reproduction was re-run and the behavior occurred)',
@@ -1112,6 +1173,11 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
       + 'cross-examined, and round 2\'s cross-lane additions were forgone.',
     );
   }
+  const probes = probeNote(syn);
+  if (probes) {
+    lines.push('');
+    lines.push(probes);
+  }
   lines.push('');
 
   if (syn.findings.length === 0) {
@@ -1231,6 +1297,18 @@ export function toJsonReport(syn) {
     skipped: syn.skipped ?? [],
     round2_skipped: syn.round2Skipped ?? null,
     depth: syn.depth ?? null,
+    // Passed through rather than re-spelled. Every key in the block is a single
+    // word on purpose: this object is read back out of report.json by
+    // src/publish.mjs, and a camelCase field here would have to be a
+    // snake_case field there — one fact with two spellings, across three
+    // renderers, which is how the other multi-word keys in this serializer
+    // would have gone stale if anything but the tool ever wrote them.
+    //
+    // Absent when the run recorded no plan and no probe file, and deliberately
+    // NOT in src/publish.mjs's required keys: a report.json written before this
+    // field existed is incomplete, not untrustworthy, and refusing to publish
+    // it would read as a defect in the run rather than in the report's age.
+    probes: syn.probes ?? null,
     head: syn.head ?? null,
     base: syn.base ?? null,
     // Report-level flag, kept only so an older consumer keeps working. It is

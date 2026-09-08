@@ -66,13 +66,17 @@ Options for 'synthesize':
   --plan <path>            plan.mjs's plan.json. Every lane it ran must be
                            accounted for by a payload, --skipped, or --degraded,
                            or synthesize refuses. Also carries the depth the run
-                           was planned at, which the report and the telemetry
-                           line both record. Optional.
+                           was planned at and whether the panel was offered
+                           probes at all, both of which the report declares.
+                           Optional.
   --probes <path>          probe.mjs's probes.json: the reproductions the tool
                            re-ran. A confirmed one makes its finding
                            'demonstrated', the strongest confidence label; an
                            unconfirmed one is shown and changes nothing.
-                           Bound to --briefing's head when one is given.
+                           Bound to --briefing's head when one is given. What
+                           execution did is declared in the report; with no
+                           --plan beside it the report can say what ran but not
+                           whether running was offered.
   --iteration <n>          Which convergence-loop iteration produced this run.
                            Recorded in the telemetry line; changes nothing else.
   --no-telemetry           Do not append this run's counts to runs.jsonl.
@@ -454,7 +458,14 @@ async function cmdSynthesize(rest) {
   const syn = synthesize(round1, round2, {
     skippedPersonas, failedPersonas, round2Skipped: values['round2-skipped'] ?? null,
     rootCauseGroups: briefing?.groups ?? [],
-    probes: probes?.probes ?? [],
+    // The whole record, not its array: the report declares whether execution
+    // was enabled, and that flag lives only here.
+    probes,
+    // And the other half of the same question, off the plan for the same
+    // reason depth is. The policy is on disk for every run; the record is not
+    // — SKILL.md Phase 2.5 is skipped outright when probes are off, so the
+    // most common probes-off run has no probes.json to carry a flag at all.
+    probePolicy: plan?.probes ?? null,
     // Depth rides in on the plan rather than on a flag of its own: two
     // channels would be two claims about one run, and the orchestrator already
     // passes --plan for the roster check. Without a plan the depth is unknown,

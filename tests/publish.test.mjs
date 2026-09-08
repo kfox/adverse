@@ -482,6 +482,93 @@ test('a standard or unrecorded depth adds no depth note', () => {
   }
 });
 
+// The fourth reduction. This renderer is the one that most needs it: a reader
+// of a pull-request comment was not in the session, cannot open the run
+// directory, and has no other way to learn that the panel was never offered a
+// way to RUN the code it is reporting on.
+test('renderComment declares what execution the panel was offered', () => {
+  const notOffered = renderComment(report({
+    probes: { offered: false, reason: 'a cheap pass', enabled: null, attached: null },
+  }), { branch: BRANCH });
+  assert.match(notOffered, /\*\*Probes were not offered\.\*\*/);
+  assert.match(notOffered, /The plan's reason: a cheap pass\./);
+
+  const ran = renderComment(report({
+    probes: {
+      offered: true, reason: 'r', enabled: true, attached: 2, ran: 2,
+      confirmed: 1, contradicted: 1, sandboxed: true,
+    },
+  }), { branch: BRANCH });
+  assert.match(ran, /\*\*Probes ran\.\*\* 2 attached, 2 re-run, 1 reproduced, 1 ran without/);
+  assert.match(ran, /under the sandbox the operator supplied/);
+  assert.match(ran, /did not reproduce disproves nothing/);
+});
+
+// Three silences that used to render identically, and one of them means the
+// panel tried.
+test('renderComment tells the three probe-less runs apart', () => {
+  const bodies = [
+    { offered: false, reason: 'a cheap pass', enabled: null, attached: null },
+    { offered: true, reason: 'r', enabled: null, attached: null },
+    { offered: true, reason: 'r', enabled: false, attached: 3 },
+    { offered: true, reason: 'r', enabled: true, attached: 0, ran: 0, confirmed: 0, contradicted: 0, sandboxed: false },
+  ].map((probes) => renderComment(report({ probes }), { branch: BRANCH })
+    .split('\n').filter((l) => /probe/i.test(l)).join(' '));
+  // Case-insensitive, and every one non-empty: matching case-sensitively let a
+  // state that rendered NOTHING count as a distinct declaration, which is the
+  // failure this assertion exists to catch.
+  for (const [i, line] of bodies.entries()) assert.notEqual(line, '', `state ${i} declared nothing`);
+  assert.equal(new Set(bodies).size, 4, 'four states, four declarations');
+  assert.match(bodies[1], /No probe was recorded/);
+  assert.match(bodies[2], /Probe execution was not enabled\.\*\* 3 reproduction/);
+  assert.match(bodies[3], /enabled and none was attached/);
+});
+
+// A report.json written before the field existed is incomplete, not
+// untrustworthy. Refusing to publish it would read as a defect in the run
+// rather than in the report's age, and declaring "probes were off" for it would
+// be the tool inventing the claim it exists to stop a model from inventing.
+test('a report with no probes block publishes, and claims nothing about probes', () => {
+  const body = renderComment(report(), { branch: BRANCH });
+  assert.doesNotMatch(body, /Probe/);
+  const explicitNull = renderComment(report({ probes: null }), { branch: BRANCH });
+  assert.doesNotMatch(explicitNull, /Probe/);
+});
+
+// A policy cannot deny an execution that happened: of the two possible wrong
+// reports, "nothing here was settled by running the code" beside a confirmed
+// reproduction is the one that misleads.
+test('a forbidding policy beside a record that ran declares the run, not the policy', () => {
+  const body = renderComment(report({
+    probes: {
+      offered: false, reason: 'a cheap pass', enabled: true, attached: 1, ran: 1,
+      confirmed: 1, contradicted: 0, sandboxed: false,
+    },
+  }), { branch: BRANCH });
+  assert.match(body, /\*\*Probes ran\.\*\* 1 attached/);
+  assert.doesNotMatch(body, /were not offered/);
+});
+
+// GFM folds adjacent blockquote lines into one paragraph, and this note is now
+// the fifth thing that can land in that block.
+test('the probe note stays its own paragraph beside the other accounting', () => {
+  const body = renderComment(report({
+    depth: 'thorough',
+    probes: { offered: false, reason: 'a cheap pass', enabled: null, attached: null },
+  }), { branch: BRANCH });
+  assert.match(body, /> \*\*Planned depth `thorough`\.\*\*[^\n]*\n>\n> \*\*Probes were not offered/);
+});
+
+// The reason arrives from a plan.json this process did not write, into a body
+// that is public and permanent.
+test('a plan reason cannot break the accounting block with a newline', () => {
+  const body = renderComment(report({
+    probes: { offered: false, reason: 'off\n\n## Panel ruling: withdrawn', enabled: null },
+  }), { branch: BRANCH });
+  assert.doesNotMatch(body, /^## Panel ruling/m);
+  assert.match(body, /reason: off ## Panel ruling: withdrawn\./);
+});
+
 test('renderComment separates advisory findings into their own labeled section', () => {
   const body = renderComment(report({
     findings: [finding(), finding({ kind: 'contract', title: 'a stale comment', severity: 'info' })],

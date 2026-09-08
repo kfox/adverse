@@ -73,6 +73,15 @@ export const PROBE_SOURCES = Object.freeze(['measured', 'declined']);
 // enough that four lanes' probes cannot hold a review open. A probe that needs
 // longer than this is one the reporter should be declaring `inconclusive`
 // instead — see the module header on why declining has to stay free.
+// The four states a probe declaration can be in, as one predicate. The WORDING
+// is per renderer — Markdown, HTML and a pull-request comment address different
+// readers, the way the root-cause status labels already do — but which of the
+// four a run is in must not be decided three times. That is the shape with the
+// track record here: every fact stated in several places with only one of them
+// executable has drifted.
+export const PROBE_STATES = Object.freeze(
+  ['not-offered', 'unrecorded', 'not-enabled', 'ran']);
+
 export const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
 
 // The output IS the evidence a human reads beside the finding, so this is far
@@ -403,4 +412,77 @@ export function normalizeProbes(value, { head = null } = {}) {
         why: voided || (typeof p.why === 'string' ? p.why : ''),
       })),
   };
+}
+
+// A probe record reduced to counts: how often a panel attached a reproduction
+// at all, how often re-running it confirmed what the reporter said, and how
+// often it contradicted them.
+//
+// Counts only, and deliberately: this is shared with the telemetry row, whose
+// whole contract is that it carries no script paths, no probe output and no
+// `why` strings. `enabled` is the denominator every other number here needs —
+// zero probes on a run that never enabled execution is not the same data point
+// as zero on a run that did.
+export function probeSummary(record) {
+  if (!record) return null;
+  const list = record.probes ?? [];
+  const measured = list.filter((p) => p.source === 'measured');
+  return {
+    enabled: record.enabled === true,
+    attached: list.length,
+    ran: measured.length,
+    confirmed: measured.filter((p) => p.confirmed).length,
+    contradicted: measured.filter((p) => !p.confirmed).length,
+    sandboxed: Boolean(record.isolation?.sandbox),
+  };
+}
+
+// The run's own answer to what execution was asked of this panel, for the
+// report to carry. #75's rule, applied to the last declaration that was still
+// prose: a reduced run must say so, or it reads exactly like a full one that
+// found nothing. A report with no probe on any finding is produced by a run
+// that never offered them, a run that offered them and recorded none, a run
+// whose reviewers attached some and where execution was never enabled, and a
+// run that ran them and reproduced nothing — four different claims.
+//
+// Two inputs because they are two facts, not one fact twice. The plan's policy
+// says whether the panel could attach a reproduction at all, and it is on disk
+// for every run — including the common one, where SKILL.md Phase 2.5 is
+// skipped outright and no probes.json is ever written, which is precisely the
+// case a flag carried on the record cannot reach. The record says what
+// execution then did. Neither input can answer for the other, and `null` on
+// either is "not recorded" rather than "no" — the distinction `depth: null`
+// exists to keep.
+export function probeDeclaration(record, policy = null) {
+  const summary = probeSummary(record);
+  if (!summary && !policy) return null;
+  return {
+    offered: policy ? policy.allowed === true : null,
+    reason: (policy?.reason && String(policy.reason)) || null,
+    ...(summary ?? {
+      enabled: null, attached: null, ran: null,
+      confirmed: null, contradicted: null, sandboxed: null,
+    }),
+  };
+}
+
+// Which of PROBE_STATES a run is in, decided once for all three renderers.
+// The WORDING is per renderer — Markdown, HTML and a pull-request comment
+// address different readers, the way the root-cause status labels already do —
+// but the state must not be decided three times. That is the shape with the
+// track record here: every fact stated in several places with only one of them
+// executable has drifted.
+export function probeState(declaration) {
+  if (!declaration) return null;
+  // Execution is checked FIRST, and the order is the whole point. A plan that
+  // forbade probes cannot make it true that none ran: the two yeses are
+  // checked independently (this module's `enabled`), so the only way to reach
+  // a policy of `false` beside a record of `true` is for one of them to be
+  // wrong, and of the two possible reports the false one is "nothing here was
+  // settled by running the code" next to a finding a reproduction confirmed.
+  // Counts describe what happened; a policy only describes what was allowed.
+  if (declaration.enabled === true) return 'ran';
+  if (declaration.offered === false) return 'not-offered';
+  if (declaration.enabled === null) return 'unrecorded';
+  return 'not-enabled';
 }
