@@ -34,6 +34,7 @@
 // enough (not advisory, not `info`) to hold a change open.
 
 import { refuseDirectRun } from './entryGuard.mjs';
+import { fenced, verbatim, verbatimCell } from './markdown.mjs';
 import { isLaneAgent } from './personas.mjs';
 import { indexProbes, probeKey } from './probe.mjs';
 import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
@@ -623,7 +624,7 @@ function buildRootCauses(groups, round2, findByTitle) {
 
 export function synthesize(round1, round2 = {},
   { failedPersonas = [], skippedPersonas = [], round2Skipped = null,
-    rootCauseGroups = [], depth = null, probes = [] } = {}) {
+    rootCauseGroups = [], depth = null, probes = [], head = null, base = null } = {}) {
   const byKey = new Map(); // `${normTitle}|${file}|${line}` -> Finding
   const byNormTitle = new Map(); // normTitle -> Finding (fallback join key)
 
@@ -806,6 +807,14 @@ export function synthesize(round1, round2 = {},
     // the durable artifact, and a month later the only readable question is
     // whether an absent finding means the panel looked.
     depth: depth || null,
+    // Which tree this report is about. Carried on the record rather than left
+    // to whoever reads it, because a report is durable and a checkout is not:
+    // once a fix batch has landed, the working directory's HEAD is no longer
+    // the commit these findings were written against, and a reader — or a
+    // renderer publishing to a pull request (src/publish.mjs) — that asks the
+    // checkout instead dates the review to a commit it never read.
+    head: head || null,
+    base: base || null,
   };
 }
 
@@ -830,100 +839,10 @@ function consensusLabel(score, verdicts) {
 
 // ---------- Markdown renderer -----------------------------------------------
 //
-// Every string below arrives in agent-written JSON, and this renderer draws one
-// line through them rather than escaping whatever the last incident named:
-//
-//   NAMES A THING -> verbatim. A persona, an agent, a verdict, a finding or
-//   group id, a `file`, a `line`, a `counterpart`, a ruling, an off-vocabulary
-//   `kind`, and the one-line `summary` the tool signs. None of these has any
-//   legitimate markup in it,
-//   and the summary is the position where the tool wraps its OWN sentence
-//   around payload data, so a construct that renders differently than it was
-//   recorded is a lie about the run. `verbatim` below is the whole rule.
-//
-//   IS PROSE -> rendered as Markdown, on purpose. A finding's `title` and
-//   `detail`, a `fix`, a validation, challenge or ruling `reason`, a skip
-//   reason, and `round2Skipped`. The prompts ask for sentences in these fields
-//   and reviewers legitimately write code spans, lists and emphasis inside
-//   them; code-spanning a six-sentence `detail` would cost the report its
-//   readability to buy nothing an operator cares about. They are TRUSTED, not
-//   overlooked: a reviewer who writes `~~` into a title gets strikethrough,
-//   which is a formatting choice inside a block that is already labeled as
-//   that reviewer's words. It is not a claim the tool is making.
-//
-// The HTML renderer (src/html.mjs) makes no such distinction — `esc` runs on
-// everything, prose included — because there the alternative is live markup in
-// a browser rather than emphasis in a text file.
-
-// A payload-supplied value rendered so GFM interprets none of it.
-//
-// Neutralization here is a CODE SPAN rather than a list of escaped characters,
-// because the list does not close. The verdict cell escaped `|`, collapsed
-// newlines, and did nothing else, so a regression payload whose `commit` was
-// `abc~~-not-really~~` reached the report through the bridge's own
-// `regression pass on ${commits}` sentence and rendered as `abc-not-really`
-// struck through: the commit an operator READS differs from the commit the
-// tool RECORDED, inside the sentence the tool signs as its own conclusion.
-// `www.host/p` in the same position rendered as a live attacker-chosen link.
-// Those are two members of a set that also holds `_`, `*`, backticks,
-// `[label](url)`, `<img …>`, `#`, and whatever GFM's next extension adds; a
-// validator that enumerates them is a fix for the two we thought of. Inside a
-// code span GFM parses none of it — the autolink extension included — so the
-// construct nobody has thought of yet is covered too.
-//
-// The fence is CommonMark's rule rather than one fixed backtick: a run one
-// longer than the longest run in the text, padded with a space when the text
-// starts or ends with a backtick (a reader strips exactly one). The locators
-// below WERE wrapped in a bare single backtick, which is a code span a `file`
-// of ``a`b`` walks straight out of.
-//
-// Newlines collapse rather than escape, because there is no spelling of a line
-// break that survives a table row, and a value spanning lines in any other
-// position is prose this function's callers have already decided it is not.
-//
-// The collapse is stated as "a whitespace run containing a newline becomes one
-// space" rather than as `/\s*[\r\n]+\s*/`, and that is a fix, not a rewording.
-// The old shape is two quantifiers over the same class with the second able to
-// fail: on a whitespace run holding no newline, `\s*` matched the whole run,
-// `[\r\n]+` failed, and the engine backtracked the run away one character at a
-// time, from every starting position. Quadratic, and the input is payload-
-// supplied — a `file` or a `summary` of 64,000 spaces took 6.5 SECONDS, 256,000
-// took 103. The same class this branch already fixed once in src/scope.mjs.
-// One greedy quantifier over one class with nothing after it to fail cannot
-// backtrack: 2,000,000 spaces now take 1.9 ms, and the output is byte-identical
-// on all thirteen cases the two forms were compared over.
-//
-// The pad also covers a leading or trailing SPACE, not only a backtick.
-// CommonMark strips one space from each end of a code span when both ends have
-// one, so ` x ` used to render as `x` — the value an operator reads differing
-// from the value recorded, which is the whole thing this function exists to
-// prevent. Padding makes both ends spaces, which guarantees the strip takes the
-// padding rather than the content.
-function verbatim(text) {
-  const flat = String(text ?? '')
-    .replace(/\s+/g, (run) => (/[\r\n]/.test(run) ? ' ' : run));
-  if (flat === '') return '';
-  const longest = (flat.match(/`+/g) ?? []).reduce((n, run) => Math.max(n, run.length), 0);
-  const fence = '`'.repeat(longest + 1);
-  const pad = /^[\s`]|[\s`]$/.test(flat) ? ' ' : '';
-  return `${fence}${pad}${flat}${pad}${fence}`;
-}
-
-// A fenced block for text this file did not write and cannot flatten: a
-// probe's captured output is the stdout of code from the diff under review,
-// which is as untrusted as input gets in this flow, and it is kept multi-line
-// on purpose because reading it is the whole point of storing it.
-//
-// The fence is sized to the content the way `verbatim` sizes its code span —
-// CommonMark closes a fenced block only on a run of at least as many backticks
-// as opened it, so an output containing ``` cannot break out of a four-backtick
-// fence. `info` is the language tag, and never comes from a payload.
-function fenced(text, info = '') {
-  const body = String(text ?? '');
-  const longest = (body.match(/`+/g) ?? []).reduce((n, run) => Math.max(n, run.length), 0);
-  const fence = '`'.repeat(Math.max(3, longest + 1));
-  return [`${fence}${info}`, body, fence];
-}
+// Every string below arrives in agent-written JSON. Which of them are VALUES
+// (neutralized) and which are PROSE (rendered as Markdown on purpose) is one
+// rule with one pair of escapers, and both live in src/markdown.mjs now that a
+// second renderer follows the same rule into a public pull-request comment.
 
 // What the report says about a reproduction. Keyed on `confirmed` and `source`
 // and never on `status` alone: `status` is what the script did, while
@@ -948,14 +867,6 @@ function renderProbe(p) {
   if (p.claim?.expect) out.push('', `_Probe expected:_ ${verbatim(p.claim.expect)}`);
   if (p.ran?.output) out.push('', ...fenced(p.ran.output));
   return out;
-}
-
-// The same, for a cell of the one Markdown table this file emits. A `|` splits
-// a GFM row before any inline parser runs, code span or not, so it still needs
-// the backslash — which the table reader consumes, leaving the literal
-// character inside the span.
-function verbatimCell(text) {
-  return verbatim(String(text ?? '').replaceAll('|', '\\|'));
 }
 
 // Null prototype, like every other lookup keyed by something a payload can
@@ -1137,6 +1048,15 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
     );
 
   }
+  // What this report is about, in the report. A month later the run directory
+  // is gone and the branch has moved; without this line there is nothing in
+  // the artifact that says which tree these findings were written against.
+  if (syn.head || syn.base) {
+    lines.push(`**Reviewed:** ${[
+      syn.head ? `at ${verbatim(String(syn.head).slice(0, 12))}` : null,
+      syn.base ? `over ${verbatim(String(syn.base).slice(0, 12))}` : null,
+    ].filter(Boolean).join(' · ')}  `);
+  }
   lines.push('');
 
   lines.push('## Reviewer verdicts');
@@ -1197,7 +1117,19 @@ export function renderMarkdown(syn, { title = 'Adversarial Code Review' } = {}) 
   if (syn.findings.length === 0) {
     lines.push('## Findings');
     lines.push('');
-    lines.push('_No findings. All reviewers reported clean._');
+    // Which of the two empty reports this is. With no reviewer on record,
+    // "all reviewers reported clean" is vacuously true and reads as a clean
+    // bill of health for a change nobody looked at — the same failure the
+    // skipped-lane declarations a few lines above exist to prevent, restated
+    // as a reassurance underneath them.
+    //
+    // The WORDING is per renderer, the way the root-cause status labels are;
+    // what must not differ is the predicate, and `verdicts` is the only thing
+    // that records who actually reported.
+    lines.push(Object.keys(syn.verdicts).length
+      ? '_No findings. All reviewers reported clean._'
+      : '_No findings, and no reviewer reported one either: every lane is accounted'
+        + ' for above as not run or degraded. This is an empty review, not a clean one._');
     lines.push('');
     return lines.join('\n');
   }
@@ -1299,6 +1231,8 @@ export function toJsonReport(syn) {
     skipped: syn.skipped ?? [],
     round2_skipped: syn.round2Skipped ?? null,
     depth: syn.depth ?? null,
+    head: syn.head ?? null,
+    base: syn.base ?? null,
     // Report-level flag, kept only so an older consumer keeps working. It is
     // NOT what the stop condition should read: `some()` over the whole report
     // means one edge anywhere — including on an advisory finding that can never

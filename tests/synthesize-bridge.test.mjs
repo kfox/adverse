@@ -236,6 +236,45 @@ function briefingFile(dir, head) {
   return p;
 }
 
+// The briefing is the only thing that knows which tree was reviewed, and the
+// report is the artifact that outlives the run directory and the branch
+// position. Nothing asserted the wiring between them until a mutation that
+// dropped `head` on the floor survived the whole suite — so a report that had
+// stopped naming the commit it reviewed would have been silent.
+test('--briefing carries the reviewed head and base into all three renderings', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-head-'));
+  const jsonOut = path.join(dir, 'report.json');
+  const mdOut = path.join(dir, 'report.md');
+  const htmlOut = path.join(dir, 'report.html');
+  const r = runSynth(['--round1', round1File(dir), '--briefing', briefingFile(dir, HEAD),
+    '--out', mdOut, '--json-out', jsonOut, '--html-out', htmlOut]);
+  assert.equal(r.status, 0, r.stderr);
+
+  const report = JSON.parse(readFileSync(jsonOut, 'utf-8'));
+  assert.equal(report.head, HEAD);
+  assert.equal(report.base, 'main');
+  assert.match(readFileSync(mdOut, 'utf-8'), new RegExp(`Reviewed:.*${HEAD.slice(0, 12)}`));
+  assert.match(readFileSync(htmlOut, 'utf-8'), new RegExp(`Reviewed:.*${HEAD.slice(0, 12)}`));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Without a briefing there is nothing that knows the tree, and inventing one
+// from this process's own HEAD would date the review to a commit it never
+// read. The field is absent rather than guessed.
+test('with no briefing the report names no commit rather than guessing one', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-nohead-'));
+  const jsonOut = path.join(dir, 'report.json');
+  const mdOut = path.join(dir, 'report.md');
+  const r = runSynth(['--round1', round1File(dir), '--out', mdOut, '--json-out', jsonOut]);
+  assert.equal(r.status, 0, r.stderr);
+
+  const report = JSON.parse(readFileSync(jsonOut, 'utf-8'));
+  assert.equal(report.head, null);
+  assert.equal(report.base, null);
+  assert.doesNotMatch(readFileSync(mdOut, 'utf-8'), /Reviewed:/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 const confidenceOf = (jsonOut) =>
   JSON.parse(readFileSync(jsonOut, 'utf-8')).findings[0].confidence;
 

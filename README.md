@@ -235,6 +235,11 @@ The **Steward** is this fork's addition, and it exists because code-versus-claim
 │    disputed        → reported by 1, challenged by another           │
 │    solo            → reported by 1, no cross-talk                   │
 │  Report leads with the confirmed root causes and their citations    │
+├──────────────────────────────────────────────────────────────────────┤
+│  Publish — Deterministic                                (no LLM)    │
+│  Project report.json onto the branch's open pull request as one     │
+│  comment, rewritten on every later pass. Target from `origin` only. │
+│  Dry run by default; opt-in per run.                                │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -272,6 +277,18 @@ The reviewer proposes and the tool confirms, which is the routing rule `regressi
 Three constraints hold the rest of it up. **Declining is free** — a finding with no probe is judged exactly as it always was, because a reviewer that pays for saying "this does not reproduce cheaply" invents a probe instead, and a fabricated reproduction is worse than an honest argument. **A probe that ran and did not reproduce is annotated, never `DISPROVED`** — either the finding is wrong or the script is, nothing mechanical can tell those apart, and dropping the finding is the silent failure. And **nothing here moves an advisory kind**: a probe changes what a finding is worth, never what a lane is allowed to say.
 
 It runs untrusted code, so it is off unless two independent things say yes: `plan.json`'s probe policy, and an `--allow-execute` the operator passes after confirming a worktree can run anything at all. What is enforced is a per-probe worktree, a timeout, no stdin, a script path confined to its own reporter's directory, and scrubbed proxy variables. What is *not* enforced is the network — Node cannot unshare a namespace — so `--sandbox` takes whatever real containment the operator has, and the record says which was applied rather than claiming one that was not.
+
+### The report reaches the pull request, as one comment that gets rewritten
+
+A run wrote `report.md`, `report.json` and `report.html` into a `mktemp -d` under the session scratchpad, printed a summary, and ended. The directory is reaped; the ledger survives but is local and per-machine. So the most durable thing a run produced was the least reachable: if the change under review was a pull request, that PR carried no trace that a panel had ever looked at it — not the verdict, not the blocking count, not which lanes were skipped. Nobody reviewing the change could see any of it, and neither could the same user on another checkout.
+
+[`publish.mjs`](skills/adverse-review/scripts/publish.mjs) posts a projection of `report.json` there as an ordinary comment, with an HTML-comment fingerprint in the body. Before posting, it looks for that fingerprint and **rewrites the comment it finds instead of adding another** — one comment per branch, showing current state. Without that, a five-iteration convergence loop leaves five stacked reports, four of them stale, and the stale ones are the dangerous kind: an iteration-1 report goes on saying a finding is open long after iteration 3 closed it.
+
+The body is a projection, never a re-narration. It carries the verdict, the open-blocking count and which findings are in it, the confirmed root causes with their citation fanout, the blocking findings with their confidence labels, the advisory findings under their own non-blocking heading — and **the degraded/skipped-lane accounting and the run's depth**. That last one is the line that most needs to travel: a lane that was skipped and not mentioned reads exactly like a lane that looked and found nothing, and that failure gets strictly worse when the artifact is public, permanent, and read by people who were not in the session. `renderComment` refuses a `report.json` that cannot account for its own run rather than publishing one that looks more thorough than it was.
+
+**Target resolution is the risk here, and it is not a detail.** This is the one capability in this repository that has already sent its output somewhere it did not belong — twice, each time an agent acting alone, and GitHub has no deletion for pull requests at all. So: the target is resolved from `origin` and nothing else; there is no argument anywhere in the feature that names a repository (`--repo` is a local checkout, as in every other bridge); a branch whose pushes go somewhere other than `origin` is refused rather than redirected; an `origin` that has become indistinguishable from `upstream` is refused; the marker is only adopted from a comment this run's own authenticated login wrote, because a token with write access can edit anyone's comment; and the default is a dry run that prints the exact body it would post. Publishing is opt-in per run and never automatic.
+
+Two things it deliberately is not. It posts a **comment, not a review**: a GitHub review carries approve / request-changes semantics, and `design` and `contract` findings can never block, so routing them through a mechanism that formally requests changes would break that rule at the venue where breaking it costs the most. And nothing is posted **inline**: an inline comment can only anchor to a line inside the diff, and a finding whose `claimCheck.inDiff` is `outside` cannot anchor at all — those are the latent defects the change newly makes reachable, which triage protects on purpose as often the most valuable on the table. Everything goes in the body with `path:line`.
 
 ### Co-cited findings are aggregated into root causes, with the citations kept
 
@@ -331,6 +348,8 @@ src/                          # Shared core, used by both CLI and Skill
   collect.mjs                 # Directory walk + git-diff source collection
   runner.mjs                  # Subprocess agent invocation + parallel orchestration
   synthesis.mjs               # Deterministic merge + markdown rendering
+  markdown.mjs                # Rendering payload text as text: which fields are values, which are prose
+  publish.mjs                 # Where a report may be published, and the comment that goes there
   trace.mjs                   # Re-project a finding's anchor across commits
   triage.mjs                  # Claim/kind checks, clustering, root-cause grouping
   briefing.mjs                # Assembles those into the round-2 prompt
@@ -361,6 +380,7 @@ skills/adverse-review/
     repair.mjs                # Skill bridge: restore canonical titles by finding ID
     synthesize.mjs            # Skill bridge: deterministic synthesis
     probe.mjs                 # Skill bridge: re-run each attached reproduction in a clean worktree
+    publish.mjs               # Skill bridge: post the report to the branch's PR, rewriting one comment
     plan.mjs                  # Skill bridge: which lanes, how many agents, rounds, cap, depth
     converge.mjs              # Skill bridge: record decisions, decide whether to stop
     verify.mjs                # Skill bridge: validate a verify payload, reshape for triage

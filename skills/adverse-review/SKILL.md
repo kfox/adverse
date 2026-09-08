@@ -773,6 +773,8 @@ pick:
 - Fix everything except disputed? (most common)
 - Show a specific finding's full reasoning?
 - Just save the report.
+- Post the report to the pull request, if the branch has one? Dry-run it and
+  show them the body first — the mechanism and its refusals are in Phase 10.
 
 In a convergence loop you already have authority to fix, and every decision —
 including each decline — must be recorded to the ledger before the next check;
@@ -970,6 +972,66 @@ disk. Do not delete the run directory**, and never `rm -rf` it:
   may have been reset, misspelled, or emptied by a failed subshell. There is no
   version of that trade that is worth a few megabytes of scratch.
 
+### Post the report to the pull request, if there is one
+
+The run directory is scratch the OS reaps, so by tomorrow the panel's whole
+product is unreachable — and if the change under review was a pull request,
+that PR carries no trace that a panel ever looked at it: not the verdict, not
+the blocking count, not which lanes were skipped. This puts a projection of
+`report.json` there as an ordinary comment, and **rewrites that same comment on
+every later pass**, so a five-iteration loop leaves one comment showing current
+state rather than five stacked reports with four stale ones. A stale report is
+the dangerous kind: it goes on saying a finding is open long after a later pass
+closed it.
+
+**Dry run first, every time.** Publishing is the user's call per run, never a
+default:
+
+```bash
+node ${SKILL_DIR}/scripts/publish.mjs \
+    --report "$ADVERSE_RUN"/report.json \
+    --repo . \
+    --out "$ADVERSE_RUN"/comment.md
+    # in a convergence loop, name the pass, from the LEDGER's counter as in
+    # Phase 6 — never a number minted here:
+    #   --iteration 2
+    # and only after the user has read the body and said to post it:
+    #   --publish
+```
+
+Show the user what it printed and let them decide. Exit 0 saying "nothing to
+publish to" or "no open pull request" is a normal answer, not a failure —
+reviewing uncommitted changes with no PR anywhere is a first-class use of this
+tool, not a degraded one. Exit 1 means it refused, or the post failed, and the
+reason is on stderr.
+
+Four properties of this step are not negotiable:
+
+- **The target is resolved from `origin` and nothing else.** There is no
+  argument anywhere that names a repository on GitHub; `--repo` is a local
+  checkout, exactly as in every other bridge here. A branch that pushes
+  somewhere other than `origin`, and an `origin` that has become its own
+  `upstream`, are refused rather than redirected. **Do not work around a
+  refusal by posting by hand** — the refusal is the point. This is the one
+  capability in this repository that has already sent its output to somebody
+  else's project, twice, and GitHub has no deletion for pull requests at all.
+- **A comment, never a review.** A GitHub review carries approve /
+  request-changes semantics, and `design` and `contract` findings can never
+  block. Posting them through a mechanism that formally requests changes breaks
+  that rule at the venue where breaking it costs the most.
+- **Nothing inline.** An inline comment can only anchor to a line inside the
+  diff, and a finding whose `claimCheck.inDiff` is `outside` cannot anchor at
+  all — and those are the latent defects this change newly makes reachable,
+  which triage protects on purpose. Everything goes in the body with
+  `path:line`.
+- **Never write the body yourself.** It is a projection of `report.json`,
+  rendered in Node, for the same reason the findings are never LLM-rendered:
+  the confidence groupings are the signal and prose regenerated from them loses
+  it. Once the artifact is public, permanent, and read by people who were not
+  in the session, that reason gets stronger rather than weaker — and so does
+  the skipped-lane accounting the body carries, because a lane that was skipped
+  and not mentioned reads exactly like a lane that looked and found nothing.
+
 The ledger lives outside the run directory (Phase 0) precisely so that nothing
 about cleaning up scratch can touch it. **Keep it if the work is not merged
 yet** — a later pass on the same branch starts from these conclusions. Do not
@@ -1059,7 +1121,7 @@ ledger, rather than only in conversation state.
 | 5 — repair, combine | Once `round1.json` and `round2.json` are written | The repaired and combined files are the only state Phase 6 needs. |
 | 6 — synthesize | Once `report.json` / `report.md` are written | This is the artifact the whole triage → synthesize span exists to produce. |
 | 7 — decide, act | **Never mid-fix-batch.** Safe once the report is saved and any fix commits are on the branch with the gate re-run green over all of them together (in a loop, also once decisions are `--record`ed) | Before that, "which findings are fixed" and "what the diff contains" exist only as edits in flight. A worktree's own green is not the composed one, so a batch that ran concurrently is not checkpointable until the replay is done. |
-| 10 — hand over | Anytime | Everything is in the ledger, the branch, and (if opened) the PR. |
+| 10 — hand over | Anytime | Everything is in the ledger, the branch, and — once `publish.mjs` has run — the PR comment itself, which is rewritten rather than duplicated on a later pass. |
 | 11 — harvest lessons | Once the lesson is written to its destination file | Before that, what was learned only exists in conversation. |
 
 Underneath these rows, the same three rules: **never mid-fix-batch, never
@@ -1079,7 +1141,9 @@ Everywhere else, disk already holds what the loop needs next.
 | `probe.mjs` reports reproductions that ran without reproducing | Surface it, and do not treat it as the findings being disproved. Either the finding is wrong or the script is; round 2 is being asked which. A lane doing it repeatedly is overstating what it observed, and that is worth telling the user. |
 | `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge or ruling and continue. |
 | `triage.mjs` reports an `OVERSIZED` candidate root cause | The edges chained further than one root cause plausibly reaches. It will not collapse whatever round 2 says; tell round 2 to name the smaller root causes inside it. |
-| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`/`decisions`/`regression`/`probe`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
+| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`/`decisions`/`regression`/`probe`/`publish`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
+| `publish.mjs` refuses the venue (exit 1) | Report the reason and stop. It means the branch does not push to `origin`, or `origin` and `upstream` have become the same repository. **Do not post the report by hand instead** — the refusal exists because this is the one output path that has already gone to the wrong project. |
+| `publish.mjs` says there is no open pull request | Nothing is wrong. Say so and move on; a run with no PR anywhere is a first-class use of this tool. The body it printed is still worth showing. |
 | `node` not on PATH | Tell the user to install Node 22+. Do not improvise a fallback. |
 | User interrupts | Stop spawning subagents. Say where the partial artifacts are. |
 
