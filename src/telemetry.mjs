@@ -36,6 +36,7 @@ import process from 'node:process';
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import { DEFAULT_PERSONAS, isLaneAgent } from './personas.mjs';
+import { runLanes } from './scaling.mjs';
 import { UNCLASSIFIED, isBlocking } from './synthesis.mjs';
 import { KINDS, ROOT_CAUSE_STATUSES, SEVERITIES } from './taxonomy.mjs';
 
@@ -165,19 +166,25 @@ function planSummary(plan) {
   };
 }
 
-// The reviewer-hallucination gauge, per lane: a claim whose own file or line
-// the checkout disproved. Only a briefing can answer it, and a run synthesized
-// without one records null rather than 0 — "nobody checked" is not "nothing was
-// wrong", which is the same distinction the roster keeps for a silent lane.
+// A claim the checkout contradicted: the reviewer-hallucination gauge, and the
+// one predicate both summaries below count with. It was spelled twice here
+// before, which is one copy short of the number it takes to drift.
+const isDisproved = (f) => f.claimCheck?.status === 'DISPROVED'
+  || f.counterpartCheck?.status === 'DISPROVED';
+
+const isUnderAnchored = (f) => f.kindCheck?.status !== 'ok';
+
+// Per run rather than per lane. Only a briefing can answer any of it, and a run
+// synthesized without one records null rather than 0 — "nobody checked" is not
+// "nothing was wrong", which is the same distinction the roster keeps for a
+// silent lane.
 function triageSummary(briefing) {
   if (!briefing) return null;
   const findings = briefing.findings ?? [];
-  const disproved = (f) => f.claimCheck?.status === 'DISPROVED'
-    || f.counterpartCheck?.status === 'DISPROVED';
   return {
     findings: findings.length,
-    disproved: findings.filter(disproved).length,
-    underAnchored: findings.filter((f) => f.kindCheck?.status !== 'ok').length,
+    disproved: findings.filter(isDisproved).length,
+    underAnchored: findings.filter(isUnderAnchored).length,
     outside: findings.filter((f) => f.claimCheck?.inDiff === 'outside').length,
     clusters: (briefing.clusters ?? []).length,
     crossReferences: (briefing.crossReferences ?? []).length,
@@ -228,11 +235,8 @@ function laneRows({ round1, briefing, degraded, skipped, planned }) {
         ? payloads.filter(([reporter]) => reporter === lane)
           .reduce((n, [, payload]) => n + (payload?.findings ?? []).length, 0)
         : null,
-      disproved: mine
-        ? mine.filter((f) => f.claimCheck?.status === 'DISPROVED'
-          || f.counterpartCheck?.status === 'DISPROVED').length
-        : null,
-      underAnchored: mine ? mine.filter((f) => f.kindCheck?.status !== 'ok').length : null,
+      disproved: mine ? mine.filter(isDisproved).length : null,
+      underAnchored: mine ? mine.filter(isUnderAnchored).length : null,
     };
   }
   return rows;
@@ -269,7 +273,9 @@ export function buildRunRecord({
   const named = (names) => [...new Set(names.map(laneOf).filter(Boolean))];
   const degraded = named(syn.degraded ?? []);
   const skipped = named((syn.skipped ?? []).map((s) => s.persona));
-  const planned = named((plan?.lanes ?? []).filter((l) => l.run).map((l) => l.persona));
+  // `runLanes`, not a second `filter((l) => l.run)`: which lanes a plan RAN is
+  // src/scaling.mjs's question and it already answers it for four other callers.
+  const planned = named(runLanes(plan?.lanes ?? []).map((l) => l.persona));
   const findings = syn.findings ?? [];
   // Names that are not personas at all, counted rather than recorded: the
   // round-1 keys come from a file, and one of them was `SENTINEL-LEAK-9f2a1`
