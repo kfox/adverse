@@ -242,7 +242,7 @@ const goodFix = {
   fixed: [{
     id: 'F3', title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
     confidence: 'consensus', file: 'src/auth.py', line: 88, counterpart: null,
-    reason: 'restored the guard',
+    reason: 'restored the guard', commit: 'abc1234',
     mutations: [{ mutation: 'deleted the guard', victim: 'test_guard_refuses_an_expired_token' }],
   }],
   declined: [],

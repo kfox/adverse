@@ -392,10 +392,22 @@ const goodDecision = (over = {}) => ({
 const goodFix = (over = {}) => ({
   agent: 'fix-auth-guard',
   commits: ['abc1234'],
-  fixed: [{ ...goodDecision(), mutations: [{ mutation: 'deleted the guard on line 88', victim: 'test_guard_refuses_an_expired_token' }] }],
+  fixed: [{
+    ...goodDecision(), commit: 'abc1234',
+    mutations: [{ mutation: 'deleted the guard on line 88', victim: 'test_guard_refuses_an_expired_token' }],
+  }],
   declined: [],
   named_not_fixed: [],
   ...over,
+});
+
+// A `fixed` entry names the one commit that closed it, and that name has to be
+// one of `commits` — everything downstream runs against the names in that
+// list. So a case that varies `commits` moves the entry's commit with it, or it
+// is testing the membership rule rather than the thing it was written for.
+const fixCommitted = (commits) => goodFix({
+  commits,
+  fixed: [{ ...goodFix().fixed[0], commit: commits[0] }],
 });
 
 test('fix: a populated payload validates', () => {
@@ -471,9 +483,9 @@ test('fix: every revision spelling a fix agent can honestly write still validate
     'abc1234', 'a'.repeat(40), 'HEAD', 'HEAD~2', 'HEAD^{commit}',
     'v0.2.1', 'main', 'fix/regression-inputs', 'wip_branch.2',
   ]) {
-    assert.equal(validateFix(goodFix({ commits: [commit] })), null, commit);
+    assert.equal(validateFix(fixCommitted([commit])), null, commit);
   }
-  assert.equal(validateFix(goodFix({ commits: ['abc1234', 'def5678'] })), null);
+  assert.equal(validateFix(fixCommitted(['abc1234', 'def5678'])), null);
 });
 
 // Phase 9 runs one regression pass per fix commit, so a payload claiming fixes
@@ -523,6 +535,82 @@ test('fix: a mutation naming no victim is refused — that is the whole doctrine
 
 test('fix: an empty mutations list is allowed — a fix that added no test is reviewable', () => {
   assert.equal(validateFix(goodFix({ fixed: [{ ...goodFix().fixed[0], mutations: [] }] })), null);
+});
+
+// --- a fixed entry names the commit that closed it (kfox/adverse#58, item 6) -
+// `commits` says what the batch wrote. Nothing said what any single write
+// CLOSED, so the ledger could not answer "which lanes reported the findings
+// this commit closed" and a regression pass's exclusion list had to be typed on
+// the command line by the orchestrator that wrote the commit. It is asked of
+// the agent rather than derived, unlike the reporting lanes recorded beside it:
+// those are already in the report, and this mapping exists nowhere but in the
+// head of whoever made the commits.
+
+test('fix: a fixed entry with no commit is refused', () => {
+  const p = goodFix();
+  delete p.fixed[0].commit;
+  assert.match(validateFix(p), /fixed\[0\] missing key "commit"/);
+});
+
+test('fix: a fixed entry\'s commit is a revision, not free text', () => {
+  // The same rule and the same code as `commits[i]` and the regression
+  // payload's `commit`: this string reaches `regression.mjs --commit <it>` and
+  // is printed inside a sentence this tool signs.
+  //
+  // `commits` stays VALID, and that is the whole test. Putting the bad value
+  // in both lists let `commits[i]`'s identical check fire first for every
+  // case, so this passed with no shape check on `fixed[i].commit` at all —
+  // catalog shape 2, an assertion holding vacuously through another path.
+  // Found by mutation: blank-checking the field only survived.
+  for (const commit of ['--upload-pack=touch /tmp/pwned', 'deadbeef; touch /tmp/pwned',
+    'abc1234 and def5678', 'a'.repeat(65), 'dead\u200bbeef', '  ']) {
+    const p = goodFix({ commits: ['abc1234'] });
+    p.fixed[0].commit = commit;
+    assert.match(validateFix(p), /^fixed\[0\]\.commit (must name the commit|is empty)/,
+      JSON.stringify(commit));
+  }
+});
+
+test('fix: a fixed entry\'s commit must be one the payload named in `commits`', () => {
+  // Everything downstream runs against the names in `commits` — the composed
+  // replay, the regression pass, `git show` — so a `commit` outside that list
+  // records a finding as closed by something nothing will ever replay.
+  const p = goodFix({ commits: ['abc1234', 'def5678'] });
+  p.fixed[0].commit = 'fed4321';
+  const err = validateFix(p);
+  assert.match(err, /fixed\[0\]\.commit "fed4321" is not one of `commits`/);
+  assert.match(err, /"abc1234", "def5678"/, 'the message names what it could have been');
+
+  // Two spellings of one revision reach the same message, and the remedy the
+  // message gives is the same one.
+  const spelled = goodFix({ commits: ['abc1234'] });
+  spelled.fixed[0].commit = 'HEAD';
+  assert.match(validateFix(spelled), /is not one of `commits`/);
+});
+
+test('fix: a declined entry carrying a commit is refused, not ignored', () => {
+  // A decline closes nothing, so a `commit` on one asserts the fix the
+  // decision says was not made — and that field is what a regression pass's
+  // exclusion list is derived from, so the assertion would excuse a lane from
+  // reviewing a commit that closed nothing it reported. Refused rather than
+  // ignored for the same reason a top-level `deferred` key is: the plausible
+  // mistake is an agent copying the `fixed` entry shape one list down.
+  const declined = { ...goodDecision(), id: 'F4', commit: 'abc1234' };
+  assert.match(validateFix(goodFix({ declined: [declined] })),
+    /declined\[0\] carries a `commit`/);
+
+  // The same entry without it validates, so it is the key that is refused.
+  delete declined.commit;
+  assert.equal(validateFix(goodFix({ declined: [declined] })), null);
+});
+
+test('fix: an all-declined batch owes no commit anywhere', () => {
+  // The cross-field rule has to stay one-directional: a batch that fixed
+  // nothing legitimately commits nothing, and requiring a per-entry commit
+  // from a decline would ask an agent for evidence of work it did not do.
+  assert.equal(validateFix(goodFix({
+    commits: [], fixed: [], declined: [{ ...goodDecision(), reason: 'reproduced; unreachable' }],
+  })), null);
 });
 
 test('fix: only a `fixed` entry owes a mutation table', () => {
@@ -798,7 +886,7 @@ test('a revision GFM would mark up validates, and renders as the text it is', ()
   // commit the operator READ differed from the commit the tool RECORDED.
   for (const commit of ['abc~~-not-really~~', 'a_~~x~~', 'a._x_', 'HEAD~2~3', 'wip_branch_2']) {
     assert.equal(validateRegression(goodRegression({ commit }), 'adversary'), null, commit);
-    assert.equal(validateFix(goodFix({ commits: [commit] })), null, commit);
+    assert.equal(validateFix(fixCommitted([commit])), null, commit);
 
     // The sentence the regression bridge writes, through the renderer that
     // signs it. `renderMarkdown` must hand the revision back unchanged.

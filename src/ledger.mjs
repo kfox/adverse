@@ -191,6 +191,17 @@ export function checkBinding(ledger, resolve) {
     if (!resolveOnce(e.atCommit)) {
       problems.push(`entry ${JSON.stringify(e.title)} is anchored at ${e.atCommit}, which is not a commit in this repository`);
     }
+    // Validity when present, not presence. `atCommit` above is required
+    // because every entry carries one; `fixCommit` is null on every
+    // disposition but `fixed` — a decline closes nothing with a commit — so
+    // its absence says nothing about where this ledger came from. When it IS
+    // there it is what `closureOf` derives a regression pass's exclusion list
+    // from, and one that resolves nowhere drops out of that derivation in
+    // silence: the ledger would answer "this commit closed nothing", which is
+    // the derived form of `--closed-by-none`.
+    if (e.fixCommit && !resolveOnce(e.fixCommit)) {
+      problems.push(`entry ${JSON.stringify(e.title)} names fix commit ${e.fixCommit}, which is not a commit in this repository`);
+    }
     if (e.disposition !== undefined && !DISPOSITIONS.includes(e.disposition)) {
       problems.push(`entry ${JSON.stringify(e.title)} has disposition ${JSON.stringify(e.disposition)}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
@@ -616,12 +627,64 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
   });
 }
 
+// The review lanes that reported the finding a decision answers, read off the
+// report that decision was recorded against.
+//
+// DERIVED, never typed, and that is the whole point of the function.
+// `foldFixPayloads` used to write the fix batch's own label into an entry's
+// `reporters` — `['fix-auth-guard']` on a finding the auditor reported — so the
+// one field that could have named a disinterested reviewer named the interested
+// party instead. The fix agent is not asked for the lanes either: it would be
+// copying a field out of its own brief, and a fix agent naming the lanes that
+// must not review its commit is the same interested party one indirection away.
+//
+// SETTLING_SCORE, not a positional match, and the bar is what makes the answer
+// usable. A score of 2 knows kind, file and that two lines are close; it does
+// not know the two findings are one. Attributing lanes off proximity would
+// excuse the wrong lane from a regression pass while the artifact claimed a
+// disinterest nothing checked — the failure src/regression.mjs is built around.
+// No match leaves the list empty, which every reader here treats as "not
+// recorded" rather than "nobody reported it".
+//
+// Every score-3 match contributes rather than the first one winning. Score 3 is
+// an identical title in the same file of the same kind, which is this
+// repository's own definition of one finding — the bar at which a decision
+// SETTLES it — so two report findings reaching it are the same finding and both
+// reporter lists belong.
+function reportersOf(decision, findings) {
+  const lanes = new Set();
+  for (const finding of findings) {
+    const m = scoreMatch(decision, finding);
+    if (!m || m.score < SETTLING_SCORE) continue;
+    for (const lane of finding.reporters ?? []) lanes.add(lane);
+  }
+  return [...lanes].sort();
+}
+
 // Add this iteration's decisions. Entries are appended, never rewritten: the
 // ledger is the record of what was decided when, and a decision that gets
 // revisited is a second entry rather than an edit to the first.
 export function recordDecisions(ledger, decisions, {
   iteration = (ledger.iterations ?? []).length + 1, atCommit, reportDigest = null,
+  report = null,
 } = {}) {
+  // The whole report, not its `findings` array, and the first draft of this
+  // took the array. `report.findings` on a file that is not a synthesis report
+  // is `undefined`, `undefined` passed for a defaulted parameter takes the
+  // default — so a caller doing the extraction itself spelled "I read a report
+  // and could not find its findings" as "I was given no report", and the guard
+  // below could not fire on the one input it exists for.
+  //
+  // The rule is `convergenceStatus`' rule for the same file: "I could not find
+  // the findings" must not be spelled the same way as "there were none". Any
+  // JSON that is not a synthesis report — a ledger, a decisions array, a
+  // briefing — would derive no lane for anything and record a whole iteration
+  // whose fix commits can never say who must not review them. A genuinely
+  // finding-less report writes `findings: []` and passes.
+  if (report !== null && !Array.isArray(report.findings)) {
+    throw new Error('report has no findings array; this is not a synthesis report');
+  }
+
   const next = { ...ledger, entries: [...(ledger.entries ?? [])] };
   for (const d of decisions) {
     if (!DISPOSITIONS.includes(d.disposition)) {
@@ -629,6 +692,29 @@ export function recordDecisions(ledger, decisions, {
     }
     if (!d.reason || !String(d.reason).trim()) {
       throw new Error(`decision for ${JSON.stringify(d.title)} has no reason; an unexplained decision cannot be reviewed later`);
+    }
+    // Refused rather than ignored, the same call `validateFix` makes on a
+    // top-level `deferred` key and for the same reason: ignoring a key leaves
+    // the payload looking like it was read. `reporters` is derived here from
+    // the report, and a caller that supplies its own is supplying the field a
+    // regression pass excuses a lane on — which is the one selection the party
+    // whose commit is under review must not make.
+    if (d.reporters !== undefined) {
+      throw new Error(`decision for ${JSON.stringify(d.title)} carries \`reporters\`; the `
+        + 'reporting lanes are derived from the report this decision answers, not declared by '
+        + 'whoever wrote the decision. Pass the report to --record instead');
+    }
+    // A fix commit on a decision that fixed nothing asserts the change the
+    // decision says was not made — and `fixCommit` is what `closureOf` reads,
+    // so the assertion would excuse a lane from reviewing a commit that closed
+    // nothing it reported. `validateFix` refuses `commit` on a declined
+    // payload entry for the same reason; this is the guard for a caller that
+    // skipped the validator, which is the whole reason src/decisions.mjs keeps
+    // its own.
+    if (d.fixCommit && d.disposition !== 'fixed') {
+      throw new Error(`decision for ${JSON.stringify(d.title)} is ${d.disposition} and names `
+        + `fix commit ${JSON.stringify(d.fixCommit)}; only a fixed decision closes a finding `
+        + 'with a commit');
     }
     next.entries.push({
       id: d.id ?? null,
@@ -640,7 +726,17 @@ export function recordDecisions(ledger, decisions, {
       counterpart: d.counterpart ?? null,
       citedLine: d.citedLine ?? null,
       confidence: d.confidence ?? null,
-      reporters: d.reporters ?? [],
+      // The lanes that reported it, and the batch that decided it. Two facts,
+      // and they were one field: `reporters` held the fix batch's label, so
+      // the ledger said a fix agent had reported the finding it fixed.
+      reporters: report ? reportersOf(d, report.findings) : [],
+      agent: d.agent ?? null,
+      // Which commit closed THIS finding, where `atCommit` below is the commit
+      // the line numbers are valid at — the tree the panel READ. One batch
+      // commit for every decision could not answer "what did this commit
+      // close", so a regression pass's exclusion list had to be typed by the
+      // party whose commit was under review (kfox/adverse#58, item 6).
+      fixCommit: d.fixCommit ?? null,
       disposition: d.disposition,
       reason: String(d.reason).trim(),
       // The root cause this decision was taken on, when it was taken on one:
@@ -657,6 +753,69 @@ export function recordDecisions(ledger, decisions, {
   next.iterations = [...(ledger.iterations ?? []),
     { n: iteration, atCommit, reportDigest, decided: decisions.length }];
   return next;
+}
+
+// What a fix commit closed, according to the ledger.
+//
+// This is the question item 6 of kfox/adverse#58 was filed because nothing
+// could answer, and the answer has one consumer: the regression pass, which
+// must not be run by a lane that reported a finding this commit closed. That
+// list used to be typed on the command line by the orchestrator that wrote the
+// commit — `--closed-by auditor` — and one wrong-but-well-formed name bought an
+// artifact asserting a disinterest nothing had checked.
+//
+// `resolve` maps a revision to a commit id and is injected the way
+// `checkBinding` injects it, so this module stays pure. Revisions are compared
+// RESOLVED, never as strings: an entry holds whatever the fix agent named, so
+// `HEAD~1` and the sha it pointed at are one commit spelled two ways, and
+// string equality would answer "closed nothing" for both — the derived form of
+// `--closed-by-none`, reached by spelling a revision differently.
+//
+// Four fields, because a caller has four situations to tell apart and three of
+// them look identical from a lane list alone. Only the third is an answer:
+//
+//   recorded: false   no `fixed` entry here names a fix commit at all, so this
+//                     ledger was written before the mapping existed and cannot
+//                     say. An empty `lanes` means "unanswerable", not "nothing".
+//   unattributed > 0  entries matched, and that many recorded no reporting
+//                     lane — `--record` ran without `--report`, so the report
+//                     that names the lanes was never read. Deriving from the
+//                     attributed half would claim a completeness nobody has.
+//   closed: 0         this commit closed no recorded finding. A real answer,
+//                     and the derived form of `--closed-by-none`.
+//   lanes             the lanes, sorted and deduped.
+//
+// An entry whose own `fixCommit` resolves nowhere silently fails to match and
+// would push a caller toward `closed: 0`. That is closed one layer up:
+// `checkBinding` refuses such a ledger outright, and every bridge that reads
+// one runs it first.
+export function closureOf(ledger, commit, resolve) {
+  const seen = new Map();
+  const resolveOnce = (ref) => {
+    if (!seen.has(ref)) seen.set(ref, resolve(ref));
+    return seen.get(ref);
+  };
+
+  const target = resolveOnce(commit);
+  // Thrown, not answered. Every honest return value from here says something
+  // about a commit, and there is nothing to say about one that does not exist;
+  // "it closed nothing" is what a typo would get, and it excuses no lane.
+  if (!target) {
+    throw new TypeError(`ledger: ${JSON.stringify(commit)} does not resolve to a commit in this`
+      + ' repository, so what it closed cannot be read');
+  }
+
+  const fixes = (ledger.entries ?? []).filter((e) => e.disposition === 'fixed' && e.fixCommit);
+  const closed = fixes.filter((e) => resolveOnce(e.fixCommit) === target);
+  const lanes = new Set();
+  for (const e of closed) for (const lane of e.reporters ?? []) lanes.add(lane);
+
+  return {
+    recorded: fixes.length > 0,
+    closed: closed.length,
+    unattributed: closed.filter((e) => !(e.reporters ?? []).length).length,
+    lanes: [...lanes].sort(),
+  };
 }
 
 // The stop condition.

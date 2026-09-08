@@ -940,6 +940,7 @@ misremembered.
       "confidence": "<verbatim from the briefing, or null>",
       "file": "<path or null>", "line": <integer or null>,
       "counterpart": "<path this code contradicts (kind=contract), else null>",
+      "commit": "<the one commit from \`commits\` that closed THIS finding>",
       "reason": "<what you changed and why it closes the mechanism>",
       "mutations": [ { "mutation": "<the line you changed and how>",
                        "victim":   "<the test whose assertion went red>" } ] }
@@ -983,6 +984,16 @@ them from the briefing rather than retyping them.
 - \`mutations\` is required on every \`fixed\` entry. An empty list is a claim that
   this fix added no test — reviewable, and sometimes true. A mutation entry
   naming no victim is not evidence and is refused.
+- \`commit\` is required on every \`fixed\` entry, and it must be one of the
+  strings in \`commits\`, spelled the same way — a sha there and \`HEAD~1\`
+  here are refused as different names even when they are one commit. You are
+  the only party that knows which of your commits closed which finding, and
+  the mapping decides who reviews your work: the lane that reported a finding
+  must not review the commit that closed it, and that lane is looked up
+  through this field. One commit per entry. If one commit closed three
+  findings, name it on all three; if a finding took two commits, name the one
+  that closed it. It belongs only on \`fixed\` — a decline closes nothing, so
+  a \`commit\` on one is refused rather than ignored.
 - **\`fixed\` and \`declined\` are the only dispositions you may assert.** They are
   claims about work you did and evidence you hold. \`deferred\` is another
   disposition the ledger accepts and it is not yours: deferring is a decision
@@ -1594,6 +1605,21 @@ export function validateFix(obj) {
       if (err) return err;
     }
   }
+
+  // A decline changes no code, so a `commit` on one asserts the fix the
+  // decision says was not made — and that field is what the ledger derives a
+  // regression pass's exclusion list from, so the assertion would excuse a
+  // lane from reviewing a commit that closed nothing it reported. Refused
+  // rather than ignored, the same call `deferred` gets above and for the same
+  // reason: the plausible mistake is an agent copying the `fixed` entry shape
+  // one list down, and a key that is ignored leaves the payload looking read.
+  for (let i = 0; i < obj.declined.length; i++) {
+    if ('commit' in obj.declined[i]) {
+      return `declined[${i}] carries a \`commit\`. A decline closes nothing, so no commit `
+        + 'closed it — `commit` belongs only on a `fixed` entry. If a commit did close this '
+        + 'finding, it is `fixed`.';
+    }
+  }
   // A fix with no commit leaves the orchestrator holding decisions to record
   // and nothing to replay or regression-check, and nothing said so — the
   // silent skip SKILL.md refuses everywhere else. Cross-field rather than
@@ -1606,13 +1632,41 @@ export function validateFix(obj) {
       + 'a check that never runs.';
   }
 
-  // Only a `fixed` entry claims a code change, so only a `fixed` entry owes a
-  // mutation table. Requiring one from a decline would ask an agent to invent
-  // evidence for work it did not do.
+  // Only a `fixed` entry claims a code change, so only a `fixed` entry owes
+  // the two things a claimed change is checked by: a mutation table, and the
+  // commit that made it. Requiring either from a decline would ask an agent to
+  // produce evidence for work it did not do.
+  //
+  // The per-entry `commit` is the mapping nothing carried. `commits` above
+  // says what the batch wrote; nothing said what any single write CLOSED, so
+  // the ledger could not answer "which lanes reported the findings this commit
+  // closed" and a regression pass's exclusion list had to be typed on the
+  // command line by the orchestrator that wrote the commit (kfox/adverse#58,
+  // item 6). It is asked of the agent rather than derived, unlike the
+  // reporting lanes recorded beside it: those are in the report already, and
+  // this mapping exists nowhere but in the head of whoever made the commits.
   for (let i = 0; i < obj.fixed.length; i++) {
-    if (!('mutations' in obj.fixed[i])) return `fixed[${i}] missing key "mutations".`;
-    const err = validateMutations(obj.fixed[i].mutations, `fixed[${i}]`);
-    if (err) return err;
+    const entry = obj.fixed[i];
+    if (!('mutations' in entry)) return `fixed[${i}] missing key "mutations".`;
+    const badMutations = validateMutations(entry.mutations, `fixed[${i}]`);
+    if (badMutations) return badMutations;
+
+    if (!('commit' in entry)) return `fixed[${i}] missing key "commit".`;
+    const badCommit = revisionError(entry.commit, `fixed[${i}].commit`,
+      'name the commit that closed this finding');
+    if (badCommit) return badCommit;
+    // Membership, by the spelling the payload itself used. Every downstream
+    // check runs against the names in `commits` — the composed replay, the
+    // regression pass, `git show` — so a `commit` outside that list records a
+    // finding as closed by something nothing will ever replay. Two spellings
+    // of one revision (`HEAD~1` and its sha) are a legitimate way to reach
+    // this message, and the remedy is the one the message gives either way.
+    if (!obj.commits.includes(entry.commit)) {
+      return `fixed[${i}].commit ${JSON.stringify(entry.commit)} is not one of \`commits\` `
+        + `(${obj.commits.map((c) => JSON.stringify(c)).join(', ') || 'empty'}). Spell it the `
+        + 'way `commits` does: the composed replay, any regression pass and the ledger all '
+        + 'run against the names in that list.';
+    }
   }
 
   if (!Array.isArray(obj.named_not_fixed)) return '`named_not_fixed` must be an array.';

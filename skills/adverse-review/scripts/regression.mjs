@@ -62,7 +62,7 @@ import { makeWriteQueue, parseBridgeArgs, readJson, requireKnownPersona, usage }
 import { importFromSrc } from './package-root.mjs';
 
 const { closeQuietly, openRegularFileSync } = await importFromSrc('fsSafe.mjs');
-const { annotate, checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
+const { annotate, checkBinding, closureOf, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
 const { makeAnchorTracer, resolveRef } = await importFromSrc('trace.mjs');
 const { chooseRegressionLane, unresolvedLanes } = await importFromSrc('regression.mjs');
 const { validateRegression } = await importFromSrc('prompts.mjs');
@@ -77,7 +77,7 @@ const MAX_FOLD_COMMITS = 64;
 // this throws on the second path the shell expands, and the glob is the obvious
 // thing to type.
 const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
-  + ' (--closed-by <persona>… | --closed-by-none) [--json]\n'
+  + ' (--closed-by <persona>… | --closed-by-none | --closed-by-ledger <ledger.json>) [--json]\n'
   + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
   + ' [--refold] [--choice <lane-choice.json>]… [--repo <dir>] [--ledger <ledger.json>]';
 
@@ -87,8 +87,9 @@ const { values, positionals } = parseBridgeArgs({
   options: {
     repo:             { type: 'string' },
     commit:           { type: 'string' },
-    'closed-by':      { type: 'string', multiple: true },
-    'closed-by-none': { type: 'boolean' },
+    'closed-by':        { type: 'string', multiple: true },
+    'closed-by-none':   { type: 'boolean' },
+    'closed-by-ledger': { type: 'string' },
     payload:          { type: 'string', multiple: true },
     outdir:           { type: 'string' },
     choice:           { type: 'string', multiple: true },
@@ -111,7 +112,8 @@ if (payloads.length) {
     ? loadBoundLedger(values.ledger, path.resolve(values.repo)) : null);
 } else if (values.commit) {
   chooseLane(values.repo ?? '.', values.commit,
-    values['closed-by'] ?? [], values['closed-by-none'] === true);
+    values['closed-by'] ?? [], values['closed-by-none'] === true,
+    values['closed-by-ledger'] ?? null);
 } else {
   usage(USAGE);
 }
@@ -120,27 +122,39 @@ if (payloads.length) {
 // same reason: an annotation says "this was already decided — here is why",
 // and a foreign ledger accepted here puts its text in front of whoever reads
 // the fold.
-function loadBoundLedger(ledgerPath, repo) {
+//
+// Two callers now, and they disagree about two things, so both are arguments:
+//
+//   `flag`     which flag named the file. The message used to say `--ledger`
+//              unconditionally, which is the wrong flag to retype for half the
+//              callers of the same loader.
+//   `refusal`  the exit code for a ledger that was read and cannot be used.
+//              Exit 1 is a claim about a review (bridge-io.mjs): in the fold a
+//              payload WAS read and reshaped, so a refusal there is about that
+//              review. Choosing a lane has not got as far as a review at all,
+//              which is exit 2 — the same call the missing-file arm already
+//              makes, and the same one every other refusal on that path makes.
+function loadBoundLedger(ledgerPath, repo, { flag = '--ledger', refusal = 1 } = {}) {
   let ledger = emptyLedger();
   // loadLedger treats a missing file as an empty ledger, which is right for
-  // iteration 1 of a loop and wrong here: an explicit --ledger names a file
-  // the operator believes exists, and binding an empty one turns the
-  // annotation defense off with exit 0 and no message.
+  // iteration 1 of a loop and wrong here: an explicit flag names a file the
+  // operator believes exists, and binding an empty one turns the annotation
+  // defense off with exit 0 and no message.
   if (!existsSync(ledgerPath)) {
-    process.stderr.write(`regression: --ledger ${ledgerPath}: no such file\n`);
+    process.stderr.write(`regression: ${flag} ${ledgerPath}: no such file\n`);
     process.exit(2);
   }
   try {
     ledger = loadLedger(ledgerPath);
   } catch (e) {
     process.stderr.write(`regression: ${e.message}\n`);
-    process.exit(1);
+    process.exit(refusal);
   }
   const problems = checkBinding(ledger, (ref) => resolveRef(repo, ref));
   if (problems.length) {
     process.stderr.write('regression: this ledger does not belong to this repository:\n'
       + problems.map((pr) => `  - ${pr}\n`).join(''));
-    process.exit(1);
+    process.exit(refusal);
   }
   return { ledger, traceFor: makeAnchorTracer({ repo, to: 'HEAD' }) };
 }
@@ -220,16 +234,24 @@ function readCommit(repo, rev) {
 // as `--closed-by Auditor` reached by typing less rather than by typing
 // something wrong.
 //
-// So the flag is REQUIRED, and `--closed-by-none` is the only way to run the
-// pass with nothing excluded: it makes "this commit closes no reported finding"
-// a claim the caller signs rather than a silence the tool fills in. The two
-// cannot be combined — a commit either closes findings some lane reported or it
-// does not, and a caller that says both has not decided which.
+// So an exclusion input is REQUIRED, in one of three forms, and no two of them
+// may be combined — a commit either closes findings some lane reported or it
+// does not, and a caller that says two things about it has not decided which:
 //
-// src/regression.mjs throws on the same three inputs, so neither layer is the
+//   --closed-by <persona>…      the caller names them
+//   --closed-by-none            the caller signs "this commit closes no
+//                               reported finding" rather than leaving a
+//                               silence for the tool to fill in
+//   --closed-by-ledger <file>   DERIVED. The ledger is asked which decisions
+//                               this commit closed and which lanes reported
+//                               them, so the party under review stops naming
+//                               its own reviewer. Prefer it: the two forms
+//                               above are the interested party's word.
+//
+// src/regression.mjs throws on the same bad inputs, so neither layer is the
 // only one; this one exists to turn them into exit 2 and a sentence instead of
 // a stack trace.
-function requireExclusionArgs(closedBy, closesNothing) {
+function requireExclusionArgs({ closedBy, closesNothing }) {
   if (closesNothing && closedBy.length) {
     process.stderr.write('regression: --closed-by-none contradicts the'
       + ` ${closedBy.length} --closed-by name(s) given; pass one or the other\n`);
@@ -238,13 +260,19 @@ function requireExclusionArgs(closedBy, closesNothing) {
   if (!closesNothing && !closedBy.length) {
     process.stderr.write('regression: --closed-by is required: name every persona that reported'
       + ' a finding this commit closed, so the pass can go to a lane that did not.\n'
+      + '    Better, let the ledger answer: --closed-by-ledger <ledger.json> derives the'
+      + ' names, so the commit under review does not pick its own reviewer.\n'
       + '    If this commit closes no reported finding, say so with --closed-by-none —'
       + ' omitting the flag would have this pass claim a disinterest nothing checked.\n');
     process.exit(2);
   }
 
+  // Every name goes through this, derived ones included. A ledger whose
+  // `reporters` name a lane this review cannot produce is a ledger that cannot
+  // pick a reviewer, and treating a derived list as pre-checked because a
+  // program assembled it is how the fail-open comes back one layer over.
   const unresolved = unresolvedLanes(closedBy);
-  if (!unresolved.length) return closedBy;
+  if (!unresolved.length) return;
 
   process.stderr.write('regression: --closed-by '
     + `${unresolved.map((n) => JSON.stringify(n)).join(', ')} names no agent id this`
@@ -253,11 +281,66 @@ function requireExclusionArgs(closedBy, closesNothing) {
   process.exit(2);
 }
 
-function chooseLane(repo, rev, closedBy, closesNothing) {
+// Ask the ledger who reported the findings this commit closed.
+//
+// The four answers `closureOf` distinguishes collapse to two usable ones here,
+// and the other two are refusals rather than defaults. Both would otherwise
+// arrive as an empty lane list, which reads identically to "this commit closed
+// nothing" — the derived form of `--closed-by-none`, and a clean artifact
+// asserting a disinterest nothing checked. That is the exact failure this
+// bridge's whole exclusion contract exists to refuse, so a derivation that
+// cannot answer says so and the operator falls back to naming the lanes.
+function deriveExclusion(repo, commit, ledgerPath) {
+  const resolved = path.resolve(repo);
+  // Destructured, because `loadBoundLedger` hands back the ledger AND a tracer.
+  // Passing the wrapper to `closureOf` read `undefined` for its entries and
+  // answered "this ledger records no fix commit on any decision" for every
+  // ledger ever written — a refusal, so it failed in the safe direction, and
+  // silent about the real reason.
+  const { ledger } = loadBoundLedger(ledgerPath, resolved,
+    { flag: '--closed-by-ledger', refusal: 2 });
+
+  let closure;
+  try {
+    closure = closureOf(ledger, commit, (ref) => resolveRef(resolved, ref));
+  } catch (e) {
+    process.stderr.write(`regression: ${e.message}\n`);
+    process.exit(2);
+  }
+
+  if (!closure.recorded) {
+    process.stderr.write(`regression: ${ledgerPath} records no fix commit on any decision, so`
+      + ' it cannot say what this commit closed. It was written before decisions carried one'
+      + ' (kfox/adverse#58, item 6); name the lanes with --closed-by, or --closed-by-none if'
+      + ' this commit closes no reported finding.\n');
+    process.exit(2);
+  }
+  if (closure.unattributed) {
+    process.stderr.write(`regression: ${ledgerPath} has ${closure.unattributed} of the`
+      + ` ${closure.closed} decision(s) this commit closed recording no reporting lane —`
+      + ' those were recorded by `converge.mjs --record` without `--report`, so the report'
+      + ' that names the lanes was never read. Deriving from the rest would claim a'
+      + ' completeness nobody has; name the lanes with --closed-by.\n');
+    process.exit(2);
+  }
+
+  return { closedBy: closure.lanes, closesNothing: closure.closed === 0, derived: true };
+}
+
+function chooseLane(repo, rev, closedBy, closesNothing, ledgerPath) {
   const commit = requireRevision(rev);
-  requireExclusionArgs(closedBy, closesNothing);
+  if (ledgerPath && (closedBy.length || closesNothing)) {
+    process.stderr.write('regression: --closed-by-ledger derives the exclusion list, so it'
+      + ' contradicts the --closed-by / --closed-by-none names given beside it; pass one'
+      + ' form or the other\n');
+    process.exit(2);
+  }
+  const exclusion = ledgerPath
+    ? deriveExclusion(repo, commit, ledgerPath)
+    : { closedBy, closesNothing, derived: false };
+  requireExclusionArgs(exclusion);
   const { files, diff } = readCommit(repo, commit);
-  const choice = chooseRegressionLane({ closedBy, files, diff, closesNothing });
+  const choice = chooseRegressionLane({ ...exclusion, files, diff });
 
   if (values.json) {
     process.stdout.write(`${JSON.stringify({ ...choice, commit: rev }, null, 2)}\n`);

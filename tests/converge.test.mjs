@@ -170,6 +170,73 @@ test('the default cap is a real number, not NaN', () => {
   assert.doesNotMatch(r.stdout, /NaN/);
 });
 
+// --- who reported what a fix commit closed (kfox/adverse#58, item 6) --------
+// The lanes are DERIVED here rather than declared anywhere, and this bridge is
+// the only place that holds both halves at once: the decisions, and the report
+// they answer.
+
+test('--record reads the report and writes the lanes that reported each decision', () => {
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{
+      ...blockingFinding(), disposition: 'fixed', reason: 'clamped the bound',
+      agent: 'fix-loop-bound', fixCommit: fixed,
+    }],
+  });
+  const report = writeJson(repo, 'report.json', {
+    findings: [blockingFinding({ reporters: ['auditor', 'steward'] })],
+  });
+
+  const rec = run(['--ledger', ledger, '--record', decisions, '--report', report,
+                   '--repo', repo, '--at', reviewed], repo);
+  assert.equal(rec.status, 0, rec.stderr);
+
+  const [e] = JSON.parse(readFileSync(ledger, 'utf-8')).entries;
+  assert.deepEqual(e.reporters, ['auditor', 'steward']);
+  assert.equal(e.agent, 'fix-loop-bound', 'the batch label is beside them, not instead of them');
+  // Two commits, two facts: the tree the panel READ, and the commit that
+  // CLOSED the finding. One field for both is why nothing could answer what a
+  // fix commit closed.
+  assert.equal(e.atCommit, reviewed);
+  assert.equal(e.fixCommit, fixed);
+});
+
+test('--record without --report records no lane, and says the pass cannot derive one', () => {
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{
+      ...blockingFinding(), disposition: 'fixed', reason: 'clamped the bound',
+      agent: 'fix-loop-bound', fixCommit: fixed,
+    }],
+  });
+
+  const rec = run(['--ledger', ledger, '--record', decisions, '--repo', repo,
+                   '--at', reviewed], repo);
+  assert.equal(rec.status, 0, rec.stderr);
+  assert.match(rec.stderr, /cannot derive who must not run it/);
+
+  const [e] = JSON.parse(readFileSync(ledger, 'utf-8')).entries;
+  assert.deepEqual(e.reporters, [], 'unrecorded, and never the batch label');
+});
+
+test('--record --report on a file that is not a report is refused', () => {
+  // "I could not find the findings" must not be spelled the same way as "there
+  // were none": every fix commit in the iteration would be recorded unable to
+  // say who must not review it, with exit 0 and no message.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{ ...blockingFinding(), disposition: 'declined', reason: 'intended' }],
+  });
+  const notAReport = writeJson(repo, 'ledger-shaped.json', { version: 1, entries: [] });
+
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--record', decisions,
+                 '--report', notAReport, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /this is not a synthesis report/);
+});
+
 // --- what an anchor is recorded against --------------------------------------
 
 test('--at records anchors at the reviewed tree, so tracing is not the identity', () => {

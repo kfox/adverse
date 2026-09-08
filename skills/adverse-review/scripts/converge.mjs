@@ -102,16 +102,25 @@ if (values.record) {
   }
 
   const reportDigest = values.report ? digest(values.report) : null;
+  // The report is now READ, not only hashed. Its findings carry `reporters`,
+  // the review lanes that filed each one, and that is the one place those
+  // lanes are on record: `recordDecisions` derives each entry's `reporters`
+  // from it so a regression pass can look up the lanes that must not review a
+  // fix commit, instead of the orchestrator that wrote the commit typing them
+  // (kfox/adverse#58, item 6).
+  const report = values.report ? readJson(values.report, 'converge') : null;
   if (!values.report) {
     process.stderr.write(
       'converge: --record without --report. These decisions will not name the\n'
       + '  report they answered, so the next check cannot tell "not yet verified"\n'
-      + '  from "the fix did not take" and will report them REGRESSED.\n');
+      + '  from "the fix did not take" and will report them REGRESSED. They will\n'
+      + '  also name no reporting lane, so a regression pass on these fix commits\n'
+      + '  cannot derive who must not run it.\n');
   }
 
   let next;
   try {
-    next = recordDecisions(ledger, decisions, { atCommit, reportDigest });
+    next = recordDecisions(ledger, decisions, { atCommit, reportDigest, report });
   } catch (e) {
     process.stderr.write(`converge: ${e.message}\n`);
     process.exit(2);
