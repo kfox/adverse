@@ -31,7 +31,7 @@ const goodFix = {
   fixed: [{
     id: 'F3', title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
     confidence: 'consensus', file: 'src/auth.py', line: 88, counterpart: null,
-    reason: 'restored the guard',
+    reason: 'restored the guard', commit: 'abc1234',
     mutations: [{ mutation: 'deleted the guard', victim: 'test_guard_refuses_an_expired_token' }],
   }],
   declined: [],
@@ -97,7 +97,10 @@ test('the decisions that settle a question are named as settling', () => {
   try {
     const src = write(dir, 'fix-a.json', {
       ...goodFix,
-      declined: [{ ...goodFix.fixed[0], id: 'F4', title: 'the retry loop is unbounded',
+      // No `commit` on it, and that is not incidental: a decline closes
+      // nothing, so `validateFix` refuses one there rather than ignoring it.
+      declined: [{ ...goodFix.fixed[0], commit: undefined, id: 'F4',
+        title: 'the retry loop is unbounded',
         reason: 'reproduced it; the caller already caps the attempt count' }],
     });
     const r = run(['--fix', src, '--out', path.join(dir, 'decisions.json')]);
@@ -138,7 +141,9 @@ test('several payloads fold in one call, each keeping its own batch label', () =
     assert.equal(doc.decisions.length, 4);
     assert.deepEqual(doc.decisions.filter((d) => d.disposition === 'noted').map((d) => d.id),
       ['NF-fix-auth-guard-1', 'NF-fix-budget-1']);
-    assert.deepEqual(doc.decisions.map((d) => d.reporters[0]),
+    // `agent`, which used to be `reporters[0]` — the fold named the batch that
+    // decided a finding as the lane that reported it.
+    assert.deepEqual(doc.decisions.map((d) => d.agent),
       ['fix-auth-guard', 'fix-auth-guard', 'fix-budget', 'fix-budget']);
   } finally {
     rmSync(dir, { recursive: true, force: true });

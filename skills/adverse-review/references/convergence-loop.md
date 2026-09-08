@@ -82,9 +82,24 @@ calls a `REGRESSED` count the most important line in the run, so a playbook
 that makes it fire falsely after every fix batch destroys the one signal the
 loop trusts most.
 
+It is also the only place the reporting lanes are on record. `--record` reads
+the report's findings and writes the lanes that filed each one onto the decision
+it answers, which is what lets Phase 9 derive the pass's exclusion list instead
+of asking you — the party that wrote the commit — to name it. Omit `--report`
+and every fix commit in the iteration is recorded unable to say who must not
+review it, and `--closed-by-ledger` refuses rather than deriving from half an
+answer.
+
 `decisions.json` is `{"decisions": [{id, title, kind, severity, confidence,
-file, line, counterpart, citedLine, disposition, reason}]}` where `disposition`
-is `fixed`, `declined`, `deferred`, or `noted`. Only `declined` and `deferred`
+file, line, counterpart, citedLine, disposition, reason, agent, commit}]}` where
+`disposition` is `fixed`, `declined`, `deferred`, or `noted`. `agent` is the fix
+batch that decided it and `commit` is the one commit that closed it — `fixed`
+only, since nothing else closes anything, and a `commit` on any other
+disposition is refused. **There is no `reporters` field to write.** The lanes
+that reported each finding are derived from `--report` when the decision is
+recorded; a `reporters` you supply is refused rather than ignored, because that
+is the field Phase 9 excuses a lane on and it must not come from whoever wrote
+the decision. Only `declined` and `deferred`
 **settle** a question; `fixed` and `noted` do not, and `decisions.mjs` marks
 which is which on its own summary line. **Carry `counterpart` on every
 `contract` decision.** That kind's claim is "X contradicts Y", so Y is half its
@@ -318,7 +333,7 @@ reviewer is the one selection an interested party must not make:
 
 ```bash
 node ${SKILL_DIR}/scripts/regression.mjs --repo . --commit <fix-sha> \
-    --closed-by <persona> [--closed-by <persona> …] \
+    --closed-by-ledger "$LEDGER" \
     --json > "$ADVERSE_RUN"/lane-choice-<fix-sha>.json
 ```
 
@@ -327,8 +342,18 @@ picked and on whose word, and the fold below stamps it onto the pass so the
 report can say which. Without it, a pass chosen under `--closed-by-none` is
 indistinguishable on disk from one chosen against a named exclusion list.
 
-`--closed-by` is every persona that reported a finding this commit closed,
-spelled the way the registry spells it — lowercase, or a split lane's half like
+**Prefer `--closed-by-ledger`.** It asks the ledger which decisions this commit
+closed and which lanes reported them, so the list is derived rather than typed
+by you, and the pass's `reason` says which of the two it was. It needs the
+iteration recorded first — `--record` with `--report`, above — and it refuses
+rather than guessing when the ledger cannot answer: a ledger written before
+decisions carried a fix commit, or decisions recorded without their report, both
+exit 2 naming what to pass instead. A ledger that answers "no decision was
+closed by this commit" is a real answer and runs the pass with nothing excluded.
+
+The two typed forms remain, for a commit whose findings were never recorded and
+for the escape hatch. `--closed-by` is every persona that reported a finding
+this commit closed, spelled the way the registry spells it — lowercase, or a split lane's half like
 `auditor-a`. A name this review could not have written is refused at exit 2,
 not ignored — and that is a wider rule than "resolves to no lane". Both of
 these are refused: `--closed-by Auditor` differs by one capital letter,
@@ -338,12 +363,14 @@ under a line asserting it had reported none of them; `--closed-by auditor-ab`
 tightening of that suffix pattern silently moved it from excluding the auditor
 to excluding nobody. If the bridge would have to guess at a name, retype it.
 
-**The flag is required, and omitting it is the same failure spelled shorter.**
-With no `--closed-by` at all the run used to exit 0 having excluded nobody,
+**An exclusion input is required, and omitting it is the same failure spelled
+shorter.** With no `--closed-by` at all the run used to exit 0 having excluded nobody,
 under that same line — a clean artifact claiming a disinterest nothing checked.
 If the commit really closes no reported finding, say so with
 `--closed-by-none`: the pass then runs with nothing excluded and its `reason`
-attributes that to you rather than asserting it. The two cannot be combined.
+attributes that to you rather than asserting it. No two of the three forms can
+be combined — a commit either closes findings some lane reported or it does not,
+and a caller that says two things about it has not decided which.
 
 The answer is the Adversary when the fix diff crosses a trust boundary and the
 Auditor otherwise (`assessScope`, the same signal that gates the Adversary in

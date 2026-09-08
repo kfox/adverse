@@ -13,9 +13,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  DISPOSITIONS, SETTLING_SCORE, annotate, checkBinding, convergenceStatus, emptyLedger,
-  isSettled, loadLedger, matchFinding, normalizeTitle, recordDecisions, saveLedger,
-  scoreMatch, summarizeDispositions,
+  DISPOSITIONS, SETTLING_SCORE, annotate, checkBinding, closureOf, convergenceStatus,
+  emptyLedger, isSettled, loadLedger, matchFinding, normalizeTitle, recordDecisions,
+  saveLedger, scoreMatch, summarizeDispositions,
 } from '../src/ledger.mjs';
 
 const finding = (over = {}) => ({
@@ -1149,4 +1149,221 @@ test('a noted entry carrying a group is called a note, not a decision', () => {
   // The settling dispositions keep the word they earned.
   const [g] = annotate([finding()], ledgerWith(entry({ group: group() })));
   assert.match(g.adjudicated.note, /That decision was taken on root cause "G1"/);
+});
+
+
+// --- what a fix commit closed (kfox/adverse#58, item 6) ----------------------
+//
+// Two facts had to reach an entry before a regression pass could pick its own
+// reviewer honestly: the lanes that REPORTED the finding, and the commit that
+// CLOSED it. Neither was there. `reporters` held the fix batch's own label, so
+// the ledger said `fix-auth-guard` had reported the finding `fix-auth-guard`
+// fixed — the one field that could have named a disinterested reviewer named
+// the only party with a stake — and one `atCommit` covered a whole batch, so
+// nothing could answer what any single fix commit closed.
+
+// A decision, as `foldFixPayloads` now emits one: a batch label, a per-finding
+// fix commit, and no claim at all about who reported it.
+const decided = (over = {}) => ({
+  id: 'F1', title: 'Off-by-one in the loop bound', kind: 'defect', severity: 'critical',
+  file: 'app.py', line: 20, counterpart: null, disposition: 'fixed',
+  reason: 'clamped the bound', agent: 'fix-loop-bound', fixCommit: 'fix1', ...over,
+});
+
+const reported = (over = {}) => ({ ...finding(), reporters: ['auditor', 'steward'], ...over });
+
+test('the lanes that reported a finding are derived from the report, not folded in', () => {
+  const [e] = recordDecisions(emptyLedger(), [decided()],
+    { atCommit: 'reviewed', report: { findings: [reported()] } }).entries;
+
+  assert.deepEqual(e.reporters, ['auditor', 'steward']);
+  assert.equal(e.agent, 'fix-loop-bound', 'the batch label keeps a field of its own');
+});
+
+test('a decision matching nothing in the report names no lane at all', () => {
+  // The safe direction, and the one that matters: an empty list reads as "not
+  // recorded" everywhere downstream, and `closureOf` refuses to derive an
+  // exclusion from it. Naming the batch here is what made a fix agent look
+  // like the reviewer that had reported its own finding.
+  const [e] = recordDecisions(emptyLedger(), [decided({ title: 'something else entirely' })],
+    { atCommit: 'reviewed', report: { findings: [reported()] } }).entries;
+
+  assert.deepEqual(e.reporters, []);
+  assert.equal(e.agent, 'fix-loop-bound');
+});
+
+test('a positional match is too weak to attribute a lane', () => {
+  // SETTLING_SCORE, not a nearby anchor. Score 2 knows kind, file and that two
+  // lines are close; it does not know the two findings are one. Attributing
+  // lanes off proximity would excuse the WRONG lane from a regression pass
+  // while the artifact claimed a disinterest nothing had checked.
+  const near = reported({ title: 'a different defect four lines down', line: 24 });
+  assert.equal(scoreMatch(decided(), near).score, 2, 'the fixture is a positional match');
+
+  const [e] = recordDecisions(emptyLedger(), [decided()],
+    { atCommit: 'reviewed', report: { findings: [near] } }).entries;
+  assert.deepEqual(e.reporters, []);
+});
+
+test('two report findings at settling score contribute both reporter lists', () => {
+  // Score 3 is an identical title in the same file of the same kind, which is
+  // this repository's own definition of one finding — the bar at which a
+  // decision settles it. So both lists belong, and taking the first match
+  // would drop a lane that must not review the fix.
+  const [e] = recordDecisions(emptyLedger(), [decided()], {
+    atCommit: 'reviewed',
+    report: { findings: [reported({ reporters: ['steward'] }),
+                         reported({ reporters: ['adversary', 'steward'] })] },
+  }).entries;
+
+  assert.deepEqual(e.reporters, ['adversary', 'steward'], 'sorted and deduped');
+});
+
+test('recording without a report leaves the lanes unrecorded rather than guessed', () => {
+  const [e] = recordDecisions(emptyLedger(), [decided()], { atCommit: 'reviewed' }).entries;
+  assert.deepEqual(e.reporters, []);
+});
+
+test('a decision that declares its own reporters is refused, not ignored', () => {
+  // The same call `validateFix` makes on a top-level `deferred` key: ignoring
+  // a key leaves the payload looking read. `reporters` is what a regression
+  // pass excuses a lane on, so a caller supplying its own is supplying the one
+  // selection the party whose commit is under review must not make.
+  assert.throws(
+    () => recordDecisions(emptyLedger(), [decided({ reporters: ['auditor'] })],
+      { atCommit: 'reviewed', report: { findings: [reported()] } }),
+    /carries `reporters`.*derived from the report/s);
+});
+
+test('a fix commit on a decision that fixed nothing is refused', () => {
+  for (const disposition of ['declined', 'deferred', 'noted']) {
+    assert.throws(
+      () => recordDecisions(emptyLedger(), [decided({ disposition })], { atCommit: 'reviewed' }),
+      /only a fixed decision closes a finding with a commit/, disposition);
+  }
+  // And the same decision without one records fine, so it is the commit that
+  // is refused and not the disposition.
+  const [e] = recordDecisions(emptyLedger(),
+    [decided({ disposition: 'declined', fixCommit: null })], { atCommit: 'reviewed' }).entries;
+  assert.equal(e.fixCommit, null);
+});
+
+test('the fix commit and the reviewed commit are two fields, because they are two facts', () => {
+  // `atCommit` is the commit the LINE NUMBERS are valid at — the tree the
+  // panel read. `fixCommit` is the commit that closed the finding, which
+  // exists only after those lines moved. One field for both is why nothing
+  // could say what a fix commit closed.
+  const [e] = recordDecisions(emptyLedger(), [decided()], { atCommit: 'reviewed' }).entries;
+  assert.equal(e.atCommit, 'reviewed');
+  assert.equal(e.fixCommit, 'fix1');
+});
+
+test('a --report that is not a synthesis report is refused, not read as empty', () => {
+  // The rule `convergenceStatus` states for the same file: "I could not find
+  // the findings" must not be spelled the same way as "there were none". A
+  // ledger or a decisions array passed here would derive no lane for anything
+  // and record a whole iteration whose fix commits can never say who must not
+  // review them.
+  //
+  // The whole report is passed rather than its `findings`, because that is the
+  // hole this test found: `report.findings` on a non-report is `undefined`,
+  // `undefined` for a defaulted parameter takes the default, and the guard
+  // could never fire on the very input it was written for.
+  for (const notAReport of [{}, { findings: null }, emptyLedger(), { findings: 'F1' }]) {
+    assert.throws(
+      () => recordDecisions(emptyLedger(), [decided()],
+        { atCommit: 'reviewed', report: notAReport }),
+      /this is not a synthesis report/, JSON.stringify(notAReport));
+  }
+  // A genuinely finding-less report passes: it writes `findings: []`.
+  const [e] = recordDecisions(emptyLedger(), [decided()],
+    { atCommit: 'reviewed', report: { findings: [] } }).entries;
+  assert.deepEqual(e.reporters, []);
+});
+
+// --- closureOf ---------------------------------------------------------------
+
+const shas = { fix1: 'aaa', fix2: 'bbb', reviewed: 'ccc', abc123: 'ddd', base0: 'eee' };
+const resolve = (ref) => shas[ref] ?? null;
+
+const closed = (over = {}) => entry({
+  disposition: 'fixed', fixCommit: 'fix1', reporters: ['auditor'], ...over });
+
+test('closureOf names the lanes that reported what a commit closed', () => {
+  const l = ledgerWith(
+    closed(),
+    closed({ title: 'second', reporters: ['steward', 'auditor'] }),
+    closed({ title: 'elsewhere', fixCommit: 'fix2', reporters: ['adversary'] }));
+
+  assert.deepEqual(closureOf(l, 'fix1', resolve),
+    { recorded: true, closed: 2, unattributed: 0, lanes: ['auditor', 'steward'] });
+});
+
+test('closureOf compares commits resolved, not as strings', () => {
+  // An entry holds whatever the fix agent named, so `HEAD~1` and the sha it
+  // pointed at are one commit spelled two ways. String equality answers
+  // "closed nothing" for both — the derived form of --closed-by-none, reached
+  // by spelling a revision differently.
+  const l = ledgerWith(closed({ fixCommit: 'HEAD~1' }));
+  const spellings = (ref) => (['HEAD~1', 'abc1234'].includes(ref) ? 'one-sha' : null);
+
+  assert.equal(closureOf(l, 'abc1234', spellings).closed, 1);
+  assert.deepEqual(closureOf(l, 'abc1234', spellings).lanes, ['auditor']);
+});
+
+test('closureOf says a ledger predating fix commits cannot answer, not that nothing closed', () => {
+  // The distinction the caller has to be able to make. Both arms hand back an
+  // empty lane list, and one of them is an answer.
+  const old = ledgerWith(entry({ disposition: 'fixed', reason: 'guarded' }));
+  assert.deepEqual(closureOf(old, 'fix1', resolve),
+    { recorded: false, closed: 0, unattributed: 0, lanes: [] });
+
+  const current = ledgerWith(closed({ fixCommit: 'fix2' }));
+  assert.deepEqual(closureOf(current, 'fix1', resolve),
+    { recorded: true, closed: 0, unattributed: 0, lanes: [] });
+});
+
+test('closureOf counts the entries this commit closed that name no lane', () => {
+  // `--record` ran without `--report`, so the report that names the lanes was
+  // never read. Deriving from the attributed half would claim a completeness
+  // nobody has, and the count is what lets the caller refuse instead.
+  const l = ledgerWith(closed(), closed({ title: 'second', reporters: [] }),
+    closed({ title: 'third' }));
+  const c = closureOf(l, 'fix1', resolve);
+
+  assert.equal(c.closed, 3);
+  assert.equal(c.unattributed, 1);
+  assert.deepEqual(c.lanes, ['auditor'], 'the attributed entries still answer');
+});
+
+test('only a fixed decision closes a finding, whatever else names a commit', () => {
+  // Defense in depth: `recordDecisions` refuses to write this shape, so a
+  // ledger carrying it was hand-edited. A decline counted as a closure would
+  // excuse a lane from reviewing a commit that closed nothing it reported.
+  const l = ledgerWith(closed({ disposition: 'declined' }), closed({ disposition: 'noted' }));
+  assert.deepEqual(closureOf(l, 'fix1', resolve),
+    { recorded: false, closed: 0, unattributed: 0, lanes: [] });
+});
+
+test('closureOf throws on a commit that resolves nowhere rather than answering', () => {
+  // Every honest return value here says something about a commit, and there is
+  // nothing to say about one that does not exist. "It closed nothing" is what
+  // a typo would get, and it excuses no lane.
+  assert.throws(() => closureOf(ledgerWith(closed()), 'typo', resolve),
+    /"typo" does not resolve to a commit in this repository/);
+});
+
+test('a foreign fix commit is a binding problem; no fix commit is not', () => {
+  // `atCommit` presence is required because every entry carries one.
+  // `fixCommit` is null on every disposition but `fixed`, so its absence says
+  // nothing about where the ledger came from — but one that resolves nowhere
+  // would drop out of `closureOf` in silence and push a caller toward
+  // "this commit closed nothing".
+  const foreign = ledgerWith(closed({ fixCommit: 'elsewhere' }));
+  const problems = checkBinding(foreign, resolve);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /names fix commit elsewhere, which is not a commit/);
+
+  assert.deepEqual(checkBinding(ledgerWith(entry({ atCommit: 'reviewed' })), resolve), [],
+    'an entry with no fix commit binds fine');
 });

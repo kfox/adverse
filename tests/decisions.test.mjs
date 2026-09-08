@@ -30,7 +30,8 @@ const namedItem = (over = {}) => ({
 
 const payload = (over = {}) => ({
   agent: 'fix-auth-guard', commits: ['abc1234'],
-  fixed: [{ ...decision(), mutations: [] }], declined: [], named_not_fixed: [],
+  fixed: [{ ...decision(), commit: 'abc1234', mutations: [] }],
+  declined: [], named_not_fixed: [],
   ...over,
 });
 
@@ -44,7 +45,17 @@ test('a fixed entry becomes a `fixed` decision carrying every identity field', (
   assert.equal(d.file, 'src/auth.py');
   assert.equal(d.line, 88);
   assert.equal(d.reason, 'restored the guard');
-  assert.deepEqual(d.reporters, ['fix-auth-guard']);
+  assert.equal(d.commit, undefined, 'the payload key is not carried through under its own name');
+  assert.equal(d.fixCommit, 'abc1234');
+
+  // The batch label, under a name that claims nothing about who reported the
+  // finding. This assertion read `d.reporters` — so the fold's own contract
+  // said the batch that FIXED a finding was the lane that REPORTED it, and the
+  // one field a regression pass could have excused a lane on named the only
+  // party with a stake in the answer (kfox/adverse#58, item 6).
+  assert.equal(d.agent, 'fix-auth-guard');
+  assert.equal(d.reporters, undefined,
+    'the lanes are derived from the report at record time, never folded from a payload');
 });
 
 test('a declined entry becomes a `declined` decision, not a fixed one', () => {
@@ -61,7 +72,11 @@ test('a named-not-fixed item leaves with an id it arrived without', () => {
   assert.equal(d.disposition, 'noted');
   assert.equal(d.title, 'preflight_emu is not budgeted');
   assert.equal(d.reason, namedItem().detail);
-  assert.deepEqual(d.reporters, ['fix-auth-guard']);
+  assert.equal(d.agent, 'fix-auth-guard');
+  // Nobody reported it and no commit closed it: the batch noticed it, which is
+  // the whole of what is known about where it came from.
+  assert.equal(d.reporters, undefined);
+  assert.equal(d.fixCommit, null);
 });
 
 test('a minted id cannot be mistaken for a triage finding or a root cause', () => {
@@ -98,7 +113,9 @@ test('an item with no detail is refused here, not left to die inside the ledger'
     () => foldFixPayloads([payload({ fixed: [], named_not_fixed: [namedItem({ detail: '  ' })] })]),
     /preflight_emu is not budgeted.*no reason/s);
   assert.throws(
-    () => foldFixPayloads([payload({ fixed: [{ ...decision({ reason: '' }), mutations: [] }] })]),
+    () => foldFixPayloads([payload({
+      fixed: [{ ...decision({ reason: '' }), commit: 'abc1234', mutations: [] }],
+    })]),
     /no reason/);
 });
 
@@ -193,6 +210,20 @@ test('a contract item carries its counterpart, so it can answer the finding', ()
     title: item.title, kind: 'contract', severity: 'warning',
     file: 'SKILL.md', line: 41, counterpart: 'README.md',
   }), null);
+});
+
+test('a declined entry\'s commit is not dropped here — it reaches the ledger\'s refusal', () => {
+  // `validateFix` refuses this payload first, and this file keeps its own
+  // guards precisely for a caller that skipped the validator. Dropping the
+  // field would be the silent direction: the decision records clean and the
+  // one thing wrong with it — a decline asserting a fix commit — is gone.
+  const [d] = foldFixPayloads([payload({
+    fixed: [],
+    declined: [{ ...decision({ reason: 'reproduced; unreachable' }), commit: 'abc1234' }],
+  })]);
+  assert.equal(d.fixCommit, 'abc1234', 'carried, so the ledger can refuse it');
+  assert.throws(() => recordDecisions(emptyLedger(), [d], { atCommit: 'deadbee' }),
+    /only a fixed decision closes a finding with a commit/);
 });
 
 test('recordDecisions accepts a folded batch whole', () => {

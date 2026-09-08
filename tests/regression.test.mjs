@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { chooseRegressionLane, unresolvedLanes } from '../src/regression.mjs';
+import { DISINTEREST_BASES, chooseRegressionLane, unresolvedLanes } from '../src/regression.mjs';
 
 const diffOf = (...added) =>
   ['diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1 +1 @@', ...added.map((l) => `+${l}`)].join('\n');
@@ -205,6 +205,48 @@ test('both exclusion inputs are attributed to the caller, and the artifact says 
   assert.equal(named.disinterest, 'declared-list');
   assert.equal(declared.conflicted, false);
   assert.deepEqual(declared.unresolved, []);
+});
+
+test('a derived exclusion list says the ledger answered, not the caller', () => {
+  // The point of deriving it. Both forms exclude the same lanes, and only one
+  // of them rests on the word of the party whose commit is under review — so
+  // an artifact that words them identically cannot be read for either.
+  const derived = chooseRegressionLane({ ...ROUTINE, closedBy: ['steward'], derived: true });
+  const typed = chooseRegressionLane({ ...ROUTINE, closedBy: ['steward'] });
+
+  assert.equal(derived.persona, typed.persona, 'the same lane is excluded either way');
+  assert.equal(derived.disinterest, 'derived-list');
+  assert.match(derived.reason,
+    /the ledger records 1 lane\(s\) as having reported the findings this commit closed/);
+  assert.doesNotMatch(derived.reason, /the caller/);
+  assert.doesNotMatch(typed.reason, /the ledger/);
+});
+
+test('a derived "nothing was closed" is a different claim from a declared one', () => {
+  const derived = chooseRegressionLane({ ...ROUTINE, closesNothing: true, derived: true });
+  assert.equal(derived.disinterest, 'derived-none');
+  assert.match(derived.reason, /the ledger records no decision closed by this commit/);
+  assert.doesNotMatch(derived.reason, /the caller declared/);
+});
+
+test('each of the four bases has its own sentence, and the vocabulary names all four', () => {
+  // Two questions — was the list DERIVED or declared, and does it name lanes
+  // or claim there are none — so four states. The harm this module exists to
+  // prevent is a `reason` describing a stronger check than the one that ran,
+  // which is what a basis name and a sentence maintained separately eventually
+  // produces.
+  const seen = new Map();
+  for (const derived of [false, true]) {
+    for (const closesNothing of [false, true]) {
+      const c = chooseRegressionLane({ ...ROUTINE, derived, closesNothing,
+        closedBy: closesNothing ? [] : ['steward'] });
+      seen.set(c.disinterest, c.reason);
+    }
+  }
+  assert.deepEqual([...seen.keys()].sort(), [...DISINTEREST_BASES],
+    'every basis this function can produce is written down in DISINTEREST_BASES');
+  assert.equal(new Set(seen.values()).size, 4,
+    `two bases share a sentence: ${JSON.stringify([...seen])}`);
 });
 
 test('a commit description this module cannot read is refused, not assessed', () => {

@@ -309,6 +309,46 @@ function requireExclusionInput(closedBy, closesNothing) {
   }
 }
 
+// Whose word the run's disinterest rests on. Two questions — was the exclusion
+// list DERIVED or declared, and does it name lanes or claim there are none —
+// so four states, written down here because the artifact prints this name and a
+// reader has to be able to look it up.
+//
+// A DECLARED list is unchecked, exactly as unchecked as `closesNothing`:
+// nothing verifies the names against what was actually reported, and the
+// asserted form this replaced ("it reported none of the findings this commit
+// closed") claimed a verification nothing ran — one wrong-but-well-formed name
+// bought the exact sentence this module was hardened to prevent.
+//
+// A DERIVED list is the ledger's answer rather than the caller's. `closureOf`
+// reads the decisions this commit closed and the lanes that reported them, so
+// the party whose commit is under review is no longer the party naming its
+// reviewer. Not a guarantee — the derivation is only as good as the decisions
+// recorded against the report — but a different claim from "someone typed
+// these", and an artifact that cannot tell the two apart cannot be read for
+// either.
+//
+// A Map keyed by the basis, and the sentence lives beside the name rather than
+// in a branch three functions down: the harm this module exists to prevent is
+// a `reason` that describes a stronger check than the one that ran, which is
+// what a name and a sentence maintained separately eventually produces.
+export const DISINTEREST_BASES = Object.freeze(
+  ['declared-list', 'declared-none', 'derived-list', 'derived-none']);
+
+const DISINTEREST = new Map([
+  ['declared-list', (n) => `the caller named ${n} lane(s) as having reported into this commit,`
+    + ' and it is not among them'],
+  ['declared-none', () => 'the caller declared that this commit closes no finding any lane'
+    + ' reported, so no lane was excluded on this run'],
+  ['derived-list', (n) => `the ledger records ${n} lane(s) as having reported the findings this`
+    + ' commit closed, and it is not among them'],
+  ['derived-none', () => 'the ledger records no decision closed by this commit, so no lane was'
+    + ' excluded on this run'],
+]);
+
+const basisOf = ({ derived, closesNothing }) =>
+  `${derived ? 'derived' : 'declared'}-${closesNothing ? 'none' : 'list'}`;
+
 // `closedBy` is the set of personas (or split-lane agent ids) that reported the
 // findings this commit closed. `files` and `diff` describe the fix commit, and
 // are handed straight to assessScope — the Adversary's gate everywhere else in
@@ -323,8 +363,13 @@ function requireExclusionInput(closedBy, closesNothing) {
 // no finding any lane reported. It is the only way to run the pass with nothing
 // excluded, and it exists so that omitting `closedBy` cannot be that way: see
 // `requireExclusionInput`.
+//
+// `derived` says the exclusion input came from the ledger rather than from the
+// caller, and it changes only the sentence the artifact prints — the same
+// lanes are excluded either way. It has to change that sentence: see
+// `DISINTEREST_BASES`.
 export function chooseRegressionLane(
-  { closedBy, files = [], diff = '', closesNothing = false } = {}) {
+  { closedBy, files = [], diff = '', closesNothing = false, derived = false } = {}) {
   requireExclusionInput(closedBy, closesNothing);
   const names = closedBy ?? [];
   const scope = assessScope(
@@ -365,20 +410,8 @@ export function chooseRegressionLane(
       + ' review produces — read the exclusion above as approximate'
     : '';
 
-  // Whose word the disinterest rests on: the caller's, in both arms, and both
-  // sentences say so. A `closedBy` list is exactly as unchecked as
-  // `closesNothing` — nothing verifies the names against what was actually
-  // reported, because the ledger records fix-batch labels rather than
-  // reporting lanes (kfox/adverse#58, item 6) — and the asserted form this
-  // replaced ("it reported none of the findings this commit closed") claimed a
-  // verification nothing ran: one wrong-but-well-formed name bought the exact
-  // sentence this module was hardened to prevent.
-  const disinterest = closesNothing
-    ? 'the caller declared that this commit closes no finding any lane reported, so no lane'
-      + ' was excluded on this run'
-    : `the caller named ${names.length} lane(s) as having reported into this commit, and it`
-      + ' is not among them';
-  const basis = closesNothing ? 'declared-none' : 'declared-list';
+  const basis = basisOf({ derived, closesNothing });
+  const disinterest = DISINTEREST.get(basis)(names.length);
 
   const disinterested = order.find((persona) => !reported.has(persona));
   if (disinterested) {

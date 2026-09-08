@@ -223,6 +223,7 @@ misremembered.
       "confidence": "<verbatim from the briefing, or null>",
       "file": "<path or null>", "line": <integer or null>,
       "counterpart": "<path this code contradicts (kind=contract), else null>",
+      "commit": "<the one commit from `commits` that closed THIS finding>",
       "reason": "<what you changed and why it closes the mechanism>",
       "mutations": [ { "mutation": "<the line you changed and how>",
                        "victim":   "<the test whose assertion went red>" } ] }
@@ -287,6 +288,16 @@ them from the briefing rather than retyping them.
 - `mutations` is required on every `fixed` entry. An empty list is a claim that
   this fix added no test — reviewable, and sometimes true. A mutation entry
   naming no victim is not evidence and is refused.
+- `commit` is required on every `fixed` entry, and it must be one of the
+  strings in `commits`, spelled the same way — a sha there and `HEAD~1`
+  here are refused as different names even when they are one commit. You are
+  the only party that knows which of your commits closed which finding, and
+  the mapping decides who reviews your work: the lane that reported a finding
+  must not review the commit that closed it, and that lane is looked up
+  through this field. One commit per entry. If one commit closed three
+  findings, name it on all three; if a finding took two commits, name the one
+  that closed it. It belongs only on `fixed` — a decline closes nothing, so
+  a `commit` on one is refused rather than ignored.
 - **`fixed` and `declined` are the only dispositions you may assert.** They are
   claims about work you did and evidence you hold. `deferred` is another
   disposition the ledger accepts and it is not yours: deferring is a decision

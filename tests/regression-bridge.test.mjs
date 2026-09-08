@@ -86,15 +86,17 @@ test('a pass reshapes into the round-1 shape triage.mjs reads, stamped', () => {
 
 // annotate() needs a repository to bind the ledger and trace its anchors, so
 // the fold's --ledger requires --repo the same way the chooseLane mode does.
-function gitRepo() {
+function gitRepo(commits = 1) {
   const dir = freshTmp();
   const env = { ...process.env, GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@b',
                 GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@b' };
   const g = (...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf-8', env });
   g('init', '-q');
-  writeFileSync(path.join(dir, 'f.txt'), 'x\n');
-  g('add', '.');
-  g('-c', 'commit.gpgsign=false', 'commit', '-qm', 'c1');
+  for (let n = 1; n <= commits; n++) {
+    writeFileSync(path.join(dir, 'f.txt'), `x${n}\n`);
+    g('add', '.');
+    g('-c', 'commit.gpgsign=false', 'commit', '-qm', `c${n}`);
+  }
   return dir;
 }
 
@@ -788,6 +790,159 @@ test('a revision in git\'s option position is refused before git sees it', () =>
   const r = run(['--repo', ROOT, '--commit=--output=/tmp/pwned']);
   assert.equal(r.status, 2);
   assert.match(r.stderr, /looks like an option/);
+});
+
+// --- --closed-by-ledger: the ledger answers, not the party under review -----
+// The exclusion list was typed on the command line by the orchestrator that
+// wrote the commit, which is the one selection an interested party must not
+// make. It could not be derived because the ledger recorded fix-batch labels
+// instead of reporting lanes and one commit for a whole batch instead of one
+// per decision (kfox/adverse#58, item 6). Both are recorded now.
+
+// A ledger holding one `fixed` decision closed by the repo's HEAD, reported by
+// the lanes given.
+function ledgerClosing(dir, reporters, over = {}) {
+  const file = path.join(dir, 'ledger.json');
+  writeFileSync(file, JSON.stringify({
+    version: 1, base: null, iterations: [{ n: 1, atCommit: 'HEAD' }],
+    entries: [{
+      id: 'F9', title: 'the bounded drain lost its bound', kind: 'behavioral',
+      severity: 'critical', file: 'src/asid.py', line: 243, counterpart: null,
+      citedLine: null, disposition: 'fixed', reason: 'throttled it',
+      reporters, agent: 'fix-drain', fixCommit: 'HEAD',
+      iteration: 1, atCommit: 'HEAD', ...over,
+    }],
+  }));
+  return file;
+}
+
+test('--closed-by-ledger derives the exclusion list and says the ledger did', () => {
+  const dir = gitRepo();
+  try {
+    const ledger = ledgerClosing(dir, ['auditor', 'pragmatist']);
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-ledger', ledger, '--json']);
+    assert.equal(r.status, 0, r.stderr);
+
+    const choice = JSON.parse(r.stdout);
+    assert.notEqual(choice.persona, 'auditor', 'a lane that reported it does not review it');
+    assert.notEqual(choice.persona, 'pragmatist');
+    assert.equal(choice.disinterest, 'derived-list');
+    assert.match(choice.reason, /the ledger records 2 lane\(s\)/);
+    assert.doesNotMatch(choice.reason, /the caller/,
+      'nothing here rests on the word of the party that wrote the commit');
+    assert.deepEqual(choice.unresolved, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a commit the ledger records as closing nothing derives the none arm', () => {
+  const dir = gitRepo(2);
+  try {
+    // A recorded fix, closed by the OTHER commit in this repo. The ledger CAN
+    // answer and its answer is "nothing", which is the derived form of
+    // --closed-by-none. A tree-ish here would be refused by the binding check
+    // instead, which is a different test.
+    const ledger = ledgerClosing(dir, ['auditor'], { fixCommit: 'HEAD~1' });
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-ledger', ledger, '--json']);
+    assert.equal(r.status, 0, r.stderr);
+
+    const choice = JSON.parse(r.stdout);
+    assert.equal(choice.disinterest, 'derived-none');
+    assert.match(choice.reason, /the ledger records no decision closed by this commit/);
+    assert.equal(choice.conflicted, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a ledger that predates per-decision fix commits is refused, not read as "nothing"', () => {
+  // The refusal that keeps this flag honest. Both this and the case above hand
+  // back an empty lane list, and only one of them is an answer: a ledger that
+  // cannot say must not be read as saying no lane reported anything, which is
+  // a clean artifact asserting a disinterest nothing checked.
+  const dir = gitRepo();
+  try {
+    const ledger = ledgerClosing(dir, ['auditor'], { fixCommit: undefined });
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-ledger', ledger, '--json']);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /records no fix commit on any decision/);
+    assert.match(r.stderr, /--closed-by/, 'the refusal names what to do instead');
+    assert.equal(r.stdout, '', 'nothing is printed about a lane');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a decision recorded without its report is refused rather than half-derived', () => {
+  // `converge.mjs --record` without `--report` records no reporting lane, so
+  // the report that names them was never read. Deriving from the rest would
+  // claim a completeness nobody has.
+  const dir = gitRepo();
+  try {
+    const ledger = ledgerClosing(dir, []);
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-ledger', ledger, '--json']);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /1 of the 1 decision\(s\) this commit closed recording no reporting lane/);
+    assert.match(r.stderr, /without `--report`/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a derived lane name this review cannot produce is refused too', () => {
+  // Derived is not the same as checked. A ledger whose `reporters` name a lane
+  // this review cannot produce is a ledger that cannot pick a reviewer, and
+  // treating a list as pre-validated because a program assembled it is the
+  // same fail-open one layer over.
+  const dir = gitRepo();
+  try {
+    const ledger = ledgerClosing(dir, ['Auditor']);
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-ledger', ledger, '--json']);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /"Auditor" names no agent id this review produces/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--closed-by-ledger beside a typed name is refused, not merged', () => {
+  const dir = gitRepo();
+  try {
+    const ledger = ledgerClosing(dir, ['auditor']);
+    for (const extra of [['--closed-by', 'steward'], ['--closed-by-none']]) {
+      const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-ledger', ledger, ...extra]);
+      assert.equal(r.status, 2, extra.join(' '));
+      assert.match(r.stderr, /--closed-by-ledger derives the exclusion list/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a foreign ledger is refused here as it is in the fold', () => {
+  // Same binding check, and it is what stops an entry whose own `fixCommit`
+  // resolves nowhere from dropping out of the derivation in silence and
+  // pushing the run toward "this commit closed nothing".
+  const dir = gitRepo();
+  try {
+    const ledger = ledgerClosing(dir, ['auditor'], { fixCommit: 'f'.repeat(40) });
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-ledger', ledger]);
+    // Exit 2, not the fold path's 1: exit 1 is a claim about a review, and
+    // choosing a lane never got as far as one.
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /names fix commit f{40}, which is not a commit/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the refusal for no exclusion input at all offers the derived form', () => {
+  // The flag that does not rest on the interested party's word is the one an
+  // operator reaching this message should reach for first.
+  const r = run(['--repo', ROOT, '--commit', 'HEAD']);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /--closed-by-ledger <ledger\.json> derives the names/);
 });
 
 test('a --closed-by name that resolves to no lane is refused, by value', () => {

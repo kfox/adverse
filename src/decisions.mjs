@@ -98,7 +98,25 @@ function toDecision(d, disposition, agent) {
     counterpart: d.counterpart ?? null,
     disposition,
     reason: requireReason(d.reason, label),
-    reporters: [agent],
+    // The batch, and no claim about who reported anything. This label was
+    // written into `reporters` — so the ledger said `fix-auth-guard` had
+    // reported the finding `fix-auth-guard` fixed, and the only field that
+    // could have named a lane with no stake in the fix named the one party
+    // that had one. The lanes are derived from the report at record time; see
+    // `reportersOf` in src/ledger.mjs.
+    agent,
+    // Which of this batch's commits closed THIS finding. Only the agent that
+    // wrote the commits knows, which is why it is asked for rather than
+    // derived — and `recordDecisions` took one commit for a whole batch, so
+    // the ledger could not answer what any single fix commit closed
+    // (kfox/adverse#58, item 6).
+    //
+    // Carried on every disposition rather than only on `fixed`, so that a
+    // `commit` on a decline reaches `recordDecisions`' refusal instead of
+    // being dropped here. `validateFix` refuses it first; a caller that
+    // skipped the validator must still not be able to record a decline
+    // asserting the fix it says it did not make.
+    fixCommit: d.commit ?? null,
   };
 }
 
@@ -137,7 +155,12 @@ function toNamedNotFixed(item, agent, n) {
     counterpart: item.counterpart ?? null,
     disposition: NAMED_NOT_FIXED_DISPOSITION,
     reason: suggestion ? `${detail} Suggested: ${suggestion}` : detail,
-    reporters: [agent],
+    // The batch that noticed it, which is the whole of what is known about
+    // where this item came from: no review lane reported it, and it closed no
+    // commit. `reportersOf` will match it against nothing in the report, which
+    // is correct — the report has never seen it.
+    agent,
+    fixCommit: null,
   };
 }
 
