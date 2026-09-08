@@ -8,6 +8,7 @@ import process from 'node:process';
 import { collectDirectory, collectDiff } from './collect.mjs';
 import { refuseDirectRun } from './entryGuard.mjs';
 import { PERSONAS, DEFAULT_PERSONAS, crossReviews } from './personas.mjs';
+import { normalizeProbes } from './probe.mjs';
 import {
   buildPhase1Prompt,
   buildPhase2Prompt,
@@ -67,6 +68,11 @@ Options for 'synthesize':
                            or synthesize refuses. Also carries the depth the run
                            was planned at, which the report and the telemetry
                            line both record. Optional.
+  --probes <path>          probe.mjs's probes.json: the reproductions the tool
+                           re-ran. A confirmed one makes its finding
+                           'demonstrated', the strongest confidence label; an
+                           unconfirmed one is shown and changes nothing.
+                           Bound to --briefing's head when one is given.
   --iteration <n>          Which convergence-loop iteration produced this run.
                            Recorded in the telemetry line; changes nothing else.
   --no-telemetry           Do not append this run's counts to runs.jsonl.
@@ -325,6 +331,7 @@ async function cmdSynthesize(rest) {
       degraded:   { type: 'string', multiple: true },
       'round2-skipped': { type: 'string' },
       plan:       { type: 'string' },
+      probes:     { type: 'string' },
       iteration:  { type: 'string' },
       'no-telemetry': { type: 'boolean' },
       help:       { type: 'boolean', short: 'h' },
@@ -434,9 +441,20 @@ async function cmdSynthesize(rest) {
       + ` ${JSON.stringify(values.iteration)}`);
   }
 
+  // The reproductions the probe bridge re-ran. Bound to the commit the briefing
+  // says was reviewed, the same re-binding triage does — a probes.json an
+  // earlier loop iteration left in the run directory describes a tree that has
+  // since moved, and `confirmed` is the strongest claim this report makes.
+  // With no --briefing there is no head to bind to and the file is taken as
+  // given; that is the standalone-CLI path, where nothing loops.
+  const probes = values.probes
+    ? normalizeProbes(readJsonArg(values.probes), { head: briefing?.head ?? null })
+    : null;
+
   const syn = synthesize(round1, round2, {
     skippedPersonas, failedPersonas, round2Skipped: values['round2-skipped'] ?? null,
     rootCauseGroups: briefing?.groups ?? [],
+    probes: probes?.probes ?? [],
     // Depth rides in on the plan rather than on a flag of its own: two
     // channels would be two claims about one run, and the orchestrator already
     // passes --plan for the roster check. Without a plan the depth is unknown,
@@ -445,7 +463,7 @@ async function cmdSynthesize(rest) {
   });
   recordRun({
     noTelemetry: values['no-telemetry'],
-    syn, round1, round2, briefing, plan, iteration, base: briefing?.base ?? null,
+    syn, round1, round2, briefing, plan, probes, iteration, base: briefing?.base ?? null,
   });
   const md = renderMarkdown(syn);
 

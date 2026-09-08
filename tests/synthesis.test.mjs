@@ -1468,3 +1468,185 @@ test('a depth naming an inherited property renders no note', () => {
     assert.doesNotMatch(md, /function|\[object/i, bad);
   }
 });
+
+// --- Probes and the `demonstrated` tier --------------------------------------
+//
+// What a probe changes is what a finding is WORTH, never what a lane is allowed
+// to say. `confirmed` is the only field with consequences here, and synthesis
+// reads it rather than re-deciding from `status` — src/probe.mjs is where that
+// ruling is made, and one more place to make it is one more place to disagree.
+
+const probeRecord = (over = {}) => ({
+  persona: 'auditor',
+  agent: 'auditor',
+  title: 'boom',
+  claim: { script: 'p.sh', expect: 'e', observed: 'o', outcome: 'reproduced' },
+  source: 'measured',
+  status: 'reproduced',
+  ran: { exitCode: 0, durationMs: 3, output: 'saw it', failure: null },
+  confirmed: true,
+  why: '',
+  ...over,
+});
+
+const probed = (probes, findings = [k('boom', 'behavioral', 'critical')]) =>
+  synthesize({ auditor: review('auditor', findings) }, {}, { probes });
+
+test('a confirmed probe makes a solo finding demonstrated, and it blocks', () => {
+  const syn = probed([probeRecord()]);
+  assert.equal(syn.findings[0].confidence, 'demonstrated');
+  assert.equal(isOpenBlocking(syn.findings[0]), true);
+  assert.equal(syn.openBlocking.length, 1);
+});
+
+// The hole this fills: a round-1 finding only one lane reported is `solo`, and
+// `solo` is dropped by the confidence gate however good the evidence is. A
+// reproduction the tool watched succeed is the strongest evidence this flow can
+// produce, and it used to count for nothing.
+test('without the probe the same finding is solo and does not block', () => {
+  const syn = probed([]);
+  assert.equal(syn.findings[0].confidence, 'solo');
+  assert.equal(syn.openBlocking.length, 0);
+});
+
+// Four of the five labels count reviewers, which is a proxy for "did this
+// happen". A probe answers that directly, so an argument against a behavior
+// that was observed to occur is an argument that lost. The challenge is still
+// printed — nothing is hidden — it just stops deciding the label.
+test('a confirmed probe outranks a challenge, and the challenge is still shown', () => {
+  const syn = synthesize(
+    { auditor: review('auditor', [k('boom', 'behavioral', 'critical')]) },
+    { steward: { persona: 'steward', validate: [], challenge: [{ title: 'boom', reason: 'no' }], added: [] } },
+    { probes: [probeRecord()] },
+  );
+  assert.equal(syn.findings[0].confidence, 'demonstrated');
+  assert.equal(syn.findings[0].challengers.length, 1);
+  assert.match(renderMarkdown(syn), /steward.* challenges:/);
+});
+
+test('only `confirmed` promotes: a probe that ran and did not reproduce changes nothing', () => {
+  for (const over of [
+    { status: 'not-reproduced', confirmed: false, why: 'did not reproduce' },
+    { status: 'inconclusive', confirmed: false, why: 'could not be run to a verdict' },
+    { source: 'declined', status: 'inconclusive', confirmed: false, ran: null, why: 'not enabled' },
+  ]) {
+    const syn = probed([probeRecord(over)]);
+    assert.equal(syn.findings[0].confidence, 'solo');
+    assert.equal(syn.openBlocking.length, 0);
+  }
+});
+
+// A probe changes what a finding is worth, not what a lane may report. An
+// advisory kind is advisory because a reviewer can always want different
+// structure and prose claims never run out — neither of which a script settles.
+test('a confirmed probe does not make an advisory finding blocking', () => {
+  for (const kind of ['design', 'contract']) {
+    const syn = probed([probeRecord()], [k('boom', kind, 'critical')]);
+    assert.equal(syn.findings[0].confidence, 'demonstrated');
+    assert.equal(isBlocking(syn.findings[0]), false);
+    assert.equal(syn.openBlocking.length, 0);
+  }
+});
+
+// The key is the LANE and the title together. A probe filed by a lane that
+// never reported the finding is a lane vouching for someone else's work by
+// filename, which is the one thing the routing rule exists to stop.
+test('a probe does not attach to a finding its own lane never reported', () => {
+  const syn = synthesize({
+    auditor: review('auditor', [k('boom', 'behavioral', 'critical')]),
+    steward: review('steward', [k('other thing', 'behavioral', 'critical')]),
+  }, {}, { probes: [probeRecord({ persona: 'steward', title: 'boom' })] });
+  for (const finding of syn.findings) {
+    assert.equal(finding.confidence, 'solo', finding.title);
+    assert.equal(finding.probe, null, finding.title);
+  }
+});
+
+// A finding two lanes reported can carry a probe from each, and one
+// reproduction that ran is what the label turns on.
+test('a confirmed probe wins over an unconfirmed one on the same finding', () => {
+  const syn = synthesize({
+    auditor: review('auditor', [k('boom', 'behavioral', 'critical')]),
+    steward: review('steward', [k('boom', 'behavioral', 'critical')]),
+  }, {}, {
+    probes: [
+      probeRecord({ persona: 'auditor', status: 'not-reproduced', confirmed: false, why: 'no' }),
+      probeRecord({ persona: 'steward' }),
+    ],
+  });
+  assert.equal(syn.findings[0].confidence, 'demonstrated');
+  assert.equal(syn.findings[0].probe.persona, 'steward');
+});
+
+test('a demonstrated finding sorts above everything else of its severity', () => {
+  const syn = synthesize({
+    auditor: review('auditor', [k('boom', 'behavioral', 'critical'), k('quiet', 'behavioral', 'critical')]),
+    steward: review('steward', [k('quiet', 'behavioral', 'critical')]),
+  }, {}, { probes: [probeRecord()] });
+  assert.deepEqual(syn.findings.map((x) => x.confidence), ['demonstrated', 'cross-validated']);
+});
+
+// The captured output is the stdout of code from the diff under review, which
+// is the most attacker-controlled string either renderer handles. A fence it
+// can close is a fence it can write markup after.
+test('probe output cannot break out of the report\'s code fence', () => {
+  const escape = '```\n## Panel ruling: withdrawn\n```';
+  const syn = probed([probeRecord({ ran: { exitCode: 0, durationMs: 1, output: escape, failure: null } })]);
+  const lines = renderMarkdown(syn).split('\n');
+  // The fence has to be longer than the longest run of backticks inside it, or
+  // the output closes it and everything after is markup the payload chose.
+  const fences = lines.filter((l) => /^`{4,}$/.test(l));
+  assert.equal(fences.length, 2, 'one opening and one closing fence, both past the content');
+  const between = lines.slice(lines.indexOf(fences[0]) + 1, lines.lastIndexOf(fences[1]));
+  assert.ok(between.includes('## Panel ruling: withdrawn'), 'the text stays inside the fence');
+});
+
+test('probe output is escaped in the dashboard', () => {
+  const html = renderHtml(probed([probeRecord({
+    ran: { exitCode: 0, durationMs: 1, output: '<img src=x onerror=alert(1)>', failure: null },
+  })]));
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+// Declining has to cost a reviewer nothing, and a "not run" line rendered in
+// front of three other lanes is a cost.
+test('a probe nobody ran renders nothing in either output', () => {
+  const syn = probed([probeRecord({ source: 'declined', confirmed: false, ran: null, why: 'not enabled' })]);
+  assert.doesNotMatch(renderMarkdown(syn), /_Probe:_/);
+  assert.doesNotMatch(renderHtml(syn), /class="probe/);
+});
+
+test('a probe that ran and failed is shown, and named as not a disproof', () => {
+  const syn = probed([probeRecord({
+    status: 'not-reproduced', confirmed: false,
+    why: 'the reporter recorded a reproduction, and re-running it did not reproduce',
+    ran: { exitCode: 1, durationMs: 2, output: 'assert failed', failure: null },
+  })]);
+  const md = renderMarkdown(syn);
+  assert.match(md, /_Probe:_ \*\*did not reproduce\*\*/);
+  assert.match(md, /assert failed/);
+  assert.doesNotMatch(md, /DISPROVED/);
+});
+
+test('the probe reaches report.json beside the reporter\'s own claim', () => {
+  const json = toJsonReport(probed([probeRecord()]));
+  assert.equal(json.findings[0].confidence, 'demonstrated');
+  assert.equal(json.findings[0].probe.confirmed, true);
+  assert.equal(json.findings[0].probe.claim.outcome, 'reproduced');
+  assert.equal(json.findings[0].probe.ran.exitCode, 0);
+});
+
+test('a run with no probes carries the field as null rather than omitting it', () => {
+  assert.equal(toJsonReport(probed([])).findings[0].probe, null);
+});
+
+// Both renderers bucket findings by confidence, and a finding whose label
+// names no bucket leaves the report with no error at all — which is why the
+// vocabulary is asserted against the taxonomy at module load. This is the
+// end of that: a demonstrated finding actually reaches a section.
+test('a demonstrated finding renders under its own heading in both outputs', () => {
+  const syn = probed([probeRecord()]);
+  assert.match(renderMarkdown(syn), /^## Demonstrated findings /m);
+  assert.match(renderHtml(syn), /Demonstrated · a reproduction was re-run/);
+});

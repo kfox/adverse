@@ -24,6 +24,7 @@ import { refuseDirectRun } from './entryGuard.mjs';
 import { normalizeGate } from './gate.mjs';
 import { emptyLedger, isRegressionCandidate, annotate } from './ledger.mjs';
 import { laneAgentOf } from './personas.mjs';
+import { indexProbes, probeKey } from './probe.mjs';
 import { ADVISORY_KINDS } from './taxonomy.mjs';
 import {
   CLUSTER_WINDOW_LINES, checkKind, clusterFindings, crossReferenceFindings,
@@ -33,11 +34,31 @@ import { mergeSplitReviews, normalizeVerdict } from './synthesis.mjs';
 
 refuseDirectRun(import.meta.url);
 
+// What the round-2 briefing says about a reproduction. Deliberately NOT the
+// whole probe record: the captured output can be four thousand characters of
+// program output and this object is a PROMPT, paid for in every reviewer's
+// context. What round 2 has to know is whether the tool ran it, what the tool
+// saw, and what the reporter claimed — three fields and a sentence.
+//
+// Only a probe the tool actually ran appears at all. A declined one is
+// indistinguishable from no probe here on purpose: declining has to cost a
+// reviewer nothing, and a `probeCheck` reading "not run" in front of three
+// other lanes is a cost.
+function probeCheckOf(record) {
+  if (!record || record.source !== 'measured') return undefined;
+  return {
+    status: record.status,
+    confirmed: record.confirmed,
+    claimed: record.claim?.outcome ?? null,
+    why: record.why,
+  };
+}
+
 // Anchors are normalized BEFORE anything reads them. `line`, `file`,
 // `counterpart` and `detail` come out of a model, and downstream they reach a
 // bounds test, a path resolver and a prose scan that each assumed a type
 // nothing had established.
-function ingest(reviews, { checkClaim, checkCounterpart, advisoryKinds }) {
+function ingest(reviews, { checkClaim, checkCounterpart, advisoryKinds, probeFor }) {
   const findings = [];
   const rejectedAnchors = [];
 
@@ -83,6 +104,11 @@ function ingest(reviews, { checkClaim, checkCounterpart, advisoryKinds }) {
         claimCheck: checkClaim(file, line),
         counterpartCheck: checkCounterpart(counterpart),
         kindCheck: checkKind(f.kind, file, line, counterpart, { advisoryKinds }),
+        // Absent unless the tool ran something — see `probeCheckOf`. Keyed on
+        // the LANE and the title, the same join src/synthesis.mjs makes, so
+        // the briefing and the report cannot attach a probe to two different
+        // findings.
+        probeCheck: probeFor(review.persona, f.title),
       });
     }
   }
@@ -137,12 +163,16 @@ export function buildBriefing(reviews, {
   checkClaim,
   checkCounterpart,
   ledger = emptyLedger(),
+  probes = null,
   traceFor = (anchor) => anchor,
   advisoryKinds = ADVISORY_KINDS,
   windowLines = CLUSTER_WINDOW_LINES,
 } = {}) {
+  const probeIndex = indexProbes(probes?.probes);
+  const probeFor = (persona, title) => probeCheckOf(probeIndex.get(probeKey(persona, title)));
+
   const { findings, rejectedAnchors } = ingest(reviews,
-    { checkClaim, checkCounterpart, advisoryKinds });
+    { checkClaim, checkCounterpart, advisoryKinds, probeFor });
 
   // Same-file-and-nearby-lines, and cross-file co-citation: the two consensus
   // edges a title-only join cannot see.
@@ -169,12 +199,23 @@ export function buildBriefing(reviews, {
   // with `verified: false` and suppresses nothing (src/gate.mjs).
   const briefing = {
     base,
+    // The commit the panel reviewed. Recorded because two readers downstream
+    // have to bind an artifact to it and neither has another way to learn it:
+    // `gate.head` is the commit the GATE's checks ran against, which is the
+    // thing being checked rather than the answer, and the report is assembled
+    // by a process that never opened the repository.
+    head,
     gate: normalizeGate(gate, { head, worktree }),
     verdicts: mergeVerdicts(reviews),
     findings,
     clusters,
     crossReferences,
     groups,
+    // The run-level half of the probe record: what isolation was applied and
+    // whether probes were enabled at all. A run that could not probe must say
+    // so, for the same reason a skipped lane must — silence about probes being
+    // off reads exactly like a panel that did not want one.
+    probes: probes ? { enabled: probes.enabled, isolation: probes.isolation } : null,
     settled: settled.map((f) => f.id),
     regressed: regressed.map((f) => f.id),
     sameFileDifferentRegion: sameFileDifferentRegion(findings),
@@ -191,6 +232,8 @@ export function buildBriefing(reviews, {
     underAnchored: findings.filter((f) => f.kindCheck.status !== 'ok'),
     advisory: findings.filter((f) => f.kindCheck.advisory === true),
     outside: findings.filter((f) => f.claimCheck.inDiff === 'outside'),
+    demonstrated: findings.filter((f) => f.probeCheck?.confirmed === true),
+    notReproduced: findings.filter((f) => f.probeCheck?.status === 'not-reproduced'),
     settled,
     regressed,
   };

@@ -40,7 +40,13 @@ instruction exists to avoid.
       "counterpart": "<path this code contradicts (kind=contract), else null>",
       "title":       "<short noun phrase, <= 80 chars>",
       "detail":      "<2-6 sentences explaining the mechanism and impact>",
-      "fix":         "<concrete remediation, or null if you don't have one>"
+      "fix":         "<concrete remediation, or null if you don't have one>",
+      "probe": {
+        "script":   "<path to a script you wrote, relative to your own output directory>",
+        "expect":   "<what this finding predicts will happen when it runs>",
+        "observed": "<what you actually saw when you ran it>",
+        "outcome":  "reproduced" | "not-reproduced" | "inconclusive"
+      } | null
     }
   ]
 }
@@ -108,6 +114,55 @@ it is `design`. If you cannot name the file the code disagrees with, it is not
 - Anchor every finding as precisely as its kind demands. A `defect` with no line
   and a `contract` with no counterpart are self-contradictory, get flagged as such
   mechanically, and waste the panel's attention.
+
+`probe` — optional, and the answer is usually `null`.
+
+A `behavioral` finding is one settled by executing the code **or** by an
+argument about execution. Until now every one of them was settled the second
+way, which is why this key exists: if you can make the behavior happen, say so
+with a script instead of a paragraph.
+
+How it works:
+
+- **Write the script to a file** in the directory you were told to write your
+  payload to, and put its relative path in `script`. Do not paste the script
+  into `detail`, and do not describe what you would have run. Same rule as the
+  payload itself, for the same reason: a reproduction that exists only as prose
+  is one nobody can re-run.
+- **Exit 0 means the predicted behavior happened.** Write it the way you would
+  write a failing test — it succeeds when the bug is present. Any other exit
+  status means it did not happen.
+- **The tool re-runs it, in a clean checkout, and records what IT saw.** Your
+  `outcome` is your account; it is kept beside the tool's and the two are
+  printed together. Only a script the tool ran and watched succeed earns the
+  finding a stronger label, so there is nothing to be gained by overstating
+  what you saw, and a claimed reproduction that does not reproduce is the most
+  visible thing you can put in a report.
+- **Keep it self-contained and fast.** It runs with a hard timeout, no
+  arguments, no stdin, and a working directory that is a fresh checkout of the
+  code under review. A probe that needs the network, a service, real
+  concurrency or a cluster is not one this can settle.
+- **At most 2 per lane.** Any past that are recorded as
+  unrun. You are here to read the diff; writing scripts is not the job.
+
+When NOT to attach one, which is most of the time:
+
+- The behavior does not reproduce cheaply — a race, a timing window, a failure
+  that needs production scale. Say so in `detail` and leave `probe` null.
+  **That costs you nothing.** A finding with no probe is judged exactly as it
+  would have been before this key existed. A script you DID run and could not
+  read a verdict out of is a different thing: attach it with
+  `"outcome": "inconclusive"`. Every probe object needs a `script`, so
+  declining is `null` and nothing else.
+- You did not actually run anything. Never write an `observed` you did not
+  observe. An honest argument outranks an invented reproduction, and the
+  invented one will be re-run.
+- The finding is `contract` or `design`. Those are advisory whatever runs;
+  a probe cannot make them block and will not try.
+
+`confirmed`, `status` and `ran` are **not yours to write**. The tool stamps
+them after it runs the script, and a payload that supplies any of them is
+refused.
 
 ## Hard constraints
 

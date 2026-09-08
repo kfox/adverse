@@ -747,3 +747,69 @@ test('an unreadable --gate-file exits 2 rather than falling back to no gate', ()
   const { r } = runTriageGate(repo, ['--gate-file', path.join(os.tmpdir(), 'adverse-no-such-gate.json')]);
   assert.equal(r.status, 2);
 });
+
+// --- --probes: the file, and the head it is bound to --------------------------
+//
+// Proven in-process in tests/briefing.test.mjs: what a probe result means to a
+// finding. What only exists here is the FILE — that `--probes` is read at all,
+// and that it is re-bound to the reviewed HEAD before anything is believed.
+// Phase 9 loops back through the same run directory, so a probes.json an
+// earlier iteration left there describes a tree that has since moved.
+
+function runTriageWithProbes(dir, reviews, probes) {
+  const probesPath = path.join(dir, 'probes.json');
+  writeFileSync(probesPath, JSON.stringify(probes), 'utf-8');
+  const files = reviews.map((r, i) => {
+    const p = path.join(dir, `round1-probe-${i}.json`);
+    writeFileSync(p, JSON.stringify(r), 'utf-8');
+    return p;
+  });
+  const out = path.join(dir, 'briefing-probed.json');
+  const args = [TRIAGE];
+  for (const f of files) args.push('--round1', f);
+  args.push('--repo', dir, '--base', 'base', '--probes', probesPath, '--out', out);
+  const stdout = execFileSync(process.execPath, args, { encoding: 'utf-8' });
+  return { briefing: JSON.parse(readFileSync(out, 'utf-8')), stdout };
+}
+
+const probeFileFor = (head) => ({
+  enabled: true,
+  head,
+  isolation: { sandbox: null },
+  probes: [{
+    persona: 'auditor', agent: 'auditor', title: 't',
+    claim: { script: 'p.sh', expect: 'e', observed: 'o', outcome: 'reproduced' },
+    source: 'measured', status: 'reproduced',
+    ran: { exitCode: 0, durationMs: 1, output: '', failure: null },
+    confirmed: true, why: '',
+  }],
+});
+
+test('--probes puts a confirmed reproduction in front of round 2, and counts it', () => {
+  const head = execFileSync('git', ['rev-parse', 'HEAD'],
+    { cwd: repo, encoding: 'utf-8', env: GIT_ENV }).trim();
+  const { briefing, stdout } = runTriageWithProbes(
+    repo, [review('auditor', [finding()])], probeFileFor(head));
+
+  assert.equal(briefing.findings[0].probeCheck.confirmed, true);
+  assert.equal(briefing.probes.enabled, true);
+  assert.match(stdout, /reproductions the tool re-ran and confirmed: 1 \(F1\)/);
+});
+
+test('a probes file bound to another commit reaches round 2 as nothing at all', () => {
+  const { briefing, stdout } = runTriageWithProbes(
+    repo, [review('auditor', [finding()])], probeFileFor('c'.repeat(40)));
+
+  assert.equal(briefing.findings[0].probeCheck, undefined,
+    'a stale confirmation must not look like a probe nobody ran differently than one that was not');
+  assert.match(stdout, /reproductions the tool re-ran and confirmed: 0/);
+});
+
+test('an unreadable --probes file is exit 2 — this run never read an input', () => {
+  const p = path.join(repo, 'round1-noprobe.json');
+  writeFileSync(p, JSON.stringify(review('auditor', [finding()])), 'utf-8');
+  const r = spawnSync(process.execPath, [TRIAGE, '--round1', p, '--repo', repo, '--base', 'base',
+    '--probes', path.join(repo, 'gone.json'), '--out', path.join(repo, 'b.json')],
+  { encoding: 'utf-8' });
+  assert.equal(r.status, 2);
+});

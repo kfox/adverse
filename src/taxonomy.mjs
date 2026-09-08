@@ -29,6 +29,44 @@ export const ADVISORY_KINDS = Object.freeze(new Set(['design', 'contract']));
 
 export const SEVERITIES = Object.freeze(['critical', 'warning', 'info']);
 
+// How strong the evidence behind a finding is. Orthogonal to both axes above:
+// severity is how bad it would be, kind is what would settle it, and this is
+// how much of that settling actually happened.
+//
+// Four of the five are counted from who reported and who ruled
+// (src/synthesis.mjs). `demonstrated` is the one that is not: it means a
+// reviewer attached a reproduction, and src/probe.mjs re-ran that reproduction
+// and watched the predicted behavior occur. It outranks the rest because it is
+// a fact rather than a concurrence — and it outranks `disputed` in particular,
+// which is the interesting case: an argument against a behavior that has been
+// observed to happen is an argument that lost. The challenge is still printed
+// beside the finding; it just stops deciding the label.
+//
+// Here rather than in synthesis.mjs for the reason ROOT_CAUSE_STATUSES is
+// here. This vocabulary was spelled out in five places — synthesis's sort
+// rank, its section titles, its bucket map, and html.mjs's two — with nothing
+// keeping them in step, so a fifth label added to one was a silent gap in the
+// others: a finding in no bucket, dropped from the report without an error.
+export const CONFIDENCES = Object.freeze(
+  ['demonstrated', 'cross-validated', 'consensus', 'disputed', 'solo']);
+
+// The same coverage check `assertCoversStatuses` makes, for the same reason and
+// with the same failure mode in mind: a map keyed by confidence that is missing
+// one silently drops every finding carrying it. Called at module load by each
+// enumerator, so a new label is a loud crash on the next run rather than a
+// section that quietly renders empty.
+export function assertCoversConfidences(map, where) {
+  const keys = Array.isArray(map) ? map : Object.keys(map);
+  const missing = CONFIDENCES.filter((c) => !keys.includes(c));
+  const extra = keys.filter((c) => !CONFIDENCES.includes(c));
+  if (missing.length || extra.length) {
+    throw new Error(`${where}: confidence labels are out of step with taxonomy`
+      + `${missing.length ? `; missing ${missing.join(', ')}` : ''}`
+      + `${extra.length ? `; unknown ${extra.join(', ')}` : ''}`);
+  }
+  return map;
+}
+
 // Which pass produced a finding. `review` is an ordinary review round;
 // `regression` is the read-only pass a lane that did not report the finding
 // runs over a fix commit that already landed (src/regression.mjs). The axis

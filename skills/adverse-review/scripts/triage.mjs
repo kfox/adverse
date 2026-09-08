@@ -46,6 +46,7 @@ const { checkBinding, emptyLedger, loadLedger } = await importFromSrc('ledger.mj
 const { resolveRef, makeAnchorTracer } = await importFromSrc('trace.mjs');
 const { buildBriefing } = await importFromSrc('briefing.mjs');
 const { worktreeDigest } = await importFromSrc('gate.mjs');
+const { normalizeProbes } = await importFromSrc('probe.mjs');
 const { checkRoster } = await importFromSrc('roster.mjs');
 const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, makeClaimChecker } =
   await importFromSrc('triage.mjs');
@@ -57,7 +58,7 @@ const { CLUSTER_WINDOW_LINES, MAX_CO_CITATIONS_PER_FINDING, makeClaimChecker } =
 // with strict parsing the second and later paths arrive as positionals. Node
 // then throws ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL and Phase 3 aborts before
 // any round-2 work happens. combine.mjs has always accepted them; so does this.
-const USAGE = 'Usage: triage.mjs --round1 a.json [--round1 b.json …] [--merge-personas <persona>]… [--plan plan.json] --repo <dir> [--base <ref>] [--gate-file <gate.json> | --gate "<summary>"] [--ledger <ledger.json>] --out <briefing.json>';
+const USAGE = 'Usage: triage.mjs --round1 a.json [--round1 b.json …] [--merge-personas <persona>]… [--plan plan.json] --repo <dir> [--base <ref>] [--gate-file <gate.json> | --gate "<summary>"] [--ledger <ledger.json>] [--probes <probes.json>] --out <briefing.json>';
 
 const { values, positionals } = parseBridgeArgs({
   prefix: 'triage',
@@ -69,6 +70,7 @@ const { values, positionals } = parseBridgeArgs({
     gate:   { type: 'string' },
     'gate-file': { type: 'string' },
     ledger: { type: 'string' },
+    probes: { type: 'string' },
     out:    { type: 'string' },
     'merge-personas': { type: 'string', multiple: true },
     plan:   { type: 'string' },
@@ -177,14 +179,27 @@ const gate = values['gate-file'] !== undefined
   ? readJson(values['gate-file'], 'triage')
   : (values.gate ?? null);
 
+const head = resolveRef(repo, 'HEAD');
+
+// Bound to the reviewed HEAD here rather than trusted as written, the same
+// treatment the gate gets one line down and for the same reason: Phase 9 loops
+// back through this run directory, and a probes.json an earlier iteration left
+// behind would otherwise go on confirming findings against a tree that has
+// moved. src/probe.mjs's `normalizeProbes` turns every failure into a declined
+// probe, which confirms nothing and costs no finding anything.
+const probes = values.probes !== undefined
+  ? normalizeProbes(readJson(values.probes, 'triage'), { head })
+  : null;
+
 const { briefing, stats } = buildBriefing(reviews, {
   base,
-  head: resolveRef(repo, 'HEAD'),
+  head,
   worktree: worktreeDigest(repo),
   gate,
   checkClaim,
   checkCounterpart,
   ledger,
+  probes,
   traceFor: makeAnchorTracer({ repo, to: 'HEAD' }),
 });
 
@@ -205,5 +220,9 @@ process.stdout.write(
   + `  cited outside the diff (annotated, not rejected): ${stats.outside.length}${ids(stats.outside)}\n`
   + `  under-anchored for their kind (annotated, not rejected): ${stats.underAnchored.length}${ids(stats.underAnchored)}\n`
   + `  advisory (${[...ADVISORY_KINDS].join(', ')} — cannot block): ${stats.advisory.length}${ids(stats.advisory)}\n`
+  + `  reproductions the tool re-ran and confirmed: ${stats.demonstrated.length}`
+  + `${ids(stats.demonstrated)}\n`
+  + `  reproductions that ran without reproducing (annotated, NOT disproved):`
+  + ` ${stats.notReproduced.length}${ids(stats.notReproduced)}\n`
   + `  already settled in an earlier iteration: ${stats.settled.length}${ids(stats.settled)}\n`
   + `  REGRESSED (recorded fixed, reported again): ${stats.regressed.length}${ids(stats.regressed)}\n`);

@@ -43,6 +43,15 @@
 //    plan.json, read back by the report, and therefore legible a month later
 //    when the only question is whether an absent finding means the panel
 //    looked (kfox/adverse#77).
+//  - Probes are a policy this module states and never a capability it grants.
+//    A reproduction runs code from the diff under review, so turning them ON
+//    takes two independent yeses: this plan saying the run is one where they
+//    are worth their wall-clock, and Phase 0's operator passing
+//    `--allow-execute` after confirming a worktree can actually run things.
+//    The dial here is on/off by depth and nothing more — the per-lane cap does
+//    NOT scale with depth, because it is a bound on reviewer ATTENTION rather
+//    than on run cost, and a lane that spends a deeper pass writing more shell
+//    scripts has read less of the diff, not more.
 //
 // Size is measured from `git diff --numstat`, never from the diff text: diff
 // text is written by the author of the change, and `.gitattributes -diff`, a
@@ -65,6 +74,7 @@
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import { DEFAULT_PERSONAS, PERSONAS, advisoryOnlyLane } from './personas.mjs';
+import { MAX_PROBES_PER_LANE } from './probe.mjs';
 import { assessScope } from './scope.mjs';
 import { isBlocking } from './synthesis.mjs';
 
@@ -337,6 +347,18 @@ export function planReview({ files = [], diff = '', numstat = null,
       : depth === 'cheap'
         ? { escalate: false, reason: 'a cheap pass; the default tier stands' }
         : { escalate: null, reason: 'depth makes no tier claim; judge it from the diff' },
+    // Whether the panel may attach reproductions, and how many per lane. Never
+    // a requirement: a lane that attaches none is not degraded and a finding
+    // without one is judged exactly as it always was (src/probe.mjs). The
+    // `cheap` refusal is the only depth interaction, and it is the honest one —
+    // a probe is wall-clock, and wall-clock is the thing a cheap pass was
+    // chosen to spend less of.
+    probes: depth === 'cheap'
+      ? { allowed: false, perLane: 0,
+          reason: 'a cheap pass; a reproduction costs wall-clock this depth was chosen to save' }
+      : { allowed: true, perLane: MAX_PROBES_PER_LANE,
+          reason: `each lane may attach up to ${MAX_PROBES_PER_LANE} reproduction(s);`
+            + ' whether any of them RUN is Phase 0\'s call, not this plan\'s' },
     pinned,
     lanes,
     rounds: 2,
@@ -405,6 +427,29 @@ function parseLane(lane, personas) {
   return { ...lane, agents, run };
 }
 
+// A plan that predates this field, or one written by hand, gets the answer
+// that grants nothing. Absent is not "the default policy" here the way it is
+// for `depth`: the field authorizes running code out of the diff under review,
+// and a missing authorization has to read as no, never as a default yes.
+//
+// The cap is clamped rather than refused, and downward only. A plan asking for
+// more probes per lane than this build's own bound is a plan written against a
+// different build or by hand, and lowering it costs a reviewer one script while
+// honoring it costs the run whatever that reviewer decided to spend.
+export function parseProbePolicy(probes) {
+  if (!probes || typeof probes !== 'object' || Array.isArray(probes)) {
+    return { allowed: false, perLane: 0, reason: 'this plan records no probe policy' };
+  }
+  const allowed = probes.allowed === true;
+  const asked = Number.isInteger(probes.perLane) && probes.perLane >= 0
+    ? probes.perLane : MAX_PROBES_PER_LANE;
+  return {
+    allowed,
+    perLane: allowed ? Math.min(asked, MAX_PROBES_PER_LANE) : 0,
+    reason: typeof probes.reason === 'string' ? probes.reason : '',
+  };
+}
+
 export function parsePlan(plan, { personas = DEFAULT_PERSONAS } = {}) {
   if (!plan || typeof plan !== 'object' || !Array.isArray(plan.lanes)) {
     throw new Error('not a plan.json (missing `lanes`)');
@@ -416,6 +461,7 @@ export function parsePlan(plan, { personas = DEFAULT_PERSONAS } = {}) {
   return {
     ...plan,
     depth: parseDepth(plan.depth),
+    probes: parseProbePolicy(plan.probes),
     lanes: plan.lanes.map((l) => parseLane(l, personas)),
   };
 }

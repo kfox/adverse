@@ -19,6 +19,7 @@ import {
   knownTitles,
   validatePhase1,
   validatePhase2,
+  withExtraKey,
 } from '../src/prompts.mjs';
 import { renderMarkdown, synthesize } from '../src/synthesis.mjs';
 import { KINDS } from '../src/taxonomy.mjs';
@@ -1032,4 +1033,113 @@ test('importing the generator writes nothing — the drift check must not repair
   // without this assertion moving only the writes inside it would still pass.
   assert.equal(r.stdout, '', 'importing the generator must print nothing');
   assert.deepEqual(snapshot(), before, 'importing the generator rewrote a tracked file');
+});
+
+// --- The probe key -------------------------------------------------------------
+//
+// The fields src/probe.mjs stamps after it re-runs a script are inadmissible
+// from a payload, and refused rather than stripped — the same rule, for the same
+// reason, as `provenance` in `stampedFieldClaim`. `confirmed` is what buys a
+// finding `confidence: "demonstrated"`, the strongest label this tool prints, so
+// a reviewer that wrote it either misread the schema or was reaching for a label
+// it has not earned. Each is worth a sentence back on the retry path.
+//
+// `stampedFieldClaim` cannot cover it: that sweeps a payload's lists at depth
+// one for one key name, and a probe's stamps sit one level deeper.
+
+const withProbe = (probe) => {
+  const p = goodPhase1();
+  p.verdict = 'conditional';
+  p.findings = [{
+    severity: 'critical', kind: 'behavioral', file: 'x.py', line: 10,
+    title: 'bug', detail: 'broken', fix: null, probe,
+  }];
+  return p;
+};
+
+const goodProbe = () => ({ script: 'probes/F1.sh', expect: 'e', observed: 'o', outcome: 'reproduced' });
+
+test('probe: a well-formed reproduction validates', () => {
+  assert.equal(validatePhase1(withProbe(goodProbe()), 'auditor'), null);
+});
+
+test('probe: absent and null both mean no reproduction, and both are fine', () => {
+  assert.equal(validatePhase1(withProbe(null), 'auditor'), null);
+  const p = withProbe(goodProbe());
+  delete p.findings[0].probe;
+  assert.equal(validatePhase1(p, 'auditor'), null);
+});
+
+test('probe: a payload cannot stamp the field that makes it demonstrated', () => {
+  for (const key of ['confirmed', 'status', 'source', 'ran', 'why']) {
+    const err = validatePhase1(withProbe({ ...goodProbe(), [key]: 'x' }), 'auditor');
+    assert.match(err, new RegExp(`probe\\.${key} is stamped by the bridge`),
+      `${key} must be refused, not honored`);
+  }
+});
+
+test('probe: a claim with nothing to re-run is refused, and null is offered instead', () => {
+  for (const script of [undefined, null, '', '   ', 7]) {
+    assert.match(validatePhase1(withProbe({ ...goodProbe(), script }), 'auditor'),
+      /probe\.script must be the path of a script you wrote and ran/);
+  }
+});
+
+test('probe: an outcome outside the vocabulary is refused with the vocabulary', () => {
+  assert.match(validatePhase1(withProbe({ ...goodProbe(), outcome: 'demonstrated' }), 'auditor'),
+    /probe\.outcome must be reproduced\|not-reproduced\|inconclusive/);
+});
+
+test('probe: a non-object probe is refused rather than coerced', () => {
+  assert.match(validatePhase1(withProbe('probes/F1.sh'), 'auditor'),
+    /probe must be an object or null, got string/);
+  assert.match(validatePhase1(withProbe([goodProbe()]), 'auditor'),
+    /probe must be an object or null, got array/);
+});
+
+// The cap is the bridge's, not this validator's, and the trade is deliberate:
+// the bridge records the excess as unrun and keeps every finding, while
+// refusing here would throw away nine good findings over a third probe.
+test('probe: more probes than the cap is not a schema error', () => {
+  const p = goodPhase1();
+  p.verdict = 'conditional';
+  p.findings = Array.from({ length: 6 }, (_, i) => ({
+    severity: 'warning', kind: 'behavioral', file: 'x.py', line: i + 1,
+    title: `bug ${i}`, detail: 'd', fix: null, probe: goodProbe(),
+  }));
+  assert.equal(validatePhase1(p, 'auditor'), null);
+});
+
+// The prose is what a reviewer reads, and every clause of it is defending
+// against the same failure: a reviewer that feels probing is expected invents
+// one, and a fabricated reproduction arrives wearing the report's best label.
+test('the round-1 prompt makes declining free and says the tool re-runs the script', () => {
+  assert.match(PHASE1_INSTRUCTIONS, /the answer is usually `null`/);
+  assert.match(PHASE1_INSTRUCTIONS, /\*\*That costs you nothing\.\*\*/);
+  assert.match(PHASE1_INSTRUCTIONS, /The tool re-runs it/);
+  assert.match(PHASE1_INSTRUCTIONS, /Exit 0 means the predicted behavior happened/);
+  assert.match(PHASE1_INSTRUCTIONS, /not yours to write/);
+});
+
+// The other side of the same channel: round 2 must not read a failed
+// reproduction as a verdict, because nothing mechanical can tell a wrong
+// finding from a wrong script.
+test('the round-2 briefing prompt says a failed reproduction is a question, not a disproof', () => {
+  assert.match(PHASE2_BRIEFING_INSTRUCTIONS, /`probeCheck`/);
+  assert.match(PHASE2_BRIEFING_INSTRUCTIONS, /It is \*\*not\*\* a DISPROVED and the finding is still\s+live/);
+  assert.match(PHASE2_BRIEFING_INSTRUCTIONS, /declining costs nothing/);
+});
+
+// `withExtraKey` splices into a schema with a replacement FUNCTION, not a
+// string: `$&`, `` $` `` and `$'` expand in a string replacement, so the day a
+// spliced value contains one this would ship a corrupted schema to the agent it
+// is telling to satisfy that schema.
+test('a spliced value containing $& does not corrupt the schema', () => {
+  const spliced = withExtraKey('    {\n      "a": 1\n    }', '      "b": "$&$\'"', 'test');
+  assert.match(spliced, /"b": "\$&\$'"/);
+});
+
+test('splicing into something that is not a finding schema throws rather than returning it', () => {
+  assert.throws(() => withExtraKey('not a schema', '      "b": 1', 'test'),
+    /test: the schema does not end in the object close/);
 });

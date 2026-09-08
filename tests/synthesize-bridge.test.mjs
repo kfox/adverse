@@ -185,3 +185,114 @@ test('the roster check still fires when a plan also carries a depth', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- --probes, and the head it is bound to ------------------------------------
+//
+// `confirmed` is the strongest claim this report makes, and Phase 9 loops back
+// through the same run directory — so a probes.json an earlier iteration left
+// there describes a tree that has since moved. The binding is made against the
+// head the BRIEFING recorded, because this process never opens the repository.
+
+const PROBED_TITLE = 'mean returns NaN on an empty list';
+const HEAD = 'a'.repeat(40);
+const OTHER = 'b'.repeat(40);
+
+function probedRound1(dir) {
+  const p = path.join(dir, 'round1.json');
+  writeFileSync(p, JSON.stringify({
+    auditor: {
+      persona: 'auditor',
+      verdict: 'reject',
+      summary: 's',
+      findings: [{
+        severity: 'critical', kind: 'behavioral', file: 'lib.mjs', line: 2,
+        counterpart: null, title: PROBED_TITLE, detail: 'd', fix: null,
+      }],
+    },
+  }));
+  return p;
+}
+
+function probesFile(dir, head) {
+  const p = path.join(dir, 'probes.json');
+  writeFileSync(p, JSON.stringify({
+    enabled: true,
+    head,
+    isolation: { sandbox: null },
+    probes: [{
+      persona: 'auditor', agent: 'auditor', title: PROBED_TITLE,
+      claim: { script: 'p.sh', expect: 'e', observed: 'o', outcome: 'reproduced' },
+      source: 'measured', status: 'reproduced',
+      ran: { exitCode: 0, durationMs: 1, output: 'saw it', failure: null },
+      confirmed: true, why: '',
+    }],
+  }));
+  return p;
+}
+
+function briefingFile(dir, head) {
+  const p = path.join(dir, 'briefing.json');
+  writeFileSync(p, JSON.stringify({ base: 'main', head, groups: [], findings: [] }));
+  return p;
+}
+
+const confidenceOf = (jsonOut) =>
+  JSON.parse(readFileSync(jsonOut, 'utf-8')).findings[0].confidence;
+
+test('a probe bound to the reviewed head makes its finding demonstrated', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-probes-'));
+  const jsonOut = path.join(dir, 'report.json');
+  const r = runSynth(['--round1', probedRound1(dir),
+    '--briefing', briefingFile(dir, HEAD), '--probes', probesFile(dir, HEAD),
+    '--out', path.join(dir, 'report.md'), '--json-out', jsonOut]);
+
+  assert.equal(r.status, 1, r.stderr);   // a live critical: the reject exit
+  assert.equal(confidenceOf(jsonOut), 'demonstrated');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a probe from a run against a different tree confirms nothing', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-probes-stale-'));
+  const jsonOut = path.join(dir, 'report.json');
+  runSynth(['--round1', probedRound1(dir),
+    '--briefing', briefingFile(dir, OTHER), '--probes', probesFile(dir, HEAD),
+    '--out', path.join(dir, 'report.md'), '--json-out', jsonOut]);
+
+  assert.equal(confidenceOf(jsonOut), 'solo');
+  const probe = JSON.parse(readFileSync(jsonOut, 'utf-8')).findings[0].probe;
+  assert.equal(probe.confirmed, false);
+  assert.match(probe.why, /not the tree under review/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Without a briefing there is no head to bind to, and this is the standalone
+// path, where nothing loops. Taking the file as given is the honest answer;
+// inventing a binding would refuse a run that is not at risk.
+test('with no briefing the probes file is taken as given', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-probes-nobrief-'));
+  const jsonOut = path.join(dir, 'report.json');
+  runSynth(['--round1', probedRound1(dir), '--probes', probesFile(dir, HEAD),
+    '--out', path.join(dir, 'report.md'), '--json-out', jsonOut]);
+
+  assert.equal(confidenceOf(jsonOut), 'demonstrated');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a run with no --probes leaves every finding where it was', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-probes-none-'));
+  const jsonOut = path.join(dir, 'report.json');
+  runSynth(['--round1', probedRound1(dir), '--out', path.join(dir, 'report.md'),
+    '--json-out', jsonOut]);
+
+  assert.equal(confidenceOf(jsonOut), 'solo');
+  assert.equal(JSON.parse(readFileSync(jsonOut, 'utf-8')).findings[0].probe, null);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('an unreadable --probes file is exit 2 — this run never read an input', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-probes-gone-'));
+  const r = runSynth(['--round1', probedRound1(dir), '--probes', path.join(dir, 'gone.json'),
+    '--out', path.join(dir, 'report.md')]);
+  assert.equal(r.status, 2);
+  rmSync(dir, { recursive: true, force: true });
+});

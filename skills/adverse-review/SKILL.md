@@ -263,6 +263,14 @@ backwards, and both have cost a whole iteration:
 Confirm one worktree can run the repo's gate before spawning — a detached
 worktree may lack installed dependencies.
 
+**That check is also the probe precondition.** A reviewer may attach a
+reproduction to a finding (Phase 2.5), and the tool re-runs each one in a
+worktree of its own. If the check above failed, probes are off for this run:
+omit `--allow-execute` below, and **say so** in your summary. A report that is
+silent about probes being unavailable reads exactly like a panel that did not
+want one — the same reason a skipped lane has to be declared. `plan.json`'s
+`probes.allowed` is the other half of the answer; both must say yes.
+
 ## Phase 2 — round 1: independent reviews
 
 Spawn the reviewers the plan selected **in parallel** using the Agent tool,
@@ -422,6 +430,60 @@ lane is re-run. Use `--skipped <persona>=<reason>` only for a lane you chose
 not to run; it is reported but does not block, and it is not a place to put a
 lane that crashed.
 
+## Phase 2.5 — re-run the reproductions round 1 attached
+
+A `behavioral` finding is defined as one settled by executing the code **or**
+by an argument about execution, and until this step every one of them was
+settled the second way. A reviewer that reproduced a bug in its worktree wrote
+prose about it, the worktree was deleted, and nothing downstream could tell
+that finding from one that was reasoned out.
+
+Skip this whole phase when Phase 1 said probes are off, or when no payload
+attached one — it costs nothing and establishes nothing:
+
+```bash
+node ${SKILL_DIR}/scripts/probe.mjs --round1 "$ADVERSE_RUN"/*/round1-*.json \
+    --repo . --plan "$ADVERSE_RUN/plan.json" --allow-execute \
+    --out "$ADVERSE_RUN/probes.json" && PROBES=1
+    # `$PROBES` is what the two invocations below expand on. Set it only when
+    # this phase actually wrote a file — an unset variable means Phase 3 and
+    # Phase 6 pass no --probes, which is the right shape for a run that had
+    # none.
+    # --allow-execute is the operator's yes and it is required: without it
+    # every attached probe is recorded as declined and nothing runs. --plan
+    # carries the other yes and the per-lane cap, so neither is retyped.
+    # --sandbox '<command prefix>' prefixes every probe with real containment
+    # you supply (bwrap --unshare-net --, sandbox-exec -f …). Pass one if you
+    # have one: this runs code from the diff under review, and the tool cannot
+    # unshare a namespace on its own. Whatever you pass is recorded, and so is
+    # passing nothing.
+```
+
+**The reviewer proposes; the tool confirms.** Nothing a payload writes can make
+a finding `demonstrated` — the bridge computes that from an exit code it
+collected itself, in a fresh detached worktree, with a hard timeout. This is
+the routing rule `regression.mjs` already documents: the interested party must
+not be the one that confirms its own work.
+
+What it can and cannot do to a finding:
+
+- A probe that **reproduced** buys its finding `confidence: demonstrated`, the
+  only label above `cross-validated`, and one that can block on its own.
+- A probe that **ran and did not reproduce** is annotated, loudly, and is
+  **never** a `DISPROVED`. Either the finding is wrong or the script is, and
+  nothing here can tell those apart — so round 2 gets the question rather than
+  a verdict. Read the stderr lines; a lane whose reproductions keep failing is
+  a lane overstating what it saw.
+- A probe that was **not run** — declined, capped, unenabled, unopenable —
+  costs its finding nothing at all. That has to stay true: a reviewer that pays
+  for declining invents a probe instead, and a fabricated reproduction is worse
+  than an honest argument.
+- Nothing here moves an advisory kind. A `design` finding with a reproduced
+  probe is still advisory.
+
+Exit is 0 whatever the probes said. A reproduction that failed is a fact about
+a finding, never a verdict on the change.
+
 ## Phase 3 — triage (deterministic, no model)
 
 This is what makes round 2 cheap and what keeps cross-lane consensus alive:
@@ -431,8 +493,14 @@ node ${SKILL_DIR}/scripts/triage.mjs \
     --round1 "$ADVERSE_RUN"/*/round1-*.json \
     --repo . --base "$BASE" --gate-file "$ADVERSE_RUN/gate.json" \
     ${LEDGER:+--ledger "$LEDGER"} \
+    ${PROBES:+--probes "$ADVERSE_RUN/probes.json"} \
     --plan "$ADVERSE_RUN/plan.json" \
     --out "$ADVERSE_RUN"/briefing.json
+    # --probes puts each re-run reproduction in front of round 2 as
+    # `probeCheck`, re-bound to the reviewed HEAD first: a probes.json a
+    # previous loop iteration left in this directory describes a tree that has
+    # since moved, and every way of failing that check lands on "not run",
+    # which confirms nothing.
     # --plan reads which lanes Phase 1 split (agents > 1) straight out of
     # plan.json, so the split roster is never retyped by hand — same flag,
     # same meaning, as the combine.mjs invocation in Phase 5. Without it (or
@@ -449,6 +517,10 @@ What it gives you:
 - **Claim checks.** A cited file that doesn't exist, a line past EOF, or a
   `counterpart` that isn't in the checkout is `DISPROVED` before any model
   spends a token on it.
+- **Probe results**, when Phase 2.5 ran. `probeCheck.confirmed` is a behavior
+  the tool watched happen; `status: "not-reproduced"` is a question for round 2
+  and explicitly not a `DISPROVED`. A finding with no `probeCheck` is judged
+  exactly as every finding was before probes existed.
 - **Kind checks.** A `defect` with no line, a `contract` with no counterpart —
   under-anchored, *annotated not rejected*. The reporter may have found
   something real and merely labeled it carelessly, and only a reviewer can tell
@@ -639,6 +711,7 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     --round2 "$ADVERSE_RUN"/round2.json \
     --briefing "$ADVERSE_RUN"/briefing.json \
     --plan "$ADVERSE_RUN"/plan.json \
+    ${PROBES:+--probes "$ADVERSE_RUN/probes.json"} \
     --out "$ADVERSE_RUN"/report.md \
     --json-out "$ADVERSE_RUN"/report.json \
     --html-out "$ADVERSE_RUN"/report.html
@@ -647,6 +720,9 @@ node ${SKILL_DIR}/scripts/synthesize.mjs \
     #   --skipped pragmatist="small diff; design findings are advisory"
     # and, when Phase 4 skipped round 2:
     #   --round2-skipped "$R2_REASON"
+    # --probes is what turns a confirmed reproduction into
+    # `confidence: demonstrated` and puts the script's own output in the
+    # report beside the finding. Bound to --briefing's head, same as triage.
     # --plan also carries the run's depth into the report header, so a run
     # planned `cheap` cannot render like one planned at the default.
     # --plan makes the skipped-lane accounting arithmetic: a lane the plan ran
@@ -682,7 +758,11 @@ Present a **summary**, not the full report:
    bullets is not.
 4. The top 3 blocking findings not already covered by a root cause above.
 5. Advisory findings as a separate, clearly non-blocking list.
-6. A pointer to the report and the HTML dashboard.
+6. Any **demonstrated** finding, called that: the tool re-ran a reproduction
+   and the behavior happened. It is the strongest thing in the report and it
+   deserves to be read before anything settled by argument. Say plainly when
+   probes were off for the run, and why.
+7. A pointer to the report and the HTML dashboard.
 
 ## Phase 7 — decide, and act
 
@@ -973,6 +1053,7 @@ ledger, rather than only in conversation state.
 | 0 — scope, run dir, gate | At its end, before Phase 1 | Nothing has been spent yet; `$BASE` is cheap to recompute and the gate is a file (`gate.json`), not something to remember. |
 | 1 — file list & plan | Once `plan.json` is written | The plan is a file now, not a fact anyone has to remember — including `--depth`, which came from something the user said and would otherwise have to survive as conversation. |
 | 2 — round 1 | **Never** until every persona's file passes `validate.mjs` | An unsaved or unvalidated reviewer payload is exactly the state a mid-phase compaction loses — a subagent still working has nothing durable yet. |
+| 2.5 — probes | Once `probes.json` is written, or immediately if the phase was skipped | The bridge tears down every worktree it made before it returns; the record is a file, and a skipped phase has nothing to lose. |
 | 3 — triage | Once `briefing.json` is written | Triage's whole output is a file; Phase 4 reads it, not the conversation. |
 | 4 — round 2 | **Never** until every `round2-<agent>.json` passes `validate.mjs` — both halves of a split lane, not one file per persona, and never between triage and synthesize | Same unsaved-payload risk as Phase 2, plus `$ROUNDS`/`$CAP`/`$R2_REASON` exist only as shell variables until Phase 6 writes the report that carries them forward. |
 | 5 — repair, combine | Once `round1.json` and `round2.json` are written | The repaired and combined files are the only state Phase 6 needs. |
@@ -995,9 +1076,10 @@ Everywhere else, disk already holds what the loop needs next.
 | ≥2 reviewers fail | Abort. The model is misbehaving; suggest re-running or a single round. |
 | `triage.mjs` reports many `DISPROVED` | Surface it. A reviewer inventing line numbers is worth the user knowing. |
 | `triage.mjs` reports `REGRESSED` | Lead with it. A fix that did not take is more important than any new finding. |
+| `probe.mjs` reports reproductions that ran without reproducing | Surface it, and do not treat it as the findings being disproved. Either the finding is wrong or the script is; round 2 is being asked which. A lane doing it repeatedly is overstating what it observed, and that is worth telling the user. |
 | `repair.mjs` exits non-zero | Read the unresolvable IDs on stderr. Usually one invented ID; drop that edge or ruling and continue. |
 | `triage.mjs` reports an `OVERSIZED` candidate root cause | The edges chained further than one root cause plausibly reaches. It will not collapse whatever round 2 says; tell round 2 to name the smaller root causes inside it. |
-| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`/`decisions`/`regression`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
+| Any bridge script (`collect`/`combine`/`triage`/`repair`/`synthesize`/`plan`/`converge`/`verify`/`decisions`/`regression`/`probe`) exits 2 with a JSON path in the message | It could not read that input file — check the path, or that a previous step actually wrote it. Exit 2 means "this run never got as far as judging anything"; it is never a claim about the review itself. |
 | `node` not on PATH | Tell the user to install Node 22+. Do not improvise a fallback. |
 | User interrupts | Stop spawning subagents. Say where the partial artifacts are. |
 

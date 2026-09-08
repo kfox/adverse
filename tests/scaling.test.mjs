@@ -18,7 +18,7 @@ import {
   ESCALATED_MAX_ITERATIONS,
   LARGE_MIN_CHANGED_LINES, LARGE_MIN_FILES, SMALL_MAX_CHANGED_LINES, SMALL_MAX_FILES,
   MAX_SPLIT_AGENTS, SPLIT_AGENTS, agentNames, diffSize, escalate, parseDepth, parseNumstat,
-  parsePlan, planReview, runLanes, sizeSkippable, skippedLanes, splitLanes,
+  parsePlan, parseProbePolicy, planReview, runLanes, sizeSkippable, skippedLanes, splitLanes,
 } from '../src/scaling.mjs';
 
 const filesOf = (n) => Array.from({ length: n }, (_, i) => `src/render/mod${i}.mjs`);
@@ -636,4 +636,57 @@ test('parsePlan reads a depth back, defaults an absent one, and refuses a wrong 
 test('a plan round-trips its depth through JSON, which is how the report gets it', () => {
   const plan = mediumPlan({ depth: 'cheap' });
   assert.equal(parsePlan(JSON.parse(JSON.stringify(plan))).depth, 'cheap');
+});
+
+// --- The probe policy ---------------------------------------------------------
+//
+// A probe runs code out of the diff under review, so the plan states a policy
+// and never grants a capability: turning them on takes this AND the operator's
+// own `--allow-execute`. The per-lane cap is a bound on reviewer ATTENTION, not
+// on run cost, which is why it does not move with depth — a lane that spends a
+// deeper pass writing more shell scripts has read less of the diff, not more.
+
+test('a standard plan offers probes, capped, and says whose call running them is', () => {
+  const plan = mediumPlan();
+  assert.equal(plan.probes.allowed, true);
+  assert.ok(plan.probes.perLane >= 1);
+  assert.match(plan.probes.reason, /Phase 0's call/);
+});
+
+test('a cheap pass does not offer them, and says why', () => {
+  const plan = mediumPlan({ depth: 'cheap' });
+  assert.equal(plan.probes.allowed, false);
+  assert.equal(plan.probes.perLane, 0);
+  assert.match(plan.probes.reason, /wall-clock/);
+});
+
+test('a thorough pass does not raise the cap — depth buys lanes, not scripts', () => {
+  assert.equal(mediumPlan({ depth: 'thorough' }).probes.perLane, mediumPlan().probes.perLane);
+});
+
+// Absent is not "the default policy" the way it is for `depth`: the field
+// authorizes running code out of the diff, and a missing authorization has to
+// read as no.
+test('a plan that records no probe policy grants nothing', () => {
+  for (const probes of [undefined, null, 'yes', [], 7]) {
+    const parsed = parseProbePolicy(probes);
+    assert.equal(parsed.allowed, false);
+    assert.equal(parsed.perLane, 0);
+  }
+});
+
+test('a plan asking for more probes than this build allows is clamped, not honored', () => {
+  const ceiling = planReview({ files: filesOf(5) }).probes.perLane;
+  assert.equal(parseProbePolicy({ allowed: true, perLane: 500 }).perLane, ceiling);
+  assert.equal(parseProbePolicy({ allowed: true, perLane: 1 }).perLane, 1);
+});
+
+test('a policy that is not allowed carries no cap, whatever number it names', () => {
+  assert.equal(parseProbePolicy({ allowed: false, perLane: 9 }).perLane, 0);
+});
+
+test('parsePlan normalizes the probe policy the way it normalizes depth', () => {
+  const parsed = parsePlan({ lanes: [{ persona: 'auditor', run: true, agents: 1 }] });
+  assert.equal(parsed.probes.allowed, false);
+  assert.equal(parsePlan(mediumPlan()).probes.allowed, true);
 });

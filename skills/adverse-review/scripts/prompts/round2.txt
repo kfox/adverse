@@ -36,6 +36,17 @@ your edge.
   such a finding is often the most valuable one on the table. It is a problem
   only if the finding fails to explain why *this diff* puts it in play. Judge
   that question directly; never treat "outside" as disqualifying on its own.
+- `probeCheck` is present on a finding whose reporter attached a reproduction
+  and the tool re-ran it. `status: "reproduced"` with `confirmed: true` means
+  the predicted behavior actually happened in a clean checkout: that is settled
+  by execution, which is stronger than anything you or the reporter can argue,
+  and challenging it needs you to say why the SCRIPT is wrong rather than why
+  the reasoning is. `status: "not-reproduced"` means the tool ran it and the
+  behavior did not occur — that is a real question for you, not a verdict:
+  either the finding is wrong or the reproduction is, and a reviewer that can
+  tell which should say so. It is **not** a DISPROVED and the finding is still
+  live. A finding with no `probeCheck` is judged exactly as every finding was
+  before probes existed; attaching one is optional and declining costs nothing.
 - `kindCheck` flags findings whose `kind` and anchoring disagree — a `defect`
   with no line, a `contract` with no counterpart. That is a claim the reporter
   did not finish making. Judge the claim, not the label: if the finding is real,
