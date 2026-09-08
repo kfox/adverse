@@ -18,9 +18,17 @@ your edge.
 
 ## What the briefing already establishes — do not spend findings on it
 
-- `gate` records the repo's own checks, already run against this exact branch.
-  Where it says green, do not report anything those tools would have caught
-  (type errors, lint, failing or output-leaking tests, schema or build drift).
+- `gate` records this repo's own checks. Suppress on it ONLY when
+  `gate.verified` is `true` — that means named commands actually ran, exited
+  0, and ran against the exact tree you are reviewing. Then do not report
+  anything those tools would have caught (type errors, lint, failing or
+  output-leaking tests, schema or build drift).
+  `gate.verified: false` establishes nothing, and `gate.why` says what is
+  missing. That includes a `gate.summary` that reads green: a summary someone
+  typed is a claim about the checks, not the checks. Review those categories
+  normally and report what you find — a gate nobody can vouch for must cost
+  findings that turn out to be redundant, never findings nobody was allowed to
+  make.
 - `claimCheck` was verified mechanically against the checkout. `DISPROVED` means
   the cited file or line does not exist — treat that finding as dead.
 - `claimCheck.inDiff: "outside"` means the cited line is NOT in this diff. That

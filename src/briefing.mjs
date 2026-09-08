@@ -21,6 +21,7 @@
 // I/O and the exit codes. Same split as ledger.mjs's `checkBinding`.
 
 import { refuseDirectRun } from './entryGuard.mjs';
+import { normalizeGate } from './gate.mjs';
 import { emptyLedger, isRegressionCandidate, annotate } from './ledger.mjs';
 import { laneAgentOf } from './personas.mjs';
 import { ADVISORY_KINDS } from './taxonomy.mjs';
@@ -130,6 +131,8 @@ function adjudicate(findings, ledger, traceFor) {
 
 export function buildBriefing(reviews, {
   base,
+  head = null,
+  worktree = null,
   gate = null,
   checkClaim,
   checkCounterpart,
@@ -160,9 +163,13 @@ export function buildBriefing(reviews, {
   // to a reviewer about work that was never done.
   const regressed = findings.filter(isRegressionCandidate);
 
+  // Normalized here rather than at the bridge because staleness is only
+  // knowable against the tree actually being reviewed, and this is the first
+  // place that knows both. A gate that cannot be bound to `head` is reported
+  // with `verified: false` and suppresses nothing (src/gate.mjs).
   const briefing = {
     base,
-    gate,
+    gate: normalizeGate(gate, { head, worktree }),
     verdicts: mergeVerdicts(reviews),
     findings,
     clusters,

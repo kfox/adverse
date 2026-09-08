@@ -469,9 +469,17 @@ node ${SKILL_DIR}/scripts/verify.mjs --verify "$ADVERSE_RUN"/*/verify-*.json \
 node ${SKILL_DIR}/scripts/triage.mjs \
     --round1 "$ADVERSE_RUN"/round1-*.verified.json \
     --round1 "$ADVERSE_RUN"/round1-*.regression.json \
-    --repo . --base "$BASE" --gate "$GATE" --ledger "$LEDGER" \
+    --repo . --base "$BASE" --gate-file "$ADVERSE_RUN"/gate.json --ledger "$LEDGER" \
     --out "$ADVERSE_RUN"/briefing.json
 ```
+
+**Re-run `gate.mjs` before that triage, every iteration.** The fixes moved HEAD,
+so the previous iteration's `gate.json` describes a tree that no longer exists.
+It will not silently carry: `triage.mjs` re-binds the record to the HEAD under
+review and marks a gate from any other commit `verified: false`, so a stale one
+costs the suppression rather than faking it. Re-running is how the loop keeps
+it — and it is the cheapest possible check that the fixes did not break the
+build before four reviewers spend a round finding out.
 
 Drop the second `--round1` line when no regression pass ran. If a lane both
 verified its own findings and ran a regression pass on someone else's fix

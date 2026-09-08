@@ -35,6 +35,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const { worktreeDigest } = await import('../src/gate.mjs');
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TRIAGE = path.join(here, '..', 'skills', 'adverse-review', 'scripts', 'triage.mjs');
 
@@ -106,11 +108,14 @@ test('changedRanges shells out once per cited file, not once per finding', () =>
   const shim = mkdtempSync(path.join(os.tmpdir(), 'adverse-gitshim-'));
   const log = path.join(shim, 'calls.txt');
   const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf-8' }).trim();
-  // Only `git diff` is counted. The checker also asks `git rev-parse` once
-  // for the authoritative git dir, and that is a fixed cost per checker, not
-  // the per-finding fan-out this test is about.
+  // Only `changedRanges`' `git diff` is counted. Two other calls are fixed
+  // costs per RUN rather than the per-finding fan-out this test is about, and
+  // both are exempted: `git rev-parse` for the authoritative git dir, and the
+  // gate's `git diff HEAD`, which digests the working tree so a gate cannot
+  // verify against a tree that moved under it (kfox/adverse#76).
   writeFileSync(path.join(shim, 'git'),
-    `#!/bin/sh\nfor a in "$@"; do [ "$a" = diff ] && echo call >> ${log} && break; done\nexec ${real} "$@"\n`,
+    `#!/bin/sh\n[ "$*" = "diff HEAD" ] && exec ${real} "$@"\n`
+    + `for a in "$@"; do [ "$a" = diff ] && echo call >> ${log} && break; done\nexec ${real} "$@"\n`,
     { mode: 0o755 });
 
   // Half of each file's citations use an ALIASED spelling. Keyed on the cited
@@ -141,11 +146,16 @@ test('changedRanges shells out once per cited file, not once per finding', () =>
   }
 });
 
-test('--gate and --base are carried from argv into the briefing verbatim', () => {
+test('--gate and --base are carried from argv into the briefing', () => {
   // What buildBriefing does with these is tested in-process; this is the wire
   // between argv and that call, which is its own claim. Both fields are read
   // by a round-2 reviewer: `gate` tells them which findings the repo's own
   // tools already rule out, and `base` is the ref every anchor is relative to.
+  //
+  // `gate` used to be asserted equal to the argv string. It is now a record:
+  // the text survives, but it arrives labeled `asserted`, because round 2
+  // suppresses whole categories of finding on this field and a sentence
+  // somebody typed is not evidence that any command ran (kfox/adverse#76).
   const p = path.join(repo, 'round1-wire.json');
   writeFileSync(p, JSON.stringify(review('auditor', [finding()])));
   const out = path.join(repo, 'briefing-wire.json');
@@ -155,7 +165,9 @@ test('--gate and --base are carried from argv into the briefing verbatim', () =>
     { encoding: 'utf-8', timeout: 30_000 });
   assert.equal(r.status, 0, r.stderr);
   const briefing = JSON.parse(readFileSync(out, 'utf-8'));
-  assert.equal(briefing.gate, 'lint green · 1,412 tests pass');
+  assert.equal(briefing.gate.summary, 'lint green · 1,412 tests pass');
+  assert.equal(briefing.gate.source, 'asserted');
+  assert.equal(briefing.gate.verified, false);
   assert.equal(briefing.base, 'base');
 });
 
@@ -646,4 +658,92 @@ test('an unreadable round-1 file is exit 2, not exit 1 — this run could not re
     { encoding: 'utf-8', timeout: 30_000 });
   assert.equal(r.status, 2);
   assert.match(r.stderr, /triage:.*round1-bad\.json/);
+});
+
+// --- the gate, as a suppression channel with provenance (kfox/adverse#76) ---
+//
+// The briefing's `gate` is what round 2 reads to decide whether it may stay
+// silent about type errors, lint, and failing tests. These cover the process
+// boundary only: which of --gate / --gate-file reaches the briefing, and that
+// the record is re-bound to the HEAD actually under review. Whether a given
+// record verifies is src/gate.mjs's contract, proven in tests/gate.test.mjs.
+
+function runTriageGate(dir, gateArgs) {
+  // $ADVERSE_RUN is a scratch directory outside the checkout, and these
+  // fixtures live outside it for the same reason: a run that writes its own
+  // artifacts into the repo changes the working tree its gate is pinned to.
+  const run = mkdtempSync(path.join(os.tmpdir(), 'adverse-gaterun-'));
+  const round1 = path.join(run, 'round1-gate.json');
+  writeFileSync(round1, JSON.stringify(review('auditor', [finding()])), 'utf-8');
+  const out = path.join(run, 'briefing-gate.json');
+  const r = spawnSync(process.execPath,
+    [TRIAGE, '--round1', round1, '--repo', dir, '--base', 'base', '--out', out, ...gateArgs],
+    { encoding: 'utf-8', env: GIT_ENV });
+  return { r, out, run };
+}
+
+test('a measured gate bound to the reviewed HEAD and working tree arrives verified', () => {
+  const head = execFileSync('git', ['rev-parse', 'HEAD'],
+    { cwd: repo, encoding: 'utf-8', env: GIT_ENV }).trim();
+  const scratch = mkdtempSync(path.join(os.tmpdir(), 'adverse-gatefile-'));
+  const file = path.join(scratch, 'gate-good.json');
+  writeFileSync(file, JSON.stringify({
+    status: 'green', source: 'measured', head, worktree: worktreeDigest(repo),
+    summary: 'lint exit 0',
+    checks: [{ name: 'lint', command: 'npm run lint', exitCode: 0, result: '' }],
+  }), 'utf-8');
+
+  const { r, out } = runTriageGate(repo, ['--gate-file', file]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(readFileSync(out, 'utf-8')).gate.verified, true);
+});
+
+// The half of the binding a commit SHA cannot carry: Phase 0's second scope
+// rule reviews uncommitted changes, and HEAD does not move when those change.
+test('a gate whose working tree moved after the checks ran does not verify', () => {
+  const head = execFileSync('git', ['rev-parse', 'HEAD'],
+    { cwd: repo, encoding: 'utf-8', env: GIT_ENV }).trim();
+  const scratch = mkdtempSync(path.join(os.tmpdir(), 'adverse-gatemoved-'));
+  const file = path.join(scratch, 'gate-moved.json');
+  writeFileSync(file, JSON.stringify({
+    status: 'green', source: 'measured', head, worktree: 'd'.repeat(64),
+    summary: 'lint exit 0',
+    checks: [{ name: 'lint', command: 'npm run lint', exitCode: 0, result: '' }],
+  }), 'utf-8');
+
+  const { r, out } = runTriageGate(repo, ['--gate-file', file]);
+  assert.equal(r.status, 0, r.stderr);
+  const { gate } = JSON.parse(readFileSync(out, 'utf-8'));
+  assert.equal(gate.verified, false);
+  assert.match(gate.why, /working tree changed/);
+});
+
+// The failure this closes: checks that ran before the last commit describe a
+// tree nobody is reviewing. Only triage knows which tree that is, so only
+// triage can catch it.
+test('a measured gate from another commit arrives unverified, whatever it claims', () => {
+  const file = path.join(repo, 'gate-stale.json');
+  writeFileSync(file, JSON.stringify({
+    status: 'green', source: 'measured', head: 'c'.repeat(40), summary: 'lint exit 0',
+    verified: true,
+    checks: [{ name: 'lint', command: 'npm run lint', exitCode: 0, result: '' }],
+  }), 'utf-8');
+
+  const { r, out } = runTriageGate(repo, ['--gate-file', file]);
+  assert.equal(r.status, 0);
+  const { gate } = JSON.parse(readFileSync(out, 'utf-8'));
+  assert.equal(gate.verified, false, 'a stored verified:true must not survive re-binding');
+  assert.match(gate.why, /not the tree under review/);
+});
+
+test('--gate and --gate-file together refuse rather than picking one', () => {
+  const file = path.join(os.tmpdir(), 'adverse-unread-gate.json');
+  const { r } = runTriageGate(repo, ['--gate-file', file, '--gate', 'green']);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /not both/);
+});
+
+test('an unreadable --gate-file exits 2 rather than falling back to no gate', () => {
+  const { r } = runTriageGate(repo, ['--gate-file', path.join(os.tmpdir(), 'adverse-no-such-gate.json')]);
+  assert.equal(r.status, 2);
 });

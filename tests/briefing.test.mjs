@@ -28,9 +28,40 @@ const finding = (over = {}) => ({
   counterpart: null, title: 't', detail: 'd', fix: null, ...over,
 });
 
-test('the gate summary is carried into the briefing verbatim', () => {
+// This used to assert that a bare string was carried through verbatim, which
+// is the behavior kfox/adverse#76 removed. The string still reaches the
+// reviewer — a reader should see what was claimed — but it arrives labeled as
+// a claim, because round 2 suppresses whole categories of finding on this
+// field and a sentence somebody typed is not evidence that any command ran.
+test('a hand-typed gate summary is preserved, and marked as asserted rather than measured', () => {
   const { briefing } = build([review('auditor', [])], { gate: 'make test: green' });
-  assert.equal(briefing.gate, 'make test: green');
+  assert.equal(briefing.gate.summary, 'make test: green');
+  assert.equal(briefing.gate.source, 'asserted');
+  assert.equal(briefing.gate.verified, false);
+  assert.match(briefing.gate.why, /asserted/);
+});
+
+test('a measured gate bound to the reviewed tree is the one thing that verifies', () => {
+  const measured = {
+    status: 'green', source: 'measured', head: 'a'.repeat(40), summary: 'lint exit 0',
+    checks: [{ name: 'lint', command: 'npm run lint', exitCode: 0, result: '' }],
+  };
+  const { briefing } = build([review('auditor', [])], { gate: measured, head: 'a'.repeat(40) });
+  assert.equal(briefing.gate.verified, true);
+  assert.equal(briefing.gate.why, '');
+});
+
+// The failure this closes: checks that ran before the last commit describe a
+// tree nobody is reviewing, and read as evidence about the one that is.
+test('a green gate that ran against a different commit does not verify', () => {
+  const measured = {
+    status: 'green', source: 'measured', head: 'b'.repeat(40), summary: 'lint exit 0',
+    checks: [{ name: 'lint', command: 'npm run lint', exitCode: 0, result: '' }],
+  };
+  const { briefing } = build([review('auditor', [])], { gate: measured, head: 'a'.repeat(40) });
+  assert.equal(briefing.gate.status, 'green');
+  assert.equal(briefing.gate.verified, false);
+  assert.match(briefing.gate.why, /not the tree under review/);
 });
 
 test('no gate is null, not absent — a reviewer must be able to tell', () => {
