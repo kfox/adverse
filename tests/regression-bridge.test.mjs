@@ -44,12 +44,15 @@ const pass = (over = {}) => ({
   ...over,
 });
 
+// `--no-ledger` on every fold here that has no ledger to give: a fold declares
+// one or declares the absence, because the party that chooses whether to pass
+// `--ledger` is the party whose fix commits the coverage check accounts for.
 function fold(dir, files) {
   for (const [name, payload] of Object.entries(files)) {
     writeFileSync(path.join(dir, name), JSON.stringify(payload));
   }
   return run(['--payload', ...Object.keys(files).map((n) => path.join(dir, n)),
-              '--outdir', dir]);
+              '--outdir', dir, '--no-ledger']);
 }
 
 test('a pass reshapes into the round-1 shape triage.mjs reads, stamped', () => {
@@ -346,7 +349,7 @@ test('--refold is how a deliberate re-read of the same commit says so', () => {
     const files = { 'regression-adversary-1.json': pass({ commit: 'aaaaaa1' }) };
     assert.equal(fold(dir, files).status, 0);
     const again = run(['--payload', path.join(dir, 'regression-adversary-1.json'),
-                       '--outdir', dir, '--refold']);
+                       '--outdir', dir, '--no-ledger', '--refold']);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /1 pass\(es\) from 1 lane\(s\)/);
   } finally {
@@ -371,7 +374,8 @@ test('a lane choice rides the choose mode\'s own JSON into the fold artifact', (
       JSON.stringify(pass({ persona: choice.persona, commit: 'HEAD' })));
 
     const r = run(['--payload', path.join(dir, 'regression-pass-1.json'), '--outdir', dir,
-                   '--choice', path.join(dir, 'lane-choice.json'), '--repo', dir]);
+                   '--no-ledger', '--choice', path.join(dir, 'lane-choice.json'),
+                   '--repo', dir]);
     assert.equal(r.status, 0, r.stderr);
     const out = JSON.parse(readFileSync(
       path.join(dir, `round1-${choice.persona}.regression.json`), 'utf-8'));
@@ -409,7 +413,7 @@ test('an overridden routing is warned about and never stamped', () => {
     }));
     writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
     const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
-                   '--choice', path.join(dir, 'lane-choice.json')]);
+                   '--no-ledger', '--choice', path.join(dir, 'lane-choice.json')]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /picked steward for abc1234, but this pass was run by adversary/);
     const out = JSON.parse(readFileSync(
@@ -435,7 +439,7 @@ test('without a repo, a prefix spelling is not identity for stamping', () => {
     }));
     writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
     const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
-                   '--choice', path.join(dir, 'lane-choice.json')]);
+                   '--no-ledger', '--choice', path.join(dir, 'lane-choice.json')]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /matches no pass in this fold/);
     const out = JSON.parse(readFileSync(
@@ -458,7 +462,7 @@ test('two choices matching one pass are refused as ambiguous, not first-won', ()
     }
     writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
     const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
-                   '--choice', path.join(dir, 'choice-1.json'),
+                   '--no-ledger', '--choice', path.join(dir, 'choice-1.json'),
                    '--choice', path.join(dir, 'choice-2.json')]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /2 lane choices .* stamping would guess/);
@@ -482,7 +486,7 @@ test('a choice commit carrying control characters is not a lane choice', () => {
     }));
     writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
     const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
-                   '--choice', path.join(dir, 'lane-choice.json')]);
+                   '--no-ledger', '--choice', path.join(dir, 'lane-choice.json')]);
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stderr, /not a lane choice/);
   } finally {
@@ -497,7 +501,7 @@ test('a file that is not a lane choice is refused, not stamped', () => {
       JSON.stringify({ persona: 'steward', commit: 'abc1234' }));
     writeFileSync(path.join(dir, 'regression-adversary-1.json'), JSON.stringify(pass()));
     const r = run(['--payload', path.join(dir, 'regression-adversary-1.json'), '--outdir', dir,
-                   '--choice', path.join(dir, 'lane-choice.json')]);
+                   '--no-ledger', '--choice', path.join(dir, 'lane-choice.json')]);
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stderr, /not a lane choice/);
   } finally {
@@ -537,7 +541,7 @@ test('two abbreviations of one commit are one staleness key', () => {
     writeFileSync(path.join(dir, 'regression-adversary-1.json'),
       JSON.stringify(pass({ commit: 'abc1234def5678abc1234def5678abc1234def56' })));
     const again = run(['--payload', path.join(dir, 'regression-adversary-1.json'),
-                       '--outdir', dir]);
+                       '--outdir', dir, '--no-ledger']);
     assert.equal(again.status, 2, again.stdout);
     assert.match(again.stderr, /already folded/);
   } finally {
@@ -557,7 +561,7 @@ test('with --repo, two spellings of one commit resolve to one staleness key', ()
     writeFileSync(path.join(dir, 'regression-adversary-1.json'),
       JSON.stringify(pass({ commit: sha })));
     const again = run(['--payload', path.join(dir, 'regression-adversary-1.json'),
-                       '--outdir', dir, '--repo', dir]);
+                       '--outdir', dir, '--no-ledger', '--repo', dir]);
     assert.equal(again.status, 2, again.stdout);
     assert.match(again.stderr, /already folded/);
   } finally {
@@ -620,7 +624,7 @@ test('--refold escapes an unparsable prior fold, and the refusal names that reme
     // one — otherwise one planted byte blocks the iteration's whole Phase 9
     // fold and the documented escape does not escape.
     const escaped = run(['--payload', ...Object.keys(files).map((n) => path.join(dir, n)),
-                         '--outdir', dir, '--refold']);
+                         '--outdir', dir, '--no-ledger', '--refold']);
     assert.equal(escaped.status, 0, escaped.stderr);
     for (const persona of ['auditor', 'steward']) {
       const lane = JSON.parse(
@@ -666,7 +670,7 @@ test('a prior fold that is not a regular file is refused with --refold too', () 
         writeFileSync(path.join(dir, name), JSON.stringify(payload));
       }
       const r = run(['--payload', ...Object.keys(files).map((n) => path.join(dir, n)),
-                     '--outdir', dir, ...args]);
+                     '--outdir', dir, '--no-ledger', ...args]);
       assert.equal(r.status, 2, `${JSON.stringify(args)}: ${r.stdout}${r.stderr}`);
       assert.match(r.stderr, /is not a regular file/);
       assert.match(r.stderr, /--refold cannot help/, 'the remedy it names has to be a real one');
@@ -699,7 +703,7 @@ test('a symlink at the derived path is refused, and its target is not written th
         writeFileSync(path.join(dir, name), JSON.stringify(payload));
       }
       const r = run(['--payload', ...Object.keys(files).map((n) => path.join(dir, n)),
-                     '--outdir', dir, ...args]);
+                     '--outdir', dir, '--no-ledger', ...args]);
       assert.equal(r.status, 2, `${JSON.stringify(args)}: ${r.stdout}${r.stderr}`);
       assert.match(r.stderr, /is not a regular file/);
       assert.equal(readFileSync(target, 'utf-8'), '{"keep":"me"}',
@@ -743,7 +747,7 @@ test('an unknown persona is exit 1 — the payload read fine and failed the doma
 test('an unreadable payload is exit 2 — this run never read its input', () => {
   const dir = freshTmp();
   try {
-    const r = run(['--payload', path.join(dir, 'nope.json'), '--outdir', dir]);
+    const r = run(['--payload', path.join(dir, 'nope.json'), '--outdir', dir, '--no-ledger']);
     assert.equal(r.status, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -790,6 +794,98 @@ test('a revision in git\'s option position is refused before git sees it', () =>
   const r = run(['--repo', ROOT, '--commit=--output=/tmp/pwned']);
   assert.equal(r.status, 2);
   assert.match(r.stderr, /looks like an option/);
+});
+
+test('a --commit carrying a control character cannot rewrite the line it names', () => {
+  // The third site of the rule `--choice` and `--no-pass` already kept, and the
+  // one that had only half of it. `chooseLane` prints the revision on a line of
+  // its own, so a carriage return in it puts an attacker-chosen sentence over
+  // the tool's — measured before the guard:
+  //
+  //   regression lane for HEAD\r  regression lane: nothing to see here: adversary
+  //
+  // Refused at exit 2, and the refusal is proven by what does NOT reach stdout:
+  // the choose mode otherwise prints a lane whatever git said about the commit,
+  // which is the loud direction and would hide this one.
+  const dir = gitRepo(1);
+  try {
+    const r = run(['--repo', dir, '--closed-by-none',
+                   '--commit=HEAD\r  regression lane: nothing to see here']);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /carries a control character/);
+    assert.doesNotMatch(r.stderr, /\r/, 'the refusal escapes what it quotes');
+    assert.equal(r.stdout, '', 'no lane was named for a revision this bridge would not print');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a fix that renames the cited file names both paths to the lane chooser', () => {
+  // The same defect a9156f9 fixed in src/trace.mjs, in a second hand-rolled
+  // copy of "what did this commit change": git's rename detection is on by
+  // default and `--name-only` then prints only the destination. Measured on
+  // this bridge before the fix — a commit that renamed `src/auth.py` to
+  // `src/greeting.py` was routed to the auditor under "the fix diff crosses no
+  // trust boundary", because the only path it could see was the new one.
+  //
+  // The lane, not just the file list, because a path list nothing routes on
+  // proves nothing (shape 6): `auth` in a path is a trust-boundary signal, so
+  // the rename's SOURCE is what puts this pass in front of the Adversary.
+  const dir = freshTmp();
+  try {
+    const env = { ...process.env, GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@b',
+                  GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@b' };
+    const g = (...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf-8', env });
+    const body = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join('\n');
+    g('init', '-q');
+    mkdirSync(path.join(dir, 'src'));
+    writeFileSync(path.join(dir, 'src', 'auth.py'), `${body}\n`);
+    g('add', '.');
+    g('-c', 'commit.gpgsign=false', 'commit', '-qm', 'one');
+
+    writeFileSync(path.join(dir, 'src', 'greeting.py'), `${body.replace('line 4', 'line 4 X')}\n`);
+    rmSync(path.join(dir, 'src', 'auth.py'));
+    g('add', '-A');
+    g('-c', 'commit.gpgsign=false', 'commit', '-qm', 'rename it');
+
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-none', '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    const choice = JSON.parse(r.stdout);
+    assert.equal(choice.persona, 'adversary');
+    assert.match(choice.reason, /crosses a trust boundary/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a commit that only copies a file does not claim to have changed the source', () => {
+  // The near-miss for the rename fix, pointed the other way: a copy leaves its
+  // source where it was, so naming the source would put a path this commit only
+  // READ in front of the lane chooser. `diff.renames=copies` is the config
+  // under which git reports the pair at all.
+  const dir = freshTmp();
+  try {
+    const env = { ...process.env, GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@b',
+                  GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@b' };
+    const g = (...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf-8', env });
+    const body = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join('\n');
+    g('init', '-q');
+    g('config', 'diff.renames', 'copies');
+    mkdirSync(path.join(dir, 'src'));
+    writeFileSync(path.join(dir, 'src', 'auth.py'), `${body}\n`);
+    g('add', '.');
+    g('-c', 'commit.gpgsign=false', 'commit', '-qm', 'one');
+
+    writeFileSync(path.join(dir, 'src', 'greeting.py'), `${body}\n`);
+    g('add', '-A');
+    g('-c', 'commit.gpgsign=false', 'commit', '-qm', 'copy it');
+
+    const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-none', '--json']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(JSON.parse(r.stdout).reason, /crosses no trust boundary/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- --closed-by-ledger: the ledger answers, not the party under review -----
@@ -1161,6 +1257,68 @@ test('a --no-pass with no reason is refused before anything is written', () => {
   }
 });
 
+test('a fold that names no ledger and does not declare one is refused', () => {
+  // The check below runs only with `--ledger`, `--ledger` was optional, and the
+  // party that decides whether to pass it is the party whose fix commits it
+  // accounts for — so the whole mechanism could be switched off by typing less,
+  // with nothing in the output to say it had been. Same shape as the check
+  // itself one level up, and closed the same way `--closed-by-none` closed it
+  // for the exclusion list: the absence is declared, not assumed.
+  const dir = gitRepo(1);
+  try {
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'), '--outdir', dir]);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /--ledger <ledger\.json> is required/);
+    assert.match(r.stderr, /say so with --no-ledger/);
+    assert.equal(existsSync(path.join(dir, 'round1-adversary.regression.json')), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--no-ledger declares the absence in the fold\'s own output, not just on argv', () => {
+  // A declaration nothing prints is a declaration only the party that typed it
+  // ever sees. The line is what keeps a fold that never checked from reading
+  // like a fold that checked and found every fix commit accounted for.
+  const dir = gitRepo(1);
+  try {
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--no-ledger']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /--no-ledger: no ledger was consulted/);
+
+    // The discriminating case: the same fold WITH a ledger prints no such line.
+    const ledger = ledgerOfFixes(dir, [shaOf(dir, 'HEAD')]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'),
+      JSON.stringify(pass({ commit: shaOf(dir, 'HEAD') })));
+    const bound = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                       '--outdir', dir, '--ledger', ledger, '--repo', dir, '--refold']);
+    assert.equal(bound.status, 0, bound.stderr);
+    assert.doesNotMatch(bound.stdout, /no ledger was consulted/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--no-ledger beside a --ledger is refused, not merged', () => {
+  // A fold either consults a ledger or declares that it does not; a command
+  // that says both has not decided which, exactly as --closed-by-none beside a
+  // --closed-by name has not.
+  const dir = gitRepo(1);
+  try {
+    const ledger = ledgerOfFixes(dir, [shaOf(dir, 'HEAD')]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'), '--outdir', dir,
+                   '--ledger', ledger, '--repo', dir, '--no-ledger']);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /--no-ledger contradicts the --ledger/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('--no-pass without --ledger is refused rather than ignored', () => {
   // The ledger is what names the fix commits, so without it a declaration has
   // nothing to be a declaration about — and accepting one silently would let
@@ -1181,17 +1339,42 @@ test('a --no-pass naming no fix commit of this iteration says so', () => {
   // The same shape as an unmatched `--choice`: a declaration that matches
   // nothing is a typo or a stale commit, and silently dropping it would leave
   // the operator believing a commit was accounted for.
+  //
+  // Both ways a declaration can match nothing, because the rule is about the
+  // declaration and not about the ledger it was checked against, and pinning
+  // only the first left the second live: `reportPassCoverage` returned before
+  // reading a single declaration when the round recorded no fix commit — the
+  // one state in which EVERY declaration matches nothing.
   const dir = gitRepo(2);
   try {
     const head = shaOf(dir, 'HEAD');
-    const ledger = ledgerOfFixes(dir, [head]);
-    writeFileSync(path.join(dir, 'regression-adversary.json'),
-      JSON.stringify(pass({ commit: head })));
+    const payload = path.join(dir, 'regression-adversary.json');
+    writeFileSync(payload, JSON.stringify(pass({ commit: head })));
+    const declared = ['--no-pass', `${shaOf(dir, 'HEAD~1')}=not a fix commit here`];
 
-    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
-                   '--outdir', dir, '--ledger', ledger, '--repo', dir,
-                   '--no-pass', `${shaOf(dir, 'HEAD~1')}=not a fix commit here`]);
-    assert.match(r.stderr, /names no fix commit in this iteration/);
+    const someFixed = run(['--payload', payload, '--outdir', dir, '--repo', dir,
+                           '--ledger', ledgerOfFixes(dir, [head]), ...declared]);
+    assert.match(someFixed.stderr, /names no fix commit in this iteration/);
+
+    // The same declaration against a round that fixed nothing — every decision
+    // declined — which is a ledger this bridge already refuses to accuse of a
+    // skipped pass. Refusing to accuse it is not a reason to stop reading what
+    // the operator declared.
+    const noneFixed = path.join(dir, 'nothing-fixed.json');
+    writeFileSync(noneFixed, JSON.stringify({
+      version: 1, base: null, iterations: [{ n: 2 }],
+      entries: [{
+        id: 'F1', title: 'a', kind: 'defect', severity: 'critical', file: 'f.txt',
+        line: 1, counterpart: null, citedLine: null, disposition: 'declined',
+        reason: 'intentional', iteration: 2, atCommit: 'HEAD',
+      }],
+    }));
+    const r = run(['--payload', payload, '--outdir', dir, '--repo', dir, '--refold',
+                   '--ledger', noneFixed, ...declared]);
+    assert.match(r.stderr, /names no fix commit in this iteration/,
+      'a round that fixed nothing still reads the declarations it was handed');
+    assert.doesNotMatch(r.stderr, /NO PASS AND NO DECLARATION/,
+      'and still does not accuse a round that has no fix commit to accuse');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1287,29 +1470,59 @@ test('two declarations naming one commit are both accounted for', () => {
   }
 });
 
-test('the refusal names the flag the re-run needs, and that re-run clears it', () => {
-  // The whole justification for refusing AFTER the write is that the operator
-  // can re-run with a declaration added. That re-run folds commits this outdir
-  // has already folded, so without --refold the staleness check refuses it at
-  // exit 2 and calls this run's own output an earlier iteration's leftovers.
+test('the coverage refusal publishes nothing, so its remedy needs no --refold', () => {
+  // The refusal used to be made AFTER the write, and its remedy — re-run this
+  // fold with a declaration added — then re-read commits the outdir already
+  // held. That needed `--refold`, which disarms the staleness check for every
+  // lane at once, so the documented workflow switched off the guard that stops
+  // an earlier iteration's leftover being signed as this iteration's evidence.
+  //
+  // Refusing before the write removes the second fold: the remedy re-run is an
+  // ordinary first fold. Both halves are pinned, because either alone passes
+  // for the wrong reason — nothing written, AND the plain re-run accepted.
+  const dir = gitRepo(2);
+  try {
+    const [head, prev] = [shaOf(dir, 'HEAD'), shaOf(dir, 'HEAD~1')];
+    const ledger = ledgerOfFixes(dir, [head, prev]);
+    const payload = path.join(dir, 'regression-adversary.json');
+    const lane = path.join(dir, 'round1-adversary.regression.json');
+    writeFileSync(payload, JSON.stringify(pass({ commit: head })));
+    const base = ['--payload', payload, '--outdir', dir, '--ledger', ledger, '--repo', dir];
+
+    const refused = run(base);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stderr, /needs no --refold/);
+    assert.equal(existsSync(lane), false, 'the refused fold published nothing');
+
+    const remedy = run([...base, '--no-pass', `${prev}=small and pinned`]);
+    assert.equal(remedy.status, 0, remedy.stderr);
+    assert.match(remedy.stdout, /no pass on .* declared: small and pinned/);
+    assert.equal(JSON.parse(readFileSync(lane, 'utf-8')).passes[0].commit, head,
+      'and the remedy is the run that publishes');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the staleness check is still armed for the fold that follows a refusal', () => {
+  // The near-miss for the test above, and the reason it is not enough on its
+  // own: "the remedy needs no --refold" must not have been bought by leaving
+  // this outdir looking unfolded. A THIRD fold — after one that did publish —
+  // is a re-read of a commit already on record and is refused as before.
   const dir = gitRepo(2);
   try {
     const [head, prev] = [shaOf(dir, 'HEAD'), shaOf(dir, 'HEAD~1')];
     const ledger = ledgerOfFixes(dir, [head, prev]);
     const payload = path.join(dir, 'regression-adversary.json');
     writeFileSync(payload, JSON.stringify(pass({ commit: head })));
-    const base = ['--payload', payload, '--outdir', dir, '--ledger', ledger, '--repo', dir];
+    const base = ['--payload', payload, '--outdir', dir, '--ledger', ledger, '--repo', dir,
+                  '--no-pass', `${prev}=small and pinned`];
 
-    const refused = run(base);
-    assert.equal(refused.status, 1, refused.stderr);
-    assert.match(refused.stderr, /needs --refold/);
-
-    const declared = ['--no-pass', `${prev}=small and pinned`];
-    assert.equal(run([...base, ...declared]).status, 2, 'the staleness check is real');
-
-    const remedy = run([...base, '--refold', ...declared]);
-    assert.equal(remedy.status, 0, remedy.stderr);
-    assert.match(remedy.stdout, /no pass on .* declared: small and pinned/);
+    assert.equal(run(base).status, 0);
+    const again = run(base);
+    assert.equal(again.status, 2, again.stdout);
+    assert.match(again.stderr, /name commits this outdir has already folded/);
+    assert.equal(run([...base, '--refold']).status, 0, '--refold is still the escape');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1331,6 +1544,24 @@ test('two spellings of one fix commit are one fix commit', () => {
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /1 of 1 fix commit\(s\)/);
     assert.match(r.stderr, /closed 2 finding\(s\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--no-ledger on the lane-choice path is refused, not swallowed', () => {
+  // Found by sweeping the sibling of the test below rather than reported: the
+  // new declaration flag arrived with the same hole its neighbor had already
+  // been fixed for. The lane-choice mode reads no ledger of this kind at all,
+  // so it took the flag and exited 0 with a lane chosen and the declaration
+  // read by nothing — an operator believing an absence was on record.
+  const dir = gitRepo(1);
+  try {
+    const r = run(['--repo', dir, '--commit', shaOf(dir, 'HEAD'), '--closed-by-none',
+                   '--no-ledger', '--json']);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /--no-ledger declares that a FOLD consults no ledger/);
+    assert.equal(r.stdout, '', 'no lane was named on a run whose declaration nothing read');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -65,7 +65,7 @@ const { closeQuietly, openRegularFileSync } = await importFromSrc('fsSafe.mjs');
 const {
   annotate, checkBinding, closureOf, emptyLedger, fixCommitsIn, loadLedger,
 } = await importFromSrc('ledger.mjs');
-const { makeAnchorTracer, resolveRef } = await importFromSrc('trace.mjs');
+const { filesChangedIn, makeAnchorTracer, resolveRef } = await importFromSrc('trace.mjs');
 const { chooseRegressionLane, unresolvedLanes } = await importFromSrc('regression.mjs');
 const { validateRegression } = await importFromSrc('prompts.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
@@ -76,6 +76,27 @@ const { PROVENANCE } = await importFromSrc('taxonomy.mjs');
 // operator reads: an embedded escape or a carriage return rewrites what that
 // line says, and no honest rev spelling or reason contains one.
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+
+// The one rule for every revision a CALLER hands this bridge, and a caller
+// hands it one in three places: `--commit`, a `--choice` file's commit, and a
+// `--no-pass` declaration. Each is interpolated verbatim into a line an
+// operator reads, so each must refuse a control character; each reaches git's
+// argument position, so each must refuse a leading dash.
+//
+// It lives here once because two of the three had spelled the rule out and the
+// third had spelled out half of it. `--commit` checked only the dash, and its
+// value is printed raw by `chooseLane` and by the two failure reports below:
+// `--commit $'HEAD\r  regression lane: nothing to see here'` printed exactly
+// that, and a terminal shows the second half over the first. Reproduced. A
+// third copy of the check is how the first two drifted, so this returns the
+// REASON and each caller keeps its own message and exit code — the rule is
+// shared, the refusal is local.
+function unsafeRevision(value) {
+  if (typeof value !== 'string' || !value.trim()) return 'is not a revision';
+  if (value.startsWith('-')) return 'looks like an option, not a revision';
+  if (CONTROL_CHARS.test(value)) return 'carries a control character';
+  return null;
+}
 
 const MAX_FOLD_COMMITS = 64;
 
@@ -90,8 +111,8 @@ let declaredSkips = [];
 const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
   + ' (--closed-by <persona>… | --closed-by-none | --closed-by-ledger <ledger.json>) [--json]\n'
   + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
-  + ' [--refold] [--choice <lane-choice.json>]… [--repo <dir>] [--ledger <ledger.json>]'
-  + ' [--no-pass <commit>=<why>]…';
+  + ' (--ledger <ledger.json> | --no-ledger) [--refold] [--choice <lane-choice.json>]…'
+  + ' [--repo <dir>] [--no-pass <commit>=<why>]…';
 
 const { values, positionals } = parseBridgeArgs({
   prefix: 'regression',
@@ -106,6 +127,7 @@ const { values, positionals } = parseBridgeArgs({
     outdir:           { type: 'string' },
     choice:           { type: 'string', multiple: true },
     ledger:           { type: 'string' },
+    'no-ledger':      { type: 'boolean' },
     'no-pass':        { type: 'string', multiple: true },
     refold:           { type: 'boolean' },
     json:             { type: 'boolean' },
@@ -127,16 +149,30 @@ if ((values['no-pass'] ?? []).length && !payloads.length) {
     + ' commits, which is a fact about folding this iteration\'s passes — the lane-choice'
     + ` mode has nothing to record it against\n${USAGE}`);
 }
+// The same rule for the same reason, and it is here rather than beside the
+// other `--no-ledger` checks because that is where the `--no-pass` one had to
+// be moved to: a declaration the wrong mode accepts and nothing reads is a
+// declaration the operator believes is on record.
+if (values['no-ledger'] && !payloads.length) {
+  usage('regression: --no-ledger declares that a FOLD consults no ledger; the lane-choice'
+    + ' mode has nothing to record it against, and its own ledger flags are'
+    + ` --closed-by-ledger and --closed-by-none\n${USAGE}`);
+}
 
 if (payloads.length) {
   if (!values.outdir) usage(USAGE);
   if (values.ledger && !values.repo) {
     usage(`regression: --ledger requires --repo, the repository the ledger is bound to\n${USAGE}`);
   }
+  // Ahead of `requireLedgerDecision`, because a run that passed `--no-pass`
+  // has said something more specific than "no ledger" and deserves the more
+  // specific answer — including when it passed `--no-ledger` beside it, which
+  // is a declaration about commits the same command declined to name.
   if ((values['no-pass'] ?? []).length && !values.ledger) {
     usage('regression: --no-pass declares a skipped pass on one of this iteration\'s fix'
       + ` commits, which only --ledger can name — pass it too\n${USAGE}`);
   }
+  requireLedgerDecision();
   // Parsed HERE, before a byte is written, and not where it is used. The fold
   // is a publish: `refuseKnownFolds` runs before any lane file is written for
   // exactly this reason — "a fold that refuses one lane's stale pass after
@@ -152,6 +188,41 @@ if (payloads.length) {
     values['closed-by-ledger'] ?? null);
 } else {
   usage(USAGE);
+}
+
+// A fold either consults a ledger or DECLARES that it does not. One of the two,
+// never neither, and never both.
+//
+// `--ledger` is what names this iteration's fix commits, so the pass-coverage
+// check below runs only when it is passed — and the party that decides whether
+// to pass it is the party whose fix commits that check accounts for. Omitting
+// it turned the whole mechanism off with exit 0 and left no trace in the
+// output: a fold that never checked was byte-identical to a fold that checked
+// and found every commit accounted for. Measured, and it is the same shape as
+// the check itself, one level up — a skipped check reads exactly like a clean
+// one.
+//
+// A hard requirement is the wrong answer, because a ledger-less fold is
+// legitimate: iteration 1 has no ledger yet, and a fold outside the loop has
+// none at all. The remedy is this file's own, one mode over. `--closed-by-none`
+// exists because "no exclusion input at all" read exactly like "nothing to
+// exclude", and it was closed by requiring the ABSENCE to be declared rather
+// than by requiring the input. `--no-ledger` is that flag for this input, and
+// the fold says so in its own output so the declaration reaches whoever reads
+// the run rather than only whoever typed it.
+function requireLedgerDecision() {
+  if (values.ledger && values['no-ledger']) {
+    usage('regression: --no-ledger contradicts the --ledger given beside it; a fold either'
+      + ` consults a ledger or declares that it does not\n${USAGE}`);
+  }
+  if (!values.ledger && !values['no-ledger']) {
+    usage('regression: --ledger <ledger.json> is required: it is the only input that names'
+      + " this iteration's fix commits, so without it nothing checks that any of them was\n"
+      + '    looked at, and the fold that never checked prints exactly what the fold that'
+      + ' checked and found nothing missing prints.\n'
+      + '    If this run has no ledger — iteration 1, or a fold outside the loop — say so'
+      + ` with --no-ledger rather than by typing less\n${USAGE}`);
+  }
 }
 
 // The same ledger load and repository binding triage.mjs enforces, for the
@@ -199,11 +270,14 @@ function loadBoundLedger(ledgerPath, repo, { flag = '--ledger', refusal = 1 } = 
 
 // Same guard triage.mjs and plan.mjs apply to `--base`: a revision in git's
 // option position becomes a git option, and one that opens a file for writing
-// is a file this bridge truncates on the orchestrator's behalf.
+// is a file this bridge truncates on the orchestrator's behalf. `--commit` is
+// also the only one of this bridge's three revisions that is printed on a line
+// of its own, so it is the one where a control character has the most to
+// rewrite — `unsafeRevision` is where both halves of that rule now live.
 function requireRevision(rev) {
-  if (rev.startsWith('-')) {
-    process.stderr.write(`regression: --commit ${JSON.stringify(rev)} looks like an option,`
-      + ' not a revision\n');
+  const why = unsafeRevision(rev);
+  if (why) {
+    process.stderr.write(`regression: --commit ${JSON.stringify(rev)} ${why}\n`);
     process.exit(2);
   }
   return rev;
@@ -213,39 +287,50 @@ function requireRevision(rev) {
 // assessScope the shape it reads as "nothing to assess", which recommends
 // running the Adversary — the same fail-toward-the-boundary direction the rest
 // of this tool takes, and the reason the failure is reported rather than fatal.
-// `--end-of-options` is the argv-side half of src/trace.mjs's rule: "two
-// independent guards, because either alone is one flag away from being
-// bypassed". `requireRevision` is the pattern half and runs first, so nothing
-// here is reachable today — which is the point. A revision that stops looking
-// like an option to the pattern (a future spelling, a caller that skips the
-// guard) still cannot become one to git.
+//
+// Every way of failing ends the same way, so they share one report: the lane is
+// chosen from a diff nobody read.
+function unreadableCommit(rev, repo, why) {
+  process.stderr.write(`  ! regression: cannot read ${rev} in ${repo}: ${why}\n`
+    + '    choosing the lane from an unread diff, which fails toward the Adversary\n');
+  process.exitCode = 1;
+  return { files: [], diff: '' };
+}
+
+// The file list comes from `filesChangedIn` rather than from a second
+// hand-rolled `git show --name-only` here.
+//
+// This was that second copy, and it carried the defect a9156f9 had just fixed
+// in the first: git's rename detection is on by default and `--name-only` then
+// prints only a rename's DESTINATION. Reproduced — a commit renaming
+// `src/auth.py` to `src/greeting.py` listed one path, `assessScope` found no
+// trust-boundary signal in it, and the pass was routed to the auditor under
+// "the fix diff crosses no trust boundary". A commit that moves authentication
+// code out from under its name is precisely the one the Adversary should read.
+//
+// Routed rather than patched, because the shared implementation already answers
+// this bridge's whole question: it resolves the ref through `SAFE_REF` (so the
+// revision never reaches an argument position at all), it separates a merge
+// from a commit that changed nothing, it separates a ref that names no commit
+// from a git that would not run, and it memoizes. Two corrected copies is how
+// these two drifted apart in the first place.
+//
+// The DIFF is still read here, with git's default rename detection, and that
+// difference is deliberate: the file list answers "which paths did this touch",
+// where a rename touched both, while the diff answers "what did the content
+// become", where a pure rename changed nothing and `--no-renames` would show a
+// whole file added and a whole file removed.
 function readCommit(repo, rev) {
-  const git = (...args) =>
-    execFileSync('git', ['-C', repo, '-c', 'core.quotePath=false', ...args], { encoding: 'utf-8' });
+  const changed = filesChangedIn(repo, rev);
+  if (changed.status !== 'ok') return unreadableCommit(rev, repo, changed.why);
+
   try {
-    const parents = git('show', '--no-patch', '--format=%P', '--end-of-options', rev);
-    // A merge lists no files and no diff unless told which parent to read it
-    // against, so it arrives here looking exactly like a commit that changed
-    // nothing — and the lane gets chosen from that. Said out loud through the
-    // channel below rather than fixed by picking a parent, which would be this
-    // bridge inventing the answer. src/trace.mjs's `filesChangedIn` keeps the
-    // same two apart for the same reason, one caller over.
-    if (parents.trim().split(/\s+/).filter(Boolean).length > 1) {
-      process.stderr.write(`  ! regression: ${rev} is a merge, so git lists no files for it\n`
-        + '    choosing the lane from an unread diff, which fails toward the Adversary\n');
-      process.exitCode = 1;
-      return { files: [], diff: '' };
-    }
-    return {
-      files: git('show', '--pretty=format:', '--name-only', '--end-of-options', rev)
-        .split('\n').filter(Boolean),
-      diff: git('show', '--format=', '--end-of-options', rev),
-    };
+    const diff = execFileSync(
+      'git', ['-C', repo, '-c', 'core.quotePath=false', 'show', '--format=',
+        '--end-of-options', resolveRef(repo, rev)], { encoding: 'utf-8' });
+    return { files: changed.files, diff };
   } catch (e) {
-    process.stderr.write(`  ! regression: cannot read ${rev} in ${repo}: ${e.message.trim()}\n`
-      + '    choosing the lane from an unread diff, which fails toward the Adversary\n');
-    process.exitCode = 1;
-    return { files: [], diff: '' };
+    return unreadableCommit(rev, repo, `git could not read its diff: ${e.message.trim()}`);
   }
 }
 
@@ -598,10 +683,9 @@ function readChoices(files) {
   return files.map((src) => {
     const c = readJson(src, 'regression');
     requireKnownPersona(c?.persona, { prefix: 'regression', file: src, personas: DEFAULT_PERSONAS });
-    // No control characters in the commit — see CONTROL_CHARS. `readNoPass`
-    // applies the same guard to a `--no-pass` declaration.
-    const ok = typeof c.commit === 'string' && c.commit && !c.commit.startsWith('-')
-      && !CONTROL_CHARS.test(c.commit)
+    // The commit goes through `unsafeRevision`, the one rule `--commit` and
+    // `--no-pass` are held to as well.
+    const ok = !unsafeRevision(c.commit)
       && typeof c.reason === 'string' && typeof c.conflicted === 'boolean'
       && ['declared-list', 'declared-none'].includes(c.disinterest);
     if (!ok) {
@@ -712,6 +796,11 @@ function foldPayloads(sources, outdir, bound) {
       + ' matches no pass in this fold\n');
   }
 
+  // Assessed before the publish and refused before the publish, like every
+  // other refusal this bridge makes. See `refuseUncoveredFixCommits`.
+  const coverage = bound ? assessPassCoverage(bound.ledger, byPersona, sameCommit) : null;
+  if (coverage) refuseUncoveredFixCommits(coverage);
+
   // Queued, not written, for the same reason the refusal above is one decision
   // over all lanes: the publish is one event. bridge-io.mjs holds that ordering
   // for verify.mjs and repair.mjs too, and this is the fold whose comment they
@@ -761,7 +850,14 @@ function foldPayloads(sources, outdir, bound) {
     + ` ${findings} finding(s), stamped so the report can say a fix commit's regression`
     + ` pass found them${bound ? `; ${adjudicated} carrying a recorded decision` : ''}\n`);
 
-  if (bound) reportPassCoverage(bound.ledger, byPersona, sameCommit);
+  if (coverage) reportPassCoverage(coverage);
+  // The declared absence, said in the output rather than only on the command
+  // line: this is the line that keeps a fold that never checked from reading
+  // like a fold that checked and found nothing missing.
+  else {
+    process.stdout.write('  --no-ledger: no ledger was consulted, so nothing here says whether'
+      + " any of this iteration's fix commits was read by a pass\n");
+  }
 }
 
 // Which of this iteration's fix commits a pass read, and which nobody looked at
@@ -779,18 +875,26 @@ function foldPayloads(sources, outdir, bound) {
 // commit with neither is the one thing this refuses, because that is the state
 // nobody can tell apart from a pass that ran clean.
 //
-// Refusing is safe in a way it was not for the checks in converge.mjs: this is
-// not the write that advances the iteration counter, so a refusal here cannot
-// make the cap unreachable, and the remedy is one flag away. The lane files are
-// already written — the fold is a publish and stays one — so this reports on
-// work that landed rather than withholding it.
-function reportPassCoverage(ledger, byPersona, sameCommit) {
+// Decided here, said in the two functions below, because the two halves of this
+// account belong at different moments: the refusal has to be made before the
+// fold publishes, and the rest reads better under the summary.
+//
+// Every declaration is reconciled here, unconditionally, and that ordering is
+// the fix rather than an accident of layout. This function used to return the
+// moment the round recorded no fix commit — which is exactly the state in which
+// EVERY declaration matches nothing — so a `--no-pass` naming anything at all
+// was accepted in silence: no coverage line, no unmatched-declaration warning,
+// exit 0. Reproduced. That is the second time this channel was read behind a
+// conditional; the lane-choice mode swallowed the same flag until its guard was
+// hoisted above the mode dispatch. So the reconciliation is no longer a tail of
+// the coverage loop that an early return can skip — it is what this function
+// computes, and the caller cannot reach the summary without it.
+function assessPassCoverage(ledger, byPersona, sameCommit) {
   const fixCommits = mergeSpellings(fixCommitsIn(ledger), sameCommit);
-  if (!fixCommits.length) return;
-
   const passed = new Set([...byPersona.values()].flatMap((l) => l.passes.map((p) => p.commit)));
-  const matched = new Set();
 
+  const matched = new Set();
+  const declared = [];
   const unaccounted = [];
   for (const { commit, closes } of fixCommits) {
     // Matched BEFORE the pass-coverage test, and every declaration naming this
@@ -799,33 +903,75 @@ function reportPassCoverage(ledger, byPersona, sameCommit) {
     // pass also happened to cover it. Deciding it afterwards told an operator
     // who declared a skip on a commit that then got a pass to go hunt a typo in
     // a sha that was correct.
-    const declared = declaredSkips.filter((d) => sameCommit(new Set([d.commit]), commit));
-    for (const d of declared) matched.add(d);
+    const naming = declaredSkips.filter((d) => sameCommit(new Set([d.commit]), commit));
+    for (const d of naming) matched.add(d);
 
     if (sameCommit(passed, commit)) continue;
-    if (declared.length) {
-      process.stdout.write(
-        `  no pass on ${commit} (closed ${closes}), declared: ${declared[0].why}\n`);
-      continue;
-    }
-    unaccounted.push({ commit, closes });
+    if (naming.length) declared.push({ commit, closes, why: naming[0].why });
+    else unaccounted.push({ commit, closes });
   }
 
-  for (const d of declaredSkips.filter((x) => !matched.has(x))) {
-    process.stderr.write(`regression: --no-pass ${d.commit} names no fix commit in this`
-      + " iteration's ledger entries — check the spelling, or the ledger\n");
-  }
+  return {
+    total: fixCommits.length,
+    declared,
+    unaccounted,
+    unmatched: declaredSkips.filter((d) => !matched.has(d)),
+  };
+}
 
+// The one state nobody can tell apart from a pass that ran clean, refused
+// BEFORE a byte of this fold is written.
+//
+// That ordering is a reversal, and the reasoning it reverses is worth stating.
+// The refusal used to run after the publish, so that it "reports on work that
+// landed rather than withholding it" — and the remedy it printed was to re-run
+// the same fold with a declaration added. But that re-run re-reads commits the
+// outdir has already folded, so it needed `--refold`, and `--refold` disarms
+// `refuseKnownFolds` for every lane at once — the check that stops an earlier
+// iteration's leftover pass being signed as this iteration's evidence. A guard
+// the normal workflow tells you to switch off is not a guard, and the workflow
+// that switched it off was the documented one.
+//
+// Refusing first removes the second fold entirely: nothing was published, so
+// the re-run with `--no-pass` added is an ordinary first fold and needs no
+// flag. It also puts this refusal back under the rule the rest of this bridge
+// already keeps, and that the loop reference states for it by name — every
+// payload is read and every refusal is made before the first lane file is
+// written, so a fold never publishes half of what it refused. The malformed
+// `--no-pass` refusal was moved to argv time for exactly this reason; a missing
+// declaration is the same failure one word over.
+//
+// What it costs is a delayed publish: a pass that found something has to wait
+// for the operator to account for the OTHER commit. That is the cheaper side.
+// The alternative buys an immediate publish by leaving the staleness check
+// disarmed for the run, and a delayed publish is recoverable by typing one
+// flag while a leftover signed as this iteration's evidence is not.
+function refuseUncoveredFixCommits({ unaccounted, total }) {
   if (!unaccounted.length) return;
   process.stderr.write(
-    `regression: NO PASS AND NO DECLARATION — ${unaccounted.length} of ${fixCommits.length}`
+    `regression: NO PASS AND NO DECLARATION — ${unaccounted.length} of ${total}`
     + ' fix commit(s) in this iteration:\n'
     + unaccounted.map((u) => `  - ${u.commit} (closed ${u.closes} finding(s))\n`).join('')
     + '  The pass is recommended, not required — but a skipped one reads exactly\n'
     + '  like a clean one, which is the silence this check exists to break. Run\n'
-    + '  the pass, or say why you did not: --no-pass <commit>="<why>". The lane\n'
-    + '  files of this run are already written, so that re-run needs --refold.\n');
-  process.exitCode = 1;
+    + '  the pass, or say why you did not: --no-pass <commit>="<why>", and re-run\n'
+    + '  this same fold. Nothing was written, so that re-run needs no --refold.\n');
+  process.exit(1);
+}
+
+// What WAS accounted for, under the summary the fold just printed, plus the
+// declarations that accounted for nothing. An unmatched declaration is a typo
+// or a stale sha rather than a state to refuse: it can never hide an
+// unaccounted commit, because the commit it failed to name is either covered by
+// a pass or already in the refusal above.
+function reportPassCoverage({ declared, unmatched }) {
+  for (const { commit, closes, why } of declared) {
+    process.stdout.write(`  no pass on ${commit} (closed ${closes}), declared: ${why}\n`);
+  }
+  for (const d of unmatched) {
+    process.stderr.write(`regression: --no-pass ${d.commit} names no fix commit in this`
+      + " iteration's ledger entries — check the spelling, or the ledger\n");
+  }
 }
 
 // One commit is one commit, however the fix agents spelled it. `fixCommitsIn`
@@ -860,11 +1006,12 @@ function readNoPass(specs) {
         + ' --no-pass <commit>="<why>". A skip with no reason is the silence this'
         + ` flag exists to break\n${USAGE}`);
     }
-    // The same guard `readChoices` puts on its commit, for the same reason and
-    // over both halves: the whole declaration is written by the orchestrating
+    // `unsafeRevision` on the commit, and its control-character half on the
+    // reason as well: the whole declaration is written by the orchestrating
     // agent and interpolated verbatim into this bridge's own stdout and stderr
-    // lines — including, here, the refusal printed directly above it.
-    if (commit.startsWith('-') || CONTROL_CHARS.test(`${commit}${why}`)) {
+    // lines — including, here, the refusal printed directly above it. The
+    // reason is prose rather than a revision, so only that half applies to it.
+    if (unsafeRevision(commit) || CONTROL_CHARS.test(why)) {
       usage(`regression: --no-pass ${JSON.stringify(spec)} is not a commit and a reason`
         + ' — a control character, or a leading dash on the commit, rewrites the line'
         + ` it is printed on\n${USAGE}`);

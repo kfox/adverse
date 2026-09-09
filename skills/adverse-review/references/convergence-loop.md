@@ -560,7 +560,7 @@ node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/*/regre
 
 node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/*/regression-*.json \
     --outdir "$ADVERSE_RUN" --choice "$ADVERSE_RUN"/lane-choice-*.json \
-    --repo . ${LEDGER:+--ledger "$LEDGER"}
+    --repo . ${LEDGER:+--ledger "$LEDGER"} ${LEDGER:---no-ledger}
 ```
 
 `--repo` is unconditional: it is what lets the fold resolve two spellings of
@@ -569,7 +569,19 @@ lane choice to its pass. Without it the fold falls back to exact string
 equality — safe, but a choice recorded under an abbreviated sha then goes
 unstamped, and the lane summary reports it unrecorded.
 
-Pass `--ledger` whenever the run has one. The fold then annotates any finding
+**Pass `--ledger` whenever the run has one, and `--no-ledger` when it does
+not.** One of the two, never neither: the fold's own account of which fix
+commits anybody looked at runs only under `--ledger`, and the party who decides
+whether to pass it is the party whose fix commits it accounts for. Omitting it
+turned that whole check off at exit 0 and left nothing in the output to say the
+check had not run, which is the same shape as the check itself — a skipped one
+reads exactly like a clean one. A ledger-less fold is legitimate (iteration 1
+has none yet), so it is the ABSENCE that has to be declared, exactly as
+`--closed-by-none` declares an empty exclusion list rather than leaving the flag
+off. `--no-ledger` also prints a line saying so, so the declaration reaches
+whoever reads the run rather than only whoever typed it.
+
+With `--ledger` the fold annotates any finding
 that re-litigates a settled decision with the recorded disposition and reason —
 the same `adjudicated` block triage writes — so a pass that proposes reinstating
 what an earlier iteration `declined` arrives already labeled. That oscillation
@@ -577,9 +589,9 @@ is measured, not hypothetical: a campaign's regression agent, briefed on a
 commit alone, re-proposed a fix the ledger had recorded as critical two
 iterations earlier, and only the operator's memory caught it.
 
-With `--ledger` the fold also answers *which of this iteration's fix commits
-anybody looked at*. Every commit a `fixed` decision recorded must be accounted
-for, one of two ways — a pass on record, or a declaration:
+It also answers *which of this iteration's fix commits anybody looked at*. Every
+commit a `fixed` decision recorded must be accounted for, one of two ways — a
+pass on record, or a declaration:
 
 ```bash
     --no-pass <commit>="four one-line fixes to pinned paths, each with its own test"
@@ -591,15 +603,22 @@ is a commit with **neither** — the one state nobody can tell apart from a pass
 that ran clean. A declaration is refused without a reason (`--no-pass <sha>`
 alone is the same silence in new syntax), refused without `--ledger` (nothing
 else names the fix commits), and reported when it matches no fix commit of this
-iteration, which is a typo or a stale sha rather than an account of anything.
+iteration, which is a typo or a stale sha rather than an account of anything —
+including when this iteration recorded no fix commit at all, which is the one
+state in which every declaration matches nothing.
 
-The refusal is exit 1 *after* the lane files are written: the fold is a publish
-and stays one, so this reports on work that landed rather than withholding it.
-That means the fold you re-run with `--no-pass` added is re-reading commits this
-outdir has already folded, so **it needs `--refold`** — without it the staleness
-check refuses at exit 2 and describes your own refused fold as an earlier
-iteration's leftovers. A malformed `--no-pass` is different again: that is
-refused at exit 2 before anything is written at all, so its re-run does not.
+The refusal is exit 1 and **nothing is written**, like every other refusal this
+fold makes. So the remedy is to re-run this same fold with the declaration
+added, and that re-run needs **no `--refold`**: the outdir holds no fold of
+these commits, because the refused run published none.
+
+That ordering is deliberate and it used to be the other way. Refusing after the
+write meant the remedy re-read commits the outdir had already folded, so it
+needed `--refold` — and `--refold` disarms the staleness check for every lane at
+once, the check that stops an earlier iteration's leftover pass being signed as
+this iteration's evidence. A guard the normal workflow tells you to switch off
+is not a guard. Refusing first costs a delayed publish, which one flag
+recovers, instead of a disarmed guard, which nothing does.
 
 `--phase regression` reads the persona off the basename with the pass number
 stripped, so `regression-auditor-1.json` and `regression-auditor-2.json` both
