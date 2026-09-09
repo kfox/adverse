@@ -286,6 +286,198 @@ test('an entry whose title is in no finding is named before --record refuses it'
   }
 });
 
+// The briefing the fix agent copied its `id` and `title` out of. `id` F3
+// matches `goodFix.fixed[0]`, and the entry reads `design`/no file — the
+// pre-merge shape `identityOf` exists to correct.
+const briefingDoc = {
+  findings: [{
+    id: 'F3', title: 'the guard is unreachable', kind: 'design', severity: 'warning',
+    file: null, line: null, counterpart: null,
+  }],
+};
+
+test('a transposed id and title are named, and the block says both cannot be right', () => {
+  // #95 through the bridge. `--briefing` is the only thing in this flow that
+  // can tell a swapped pair from an honest one, because both fields come out of
+  // the same briefing entry.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], title: 'a title from the other finding' }],
+    });
+    const briefing = write(dir, 'briefing.json', briefingDoc);
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--briefing', briefing, '--report', report,
+      '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
+    assert.match(r.stdout, /the briefing calls F3 "the guard is unreachable"/);
+    assert.match(r.stdout, /these cannot\n    both be right/);
+    // Not the anchor block and not the title block — the cause is neither.
+    assert.doesNotMatch(r.stdout, /ANCHOR DISAGREES WITH THE REPORT/);
+    assert.doesNotMatch(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a briefing without a report still reports a transposed pair', () => {
+  // The transposition check needs the briefing, not the report: an `id` and a
+  // `title` naming different findings is the payload contradicting ITSELF, and
+  // both fields were copied out of the same briefing entry. Gated on the report
+  // it printed nothing at all on a --briefing-only fold, while the command line
+  // said the guard was on — the same silence the exit-2 branch beside it
+  // refuses for a briefing that parses to nothing.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], title: 'a title from the other finding' }],
+    });
+    const briefing = write(dir, 'briefing.json', briefingDoc);
+    const r = run(['--fix', src, '--briefing', briefing,
+      '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
+    assert.match(r.stdout, /the briefing calls F3 "the guard is unreachable"/);
+    // The three report blocks stay off: with no report nothing binds, so there
+    // is nothing corrected and nothing to accuse of missing the report.
+    assert.doesNotMatch(r.stdout, /identity corrected from the report/);
+    assert.doesNotMatch(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an id naming no briefing entry gets its own block, not the transposition one', () => {
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], id: 'F9' }],
+    });
+    const briefing = write(dir, 'briefing.json', briefingDoc);
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--briefing', briefing, '--report', report,
+      '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ID NAMES NO BRIEFING ENTRY/);
+    assert.match(r.stdout, /re-minted every triage run/);
+    assert.doesNotMatch(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a briefing that agrees does not fire either block, and identity is still corrected', () => {
+  // The near-miss, at the bridge. A guard that refuses the legitimate case is
+  // not a fix: the briefing entry reads `design`/no file and the report reads
+  // `defect`/`src/auth.py`, which is the correction this path exists for, and
+  // only the TITLE has to agree.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
+    const briefing = write(dir, 'briefing.json', briefingDoc);
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--briefing', briefing, '--report', report,
+      '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
+    assert.doesNotMatch(r.stdout, /ID NAMES NO BRIEFING ENTRY/);
+    assert.match(r.stdout, /identity corrected from the report/);
+    const [d] = JSON.parse(readFileSync(path.join(dir, 'decisions.json'), 'utf-8')).decisions;
+    assert.equal(d.file, 'src/auth.py');
+    assert.equal(d.kind, 'defect');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('without --briefing the bridge says the transposition guard did not run', () => {
+  // The same doctrine as the `--report` notice above it, and the same reason:
+  // a guard that is silently off reads exactly like a guard that found nothing.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--report', report, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /--briefing not given/);
+    assert.match(r.stderr, /transposes two titles binds by title alone/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --briefing carrying no entry ids is exit 2 — it was read and is not a briefing', () => {
+  // Not a quiet skip. Skipping would leave the guard off while the command line
+  // said it was on, which is the shape of the defect one issue over: a bridge
+  // advertising a check the tool withholds.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
+    const briefing = write(dir, 'briefing.json', { findings: [{ title: 'no id here' }] });
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--briefing', briefing, '--report', report,
+      '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /no briefing entry carries/);
+    assert.equal(existsSync(path.join(dir, 'decisions.json')), false,
+      'a run that refuses its input writes nothing');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a disagreeing anchor is not reported as a wrong title', () => {
+  // #96's reproduction, byte for byte: the title is verbatim from the report
+  // and `file` is one character different. The old bridge printed MATCHES NO
+  // FINDING for this and told the operator to correct the title against
+  // report.json — the one field that was already right. Both causes landed in
+  // one block because `reconciliations` answered both with a bare
+  // `bound: false`.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], file: 'src/authz.py' }],
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--report', report, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ANCHOR DISAGREES WITH THE REPORT/);
+    assert.match(r.stdout, /the files differ \(src\/authz\.py here, src\/auth\.py in the report\)/);
+    assert.match(r.stdout, /The title is already right/);
+    // And NOT the other block, whose remedy is the title.
+    assert.doesNotMatch(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the anchor block never names a field the guard does not read', () => {
+  // `kind` is what synthesis rewrites — `identityOf` corrects it on purpose and
+  // `anchorsAgree` excludes it for that reason. `identityGap`'s ledger caller
+  // asks about `kind` first, so handing this bridge the ledger's field list
+  // would make it report "the kinds differ" for a refusal the kind had no part
+  // in, which is the misdirection this whole change is about, one field over.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], kind: 'design', file: 'src/authz.py' }],
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--report', report, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /the files differ/);
+    assert.doesNotMatch(r.stdout, /the kinds differ/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an ordinary batch is not listed as corrected', () => {
   // A block that fires on every run is a block nobody reads.
   const dir = freshTmp();

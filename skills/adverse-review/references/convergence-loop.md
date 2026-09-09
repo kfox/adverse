@@ -306,6 +306,7 @@ Then check what landed and fold it, the same way round 1 is checked:
 node ${SKILL_DIR}/scripts/validate.mjs --phase fix "$ADVERSE_RUN"/*/fix-*.json
 
 node ${SKILL_DIR}/scripts/decisions.mjs --fix "$ADVERSE_RUN"/*/fix-*.json \
+    --briefing "$ADVERSE_RUN"/briefing.json \
     --report "$ADVERSE_RUN"/report.json --out "$ADVERSE_RUN"/decisions.json
 ```
 
@@ -313,6 +314,27 @@ node ${SKILL_DIR}/scripts/decisions.mjs --fix "$ADVERSE_RUN"/*/fix-*.json \
 the `--record` command above reads — `fixed` and `declined` become decisions of
 those dispositions carrying the identity fields the payload already holds, so
 you never reassemble them by hand. Fold the whole iteration in one call.
+
+**`--briefing` is what makes them the right FINDING'S fields**, and it is the
+only guard in this flow against a payload whose `id` and `title` name different
+findings. Both come out of one briefing entry, so they cannot legitimately
+disagree — and `validateFix` cannot check that, because it has no briefing.
+Measured on `65bc979`: a payload declining a `design` advisory with the correct
+`id`, the correct `kind`, `file: null` and a reason about structure, carrying the
+OTHER finding's title, had its identity rewritten onto a cross-validated
+`critical` at `src/auth.py:88` and settled it — `settled: [the critical]`,
+`open: []`, `done: true`, "converged: no blocking finding is unsettled". With
+`--briefing` the same payload keeps its own identity, binds to nothing, and the
+critical lands in `unexamined` with the loop open at "1 never cross-examined".
+
+It is an id/title AGREEMENT check and not a switch to binding on the id: ids are
+re-minted positionally on every triage run, so a stale one names nothing or
+names a different finding, and the title stays the join key. Three answers, each
+with its own block on the bridge's output — the titles disagree, the id names no
+entry, or the pair agrees and binding proceeds. Omit the flag and the bridge
+says on stderr that the check did not run, for the same reason a skipped lane is
+declared: a guard that is silently off reads exactly like a guard that found
+nothing.
 
 `--report` is what makes those fields the right ones. A fix agent copies its
 briefing entry verbatim, as `fix.txt` tells it to, and **the briefing is

@@ -56,7 +56,8 @@ const oneLine = (v) => clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
 // error — a batch folded without one still records, it just carries the
 // briefing's identity fields. Printing it as mandatory here and accepting its
 // absence three checks down would be two answers to one question.
-const USAGE = 'Usage: decisions.mjs --fix a.json [--fix b.json …] [--report report.json]'
+const USAGE = 'Usage: decisions.mjs --fix a.json [--fix b.json …] [--briefing briefing.json]'
+  + ' [--report report.json]'
   + ' --out decisions.json';
 
 const { values, positionals } = parseBridgeArgs({
@@ -64,6 +65,7 @@ const { values, positionals } = parseBridgeArgs({
   usage: USAGE,
   options: {
     fix: { type: 'string', multiple: true },
+    briefing: { type: 'string' },
     report: { type: 'string' },
     out: { type: 'string' },
   },
@@ -119,9 +121,35 @@ if (values.report) {
     + '  Pass --report <report.json> to correct them here.\n');
 }
 
+// The briefing is what makes a transposed title catchable: a decision's `id`
+// names a briefing entry, and nothing else in this flow ever checks that the
+// entry it names is the one the title says. Without it the fold still runs and
+// still corrects identities — it just cannot tell a swapped pair from an honest
+// one, and it says so rather than leaving the operator to assume otherwise.
+//
+// A supplied briefing with no usable entries is exit 2, not a quiet skip: it
+// was read and it does not describe a briefing, which is the same answer
+// `--report` gives for a file that is not a synthesis report. Skipping quietly
+// would leave the guard off while the command line said it was on.
+const briefing = values.briefing ? readJson(values.briefing, 'decisions') : null;
+if (values.briefing) {
+  const entries = (briefing?.findings ?? []).filter((e) => e && typeof e.id === 'string' && e.id);
+  if (!entries.length) {
+    process.stderr.write(`decisions: ${oneLine(values.briefing)}: no briefing entry carries `
+      + 'an `id`, so no decision can be bound to one; this is not a briefing.json\n');
+    process.exit(2);
+  }
+} else {
+  process.stderr.write(
+    'decisions: --briefing not given, so no decision\'s `id` is checked against the\n'
+    + '  entry it names. A fix payload that transposes two titles binds by title alone,\n'
+    + '  which moves the decision onto the other finding and can settle it. Pass\n'
+    + '  --briefing <briefing.json> to check them here.\n');
+}
+
 let decisions;
 try {
-  decisions = foldFixPayloads(payloads, { report });
+  decisions = foldFixPayloads(payloads, { report, briefing });
 } catch (e) {
   // Reachable only if a payload passed validateFix and still cannot become a
   // decision, which would be the two disagreeing rather than a bad payload.
@@ -154,10 +182,32 @@ let out = `${decisions.length} decision(s) from ${payloads.length} fix payload(s
 // exit 1, said here at the earlier of the two moments the operator can act on
 // it — and, under its own heading, the unbound `noted` entries, which record
 // cleanly and become the identity that excuses the next decision matching them.
-const changes = report ? reconciliations(payloads, report) : [];
+//
+// Computed whenever EITHER document was given, not only when a report was. The
+// three report blocks below are empty without one anyway — nothing binds, so
+// nothing is corrected and nothing is accused — but the two briefing blocks do
+// not need a report to have something to say: an `id` and a `title` naming
+// different findings is the payload contradicting itself, which is checkable
+// with the briefing alone. Gated on the report, a `--briefing`-only fold
+// printed no signal at all about a transposed pair, while the command line said
+// the guard was on. That is the same silence the exit-2 branch above refuses
+// for a briefing that parses to nothing.
+const changes = report || briefing ? reconciliations(payloads, report, briefing) : [];
 const isNamed = (c) => c.disposition === NAMED_NOT_FIXED_DISPOSITION;
 const corrected = changes.filter((c) => c.bound);
-const unbound = changes.filter((c) => !c.bound && !isNamed(c));
+// Split by CAUSE, not just by boundness. `reconciliations` used to answer
+// "did not bind" for two different reasons and this block printed the title
+// remedy for both, so an operator holding a byte-identical title and a
+// disagreeing `file` was sent to correct the only field that was already right.
+const unbound = changes.filter((c) => !c.bound && !isNamed(c) && c.cause === 'title');
+const misanchored = changes.filter((c) => !c.bound && !isNamed(c) && c.cause === 'anchor');
+// Both briefing causes are listed for EVERY disposition, `noted` included —
+// unlike the three above, which split `noted` off under its own gentler
+// heading. That heading exists because recording a `noted` entry settles
+// nothing; the reasoning does not reach a payload whose own two identity claims
+// disagree with each other, which is a mis-citation whatever it was recorded as.
+const transposed = changes.filter((c) => c.cause === 'briefing');
+const staleIds = changes.filter((c) => c.cause === 'briefing-id');
 const unreported = changes.filter((c) => !c.bound && isNamed(c));
 if (corrected.length) {
   out += `  identity corrected from the report — the briefing's copy predates a lane`
@@ -179,6 +229,46 @@ if (unbound.length) {
        + unbound.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`).join('')
        + '    A title is how a decision finds the finding it answers, and `fix.txt`\n'
        + '    tells the agent to copy it verbatim. Correct it against report.json.\n';
+}
+if (transposed.length) {
+  // First block and the loudest, because it is the only one of these where the
+  // payload's own two identity fields contradict each other — every other cause
+  // is a disagreement with a document the agent did not write. Measured on
+  // `65bc979`: a transposed pair settled a cross-validated `critical` with a
+  // sentence about structure, and the loop reported `done` with nothing open.
+  out += `  ID AND TITLE NAME DIFFERENT FINDINGS — these settle nothing, and one of`
+       + ` the two fields is wrong (${transposed.length}):\n`
+       + transposed.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`
+           + `        ${oneLine(c.gap)}\n`).join('')
+       + '    A fix payload copies both out of the same briefing entry, so these cannot\n'
+       + '    both be right. Find which finding was actually decided before recording:\n'
+       + '    binding on the title alone would move the decision onto the other one.\n';
+}
+if (staleIds.length) {
+  // Distinct from the block above on purpose. `briefing.mjs` re-mints ids
+  // positionally on every triage run, so an id copied out of an earlier
+  // iteration's briefing names nothing here — a stale citation, not a swapped
+  // pair, and the operator looks in a different place for it.
+  out += `  ID NAMES NO BRIEFING ENTRY — these settle nothing (${staleIds.length}):\n`
+       + staleIds.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`).join('')
+       + '    Briefing ids are re-minted every triage run, so one copied from an\n'
+       + '    earlier iteration names nothing in this briefing. Check the id against\n'
+       + '    briefing.json — the title may well be right.\n';
+}
+if (misanchored.length) {
+
+  // Its own heading, because the remedy is the opposite one: the title is
+  // already verbatim and an anchor the payload STATED disagrees. `c.gap` comes
+  // from `identityGap` over `ANCHOR_FIELDS` — the same list `anchorsAgree`
+  // guards on — so this can only ever name a field that actually decided the
+  // refusal, and never `kind`, which this path corrects on purpose.
+  out += `  ANCHOR DISAGREES WITH THE REPORT — the title matches a finding, a stated`
+       + ` field does not; these settle nothing (${misanchored.length}):\n`
+       + misanchored.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`
+           + `        ${oneLine(c.gap)}\n`).join('')
+       + '    The title is already right. Either the decision was taken on a different\n'
+       + '    finding than the one it names, or the anchor was copied from a stale\n'
+       + '    briefing — check which against report.json before recording.\n';
 }
 if (unreported.length) {
   // Its own heading, never folded into the block above: an unbound `noted`

@@ -395,13 +395,194 @@ test('a mis-copied title cannot move a decision onto the finding it names', () =
     [payload({ fixed: [], declined: [transposed] })], { report });
   assert.equal(d.file, 'src/a.c', 'the anchor the operator actually examined');
   assert.equal(d.line, 10);
+  // The cause is `anchor`, not `title`: this title IS in the report, verbatim,
+  // and what disagrees is the file. The bridge printed "correct it against
+  // report.json" for both causes, which sent the operator to edit the one field
+  // that was already right — so the cause travels with the refusal now, and the
+  // gap names the field the guard actually read.
   assert.deepEqual(reconciliations([payload({ fixed: [], declined: [transposed] })], report),
     [{ agent: 'fix-auth-guard', title: 'the retry loop never exits', disposition: 'declined',
-       bound: false, fields: [] }]);
+       bound: false, cause: 'anchor',
+       gap: 'the files differ (src/a.c here, src/b.c in the report)', fields: [] }]);
 
   // And it is reported rather than silently settling the wrong finding.
   const [uncovered] = uncoveredDecisions([d], report);
   assert.ok(uncovered, 'a transposed title must not settle anything');
+});
+
+test('a counterpart refusal names the counterpart, whatever the kind', () => {
+  // The near-miss of the finding above, and the reason `identityGap`'s field
+  // list is the caller's rather than baked into the walk. `anchorsAgree`
+  // compares `counterpart` for EVERY kind; `scoreMatch` reads it only for
+  // `contract`. A shared walk carrying the contract condition answered "they
+  // differ in a field this check does not compare" here — about the field it
+  // had just compared and refused on, which is the same misdirection as
+  // reporting the title for an anchor mismatch, one field further in.
+  const report = { findings: [{
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: 'docs/auth.md', reporters: ['auditor'],
+  }] };
+  const transposed = decision({
+    title: 'the guard is unreachable', kind: 'defect', file: 'src/auth.py', line: 88,
+    counterpart: 'docs/OTHER.md',
+  });
+  const [c] = reconciliations([payload({ fixed: [], declined: [transposed] })], report);
+  assert.equal(c.cause, 'anchor');
+  assert.equal(c.gap, 'the counterparts differ (docs/OTHER.md here, docs/auth.md in the report)');
+});
+
+test('a transposed title cannot settle the finding its id does not name', () => {
+  // #95, reproduced end to end on `65bc979` before the guard: a payload
+  // declining a `design` advisory — correct `id`, correct `kind`, `file: null`,
+  // a reason about structure — with the OTHER finding's title had its identity
+  // rewritten to that finding's and settled it. `convergenceStatus` then read
+  // `settled: ["the token comparison is not constant time"]`, `open: []`,
+  // `done: true`, "converged: no blocking finding is unsettled". A
+  // cross-validated `critical` closed by a sentence about taste.
+  //
+  // `anchorsAgree` cannot catch this and is not meant to: `file: null` is no
+  // claim, which is what makes the legitimate merge case bind, and no file is
+  // the documented shape of a `design` advisory. The join that catches it is the
+  // briefing, where the decision's `id` and `title` both came from.
+  const report = { findings: [
+    { title: 'the fold is hard to follow', kind: 'design', severity: 'info',
+      file: null, line: null, counterpart: null, reporters: ['pragmatist'] },
+    { title: 'the token comparison is not constant time', kind: 'defect',
+      severity: 'critical', file: 'src/auth.py', line: 88, counterpart: null,
+      reporters: ['auditor', 'adversary'] },
+  ] };
+  const briefing = { findings: [
+    { id: 'F1', title: 'the fold is hard to follow', kind: 'design', severity: 'info',
+      file: null, line: null, counterpart: null },
+    { id: 'F2', title: 'the token comparison is not constant time', kind: 'defect',
+      severity: 'critical', file: 'src/auth.py', line: 88, counterpart: null },
+  ] };
+  const transposed = decision({
+    id: 'F1', title: 'the token comparison is not constant time', kind: 'design',
+    severity: 'info', file: null, line: null,
+  });
+  const p = [payload({ fixed: [], declined: [transposed] })];
+
+  // Without the briefing: the identity is rewritten onto the critical.
+  const [before] = foldFixPayloads(p, { report });
+  assert.equal(before.file, 'src/auth.py', 'the defect this guard exists for');
+  assert.equal(before.kind, 'defect');
+
+  // With it: the decision keeps its own identity and binds to nothing.
+  const [after] = foldFixPayloads(p, { report, briefing });
+  assert.equal(after.file, null);
+  assert.equal(after.kind, 'design');
+
+  const [c] = reconciliations(p, report, briefing);
+  assert.equal(c.cause, 'briefing');
+  assert.match(c.gap, /the briefing calls F1 "the fold is hard to follow"/);
+});
+
+test('the briefing guard still lets the legitimate merge case bind', () => {
+  // The half that decides whether the guard is a fix or a wall. `upsert`
+  // promotes `kind`, `file`, `line` and `counterpart` from whichever lane
+  // supplied them, so a briefing entry legitimately reads `design`/no file
+  // where the merged report reads `defect`/`src/auth.py` — and correcting
+  // exactly that is what this whole path is for. The briefing check must refuse
+  // a disagreeing TITLE and nothing else: it is an id/title agreement check,
+  // not a switch to binding on the id.
+  const report = { findings: [{
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor', 'pragmatist'],
+  }] };
+  const briefing = { findings: [{
+    id: 'F1', title: 'the guard is unreachable', kind: 'design', severity: 'info',
+    file: null, line: null, counterpart: null,
+  }] };
+  const d = decision({ id: 'F1', title: 'the guard is unreachable', kind: 'design', file: null });
+
+  const [folded] = foldFixPayloads([payload({ fixed: [], declined: [d] })], { report, briefing });
+  assert.equal(folded.file, 'src/auth.py', 'the correction the path exists to make');
+  assert.equal(folded.kind, 'defect');
+  const [c] = reconciliations([payload({ fixed: [], declined: [d] })], report, briefing);
+  assert.equal(c.bound, true);
+});
+
+test('an id naming no briefing entry is its own answer, not a transposition', () => {
+  // `briefing.mjs` mints ids positionally on every triage run, so an id copied
+  // out of an earlier iteration's briefing names nothing in this one — a stale
+  // citation, where the title may well be right. Reported apart from the
+  // disagreeing-title case because the operator looks in a different place: the
+  // id against briefing.json, not the title against the report.
+  const report = { findings: [{
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor'],
+  }] };
+  const briefing = { findings: [{
+    id: 'F1', title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null,
+  }] };
+  const stale = decision({ id: 'F7', title: 'the guard is unreachable' });
+  const [c] = reconciliations([payload({ fixed: [], declined: [stale] })], report, briefing);
+  assert.equal(c.cause, 'briefing-id');
+  assert.equal(c.gap, null);
+});
+
+test('without a briefing the guard is off and the fold says nothing about it', () => {
+  // The flag, not the check: a fold given no briefing must not report a
+  // briefing cause, because it never asked. Saying so is the BRIDGE's job — a
+  // library that wrote to stderr would say it once per caller — and the bridge
+  // does it on stderr for exactly this reason.
+  const report = { findings: [{
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor'],
+  }] };
+  const d = decision({ id: 'F99', title: 'the guard is unreachable' });
+  const [c] = reconciliations([payload({ fixed: [], declined: [d] })], report);
+  assert.equal(c, undefined, 'it bound, because nothing checked the id');
+});
+
+test('an entry that states no id is not accused of citing a stale one', () => {
+  // A `named_not_fixed` item carries no `id` — the payload schema in `fix.txt`
+  // has no such field, and `toNamedNotFixed` mints one afterwards — and so does
+  // a decision on a round-2 `added` finding, which lives in report.json under
+  // no briefing key at all and could not copy an id if it wanted one, because
+  // report.json carries none.
+  //
+  // Stating no id is not naming a stale one, and reading it that way returned
+  // before the report was ever consulted: passing --briefing, which the loop
+  // reference tells an operator to do on every fold, silently dropped the
+  // identity correction this path exists to make and printed "check the id
+  // against briefing.json" at an entry with no id to check.
+  const report = { findings: [{
+    title: 'preflight_emu is not budgeted', kind: 'behavioral', severity: 'warning',
+    file: 'src/budget.py', line: 41, counterpart: null, reporters: ['auditor'],
+  }] };
+  const briefing = { findings: [{
+    id: 'F1', title: 'something else entirely', kind: 'defect',
+    file: null, line: null, counterpart: null,
+  }] };
+  const p = payload({ fixed: [], named_not_fixed: [namedItem({ file: null, line: null })] });
+
+  const [withBriefing] = reconciliations([p], report, briefing);
+  const [without] = reconciliations([p], report);
+  assert.equal(withBriefing.bound, true, 'the briefing has nothing to say about an entry with no id');
+  assert.deepEqual(withBriefing.fields, without.fields,
+    'and so the correction is the same one the report alone would have made');
+  assert.deepEqual(withBriefing.fields.map((f) => f.field), ['file', 'line']);
+});
+
+test('an anchor refusal never names a field a null claim waived', () => {
+  // `anchorsAgree` passes any field the decision left null — stating nothing
+  // about `file` is making no claim about it — but the shared walk compared
+  // every field in the list and returned on the first difference. A decision
+  // refused BY its counterpart was told "the files differ", which is verbatim
+  // the misdirection this whole path exists to end, one field over. The
+  // tolerance travels with the field list rather than being remembered.
+  const report = { findings: [{
+    title: 'the guard is unreachable', kind: 'contract', severity: 'warning',
+    file: 'src/auth.py', line: 88, counterpart: 'docs/auth.md', reporters: ['steward'],
+  }] };
+  const d = decision({ kind: 'contract', file: null, line: null, counterpart: 'docs/OTHER.md' });
+  const [c] = reconciliations([payload({ fixed: [], declined: [d] })], report);
+  assert.equal(c.cause, 'anchor');
+  assert.match(c.gap, /counterparts differ/);
+  assert.doesNotMatch(c.gap, /files differ/);
 });
 
 test('a null anchor is no claim, so the legitimate merge case still binds', () => {
@@ -600,8 +781,10 @@ test('an unbound named-not-fixed entry is reported as unbound, not as corrected'
   // names a `noted` entry — it skips the disposition — so the earliest anyone
   // sees the identity that is about to become an exemption is here.
   const p = [payload({ fixed: [], named_not_fixed: [namedItem()] })];
+  // `title` here, and it is the other cause: no finding carries this title at
+  // all, which is the one case the title remedy is right for.
   assert.deepEqual(reconciliations(p, merged), [{
     agent: 'fix-auth-guard', title: 'preflight_emu is not budgeted', disposition: 'noted',
-    bound: false, fields: [],
+    bound: false, cause: 'title', gap: null, fields: [],
   }]);
 });

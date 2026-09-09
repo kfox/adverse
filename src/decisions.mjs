@@ -27,7 +27,8 @@
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import {
-  SETTLING_SCORE, UNREPORTED_DISPOSITION, normalizeTitle, requireFindings, scoreMatch,
+  SETTLING_SCORE, UNREPORTED_DISPOSITION, identityGap, normalizeTitle, requireFindings,
+  scoreMatch,
 } from './ledger.mjs';
 
 refuseDirectRun(import.meta.url);
@@ -179,8 +180,14 @@ function identityOf(d, finding) {
 // it, so a stale one cannot settle the wrong finding — while including it
 // refused a title-and-file match over a line the merge had moved, which both
 // cried wolf and left the stale `kind` in the ledger. Measured.
+// The fields `anchorsAgree` guards on, and the same list `identityGap` is
+// handed when it explains a refusal. One list, so the message cannot name a
+// field the guard never read — which is the whole of what went wrong when the
+// bridge explained an anchor refusal in terms of the title.
+export const ANCHOR_FIELDS = ['file', 'counterpart'];
+
 function anchorsAgree(d, finding) {
-  return ['file', 'counterpart'].every((field) => {
+  return ANCHOR_FIELDS.every((field) => {
     const claimed = d[field] ?? null;
     return claimed === null || claimed === (finding[field] ?? null);
   });
@@ -269,18 +276,127 @@ function toNamedNotFixed(item, { agent, n, finding = null, checked = false }) {
   };
 }
 
-// Look up a report finding by the one field that identifies it.
+// The briefing entries a decision's `id` may name, by id.
 //
-// Returns a function rather than the Map so the no-report case has one spelling
-// — every caller asks the same question and gets null — instead of each of them
-// deciding what an absent report means.
-function reportIndex(report) {
-  if (report === null || report === undefined) return () => null;
+// Unique within one briefing, so no ambiguity sentinel is needed — unlike
+// `indexByTitle` in verify.mjs, which needs one because the briefing is
+// per-lane and PRE-merge, so two lanes reporting one title give two entries
+// with that title. An id route does not have that problem and a title route
+// does.
+//
+// An entry with no string `id` cannot be named by a decision and is skipped
+// rather than refused: `briefing.mjs` mints the ids, so a missing one is this
+// tool's own bug and not a payload's claim. Whether a briefing that yields no
+// usable entries is an error is the caller's call, and the bridge makes it.
+function briefingIndex(briefing) {
+  const byId = new Map();
+  for (const e of briefing?.findings ?? []) {
+    if (e && typeof e.id === 'string' && e.id) byId.set(e.id, e);
+  }
+  return byId;
+}
+
+// Which report finding a decision may be bound to, and why not when the answer
+// is nothing.
+//
+// Returns a function rather than the Maps so each absent input has ONE spelling
+// — every caller asks the same question and gets the same shape — instead of
+// each of them deciding what a missing report or briefing means.
+//
+// The `cause` is the point. A bare null had two causes and the bridge printed
+// one remedy for both: "correct the title against report.json", which for an
+// anchor disagreement sends the operator to edit the one field that is already
+// verbatim. Reproduced with a byte-identical title and `file: src/authz.py`
+// against the report's `src/auth.py`. `ANCHOR_FIELDS` is what `anchorsAgree`
+// guards on and what `identityGap` is handed, so the message cannot name a
+// field the guard does not read.
+//
+// **The briefing is asked FIRST, and it is the only guard that catches a
+// transposition.** A decision's `id` names a BRIEFING entry — never a report
+// finding, which carries no id at all — and the round-2 and verify prompts both
+// state outright that `id` and `title` must agree with the briefing. Nothing
+// enforced it for a fix payload, because `validateFix` has no briefing to check
+// against. So a payload that swapped two titles bound by title alone onto the
+// OTHER finding and settled it: measured end to end on `65bc979`, a `declined`
+// on a `design` advisory with no file closed a cross-validated `critical` at
+// `src/auth.py:88`, and the loop reported `done` with nothing open.
+//
+// `anchorsAgree` cannot catch that and is not meant to: a `null` on the
+// payload's side is no claim, which is what makes the legitimate merge case
+// still bind — and the documented shape of a `design` advisory is exactly no
+// file and no counterpart. With no anchor stated there is nothing to disagree,
+// so title-alone binding is the whole of the check, and the title is the field
+// that was mis-copied.
+//
+// This is not a new join. `bindToBriefing` in
+// skills/adverse-review/scripts/verify.mjs already refuses an id whose briefing
+// entry disagrees with the payload's title, for the same attack one channel
+// over — naming an `info` id to bring a critical back non-blocking. One of the
+// two bridges that bind a model-supplied id to a finding had the guard and the
+// other did not.
+//
+// Both presences are tracked as FLAGS rather than read off a map's size. A
+// briefing that parses to an object with no usable entries is not the same
+// claim as no briefing, and neither is a report with no findings — reading
+// either from `.size` is how a file containing the literal `null` came to mean
+// "nothing was given", which the `--report` path already learned once.
+function bindingFor(report, briefing) {
+  const haveBriefing = briefing !== null && briefing !== undefined;
+  const briefed = haveBriefing ? briefingIndex(briefing) : new Map();
+  const haveReport = report !== null && report !== undefined;
   const byTitle = new Map();
-  for (const f of requireFindings(report)) byTitle.set(normalizeTitle(f.title), f);
+  if (haveReport) {
+    for (const f of requireFindings(report)) byTitle.set(normalizeTitle(f.title), f);
+  }
+
   return (d) => {
-    const f = byTitle.get(normalizeTitle(d.title)) ?? null;
-    return f && anchorsAgree(d, f) ? f : null;
+    // A decision that states no `id` makes no id claim, so there is nothing for
+    // the briefing to contradict and the check does not apply to it. Two whole
+    // classes state none: a `named_not_fixed` item, whose payload schema has no
+    // `id` field at all (`fix.txt`) and whose id is minted here afterwards; and
+    // a decision on a round-2 `added` finding, which is in report.json under no
+    // briefing key at all — and report.json carries no ids, so its author has
+    // none to copy. Treating "states none" as "names nothing" refused every one
+    // of them as a stale citation and returned before the report was consulted,
+    // so passing --briefing — which the loop reference now tells an operator to
+    // do on every fold — silently dropped the identity correction this function
+    // exists to make, and printed a remedy ("check the id against
+    // briefing.json") for entries that structurally have no id to check.
+    // STATES an id, which is not the same as one that resolves. A decision
+    // stating none is left to the report path below; a stated id that names
+    // nothing is still the stale citation this guard exists to report, and the
+    // round-2 `added` finding that has no briefing entry has no id to state
+    // either — report.json carries no ids at all, so there is nothing for its
+    // author to copy.
+    if (haveBriefing && d.id !== null && d.id !== undefined && d.id !== '') {
+      const entry = briefed.get(d.id) ?? null;
+      // An id naming nothing is its own answer, and not the same accusation as
+      // one naming the wrong entry: `briefing.mjs` re-mints ids positionally on
+      // every triage run, so an id copied from an earlier iteration names
+      // nothing here — a stale citation rather than a swapped one.
+      if (!entry) return { finding: null, cause: 'briefing-id', gap: null };
+      if (normalizeTitle(entry.title) !== normalizeTitle(d.title)) {
+        return {
+          finding: null,
+          cause: 'briefing',
+          gap: `the briefing calls ${d.id} ${JSON.stringify(entry.title)}`,
+        };
+      }
+    }
+    if (!haveReport) return { finding: null, cause: 'unchecked', gap: null };
+    const finding = byTitle.get(normalizeTitle(d.title)) ?? null;
+    if (!finding) return { finding: null, cause: 'title', gap: null };
+    if (!anchorsAgree(d, finding)) {
+      return {
+        finding: null,
+        cause: 'anchor',
+        // The same tolerance `anchorsAgree` applies, handed to the walk with
+        // the same field list: a message that can name a field this guard
+        // waved through is the defect one field over.
+        gap: identityGap(d, finding, ANCHOR_FIELDS, { tolerateNullClaims: true }),
+      };
+    }
+    return { finding, cause: null, gap: null };
   };
 }
 
@@ -332,8 +448,8 @@ function refuseSelfIssuedExemptions(decisions) {
 // validator must not be able to mint an entry that dies inside the ledger; that
 // is the failure the whole channel exists to stop, and it would arrive wearing
 // the ledger's name.
-export function foldFixPayloads(payloads, { report = null } = {}) {
-  const findingFor = reportIndex(report);
+export function foldFixPayloads(payloads, { report = null, briefing = null } = {}) {
+  const findingFor = bindingFor(report, briefing);
   // The FLAG, not the match: "no report was given" and "the report answers
   // nothing" are different claims and `reconciledAgainst` keeps them apart.
   const checked = report !== null && report !== undefined;
@@ -343,11 +459,13 @@ export function foldFixPayloads(payloads, { report = null } = {}) {
     const agent = requireAgent(payload);
     (payload.fixed ?? []).forEach((d, i) => {
       requireItem(d, `fixed[${i}] from ${agent}`);
-      decisions.push(toDecision(d, { disposition: 'fixed', agent, finding: findingFor(d), checked }));
+      decisions.push(toDecision(d,
+        { disposition: 'fixed', agent, finding: findingFor(d).finding, checked }));
     });
     (payload.declined ?? []).forEach((d, i) => {
       requireItem(d, `declined[${i}] from ${agent}`);
-      decisions.push(toDecision(d, { disposition: 'declined', agent, finding: findingFor(d), checked }));
+      decisions.push(toDecision(d,
+        { disposition: 'declined', agent, finding: findingFor(d).finding, checked }));
     });
     // Reconciled against the report exactly as the two lists above are. This
     // one used to skip it, on the grounds that no lane had reported these items
@@ -359,7 +477,8 @@ export function foldFixPayloads(payloads, { report = null } = {}) {
     // its own exemption into.
     (payload.named_not_fixed ?? []).forEach((item, i) => {
       requireItem(item, `named_not_fixed[${i}] from ${agent}`);
-      decisions.push(toNamedNotFixed(item, { agent, n: i + 1, finding: findingFor(item), checked }));
+      decisions.push(toNamedNotFixed(item,
+        { agent, n: i + 1, finding: findingFor(item).finding, checked }));
     });
   }
 
@@ -396,15 +515,15 @@ function payloadEntries(payload) {
   ];
 }
 
-export function reconciliations(payloads, report) {
-  const findingFor = reportIndex(report);
+export function reconciliations(payloads, report, briefing = null) {
+  const findingFor = bindingFor(report, briefing);
   const changes = [];
   for (const payload of payloads) {
     const agent = payload?.agent ?? null;
     for (const { d, disposition } of payloadEntries(payload)) {
-      const finding = findingFor(d);
+      const { finding, cause, gap } = findingFor(d);
       if (!finding) {
-        changes.push({ agent, title: d.title, disposition, bound: false, fields: [] });
+        changes.push({ agent, title: d.title, disposition, bound: false, cause, gap, fields: [] });
         continue;
       }
       const before = identityOf(d, null);

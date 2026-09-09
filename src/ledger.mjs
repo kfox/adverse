@@ -779,22 +779,57 @@ function reportersOf(decision, findings) {
   return [...lanes].sort();
 }
 
-// Which of `scoreMatch`'s identity guards a title-equal pair fails.
+// Which of a title-equal pair's identity guards fails, in the caller's own
+// terms — the fields it names are the fields that caller actually guards on.
 //
 // `counterpart` is named only for a `contract` decision, because that is the
 // only kind whose match depends on it — reporting it for a `defect` would send
 // an operator to edit a field that changes nothing.
-function identityGap(decision, finding) {
+//
+// The field list is the caller's and the wording is shared, which is the only
+// arrangement that survives both callers. `scoreMatch` guards on `kind`, so
+// the ledger asks about it. `anchorsAgree` (src/decisions.mjs) deliberately
+// does NOT — `kind` is what synthesis rewrites, promoting a blocking kind over
+// an advisory one, and a decision that legitimately binds routinely disagrees
+// about it. A shared field list would therefore have this function tell the
+// decisions bridge's operator that the kinds differ, sending them to edit the
+// one field that path corrects on purpose. That is the misdirection #96 is
+// about, reintroduced one field over by fixing it. A shared *mechanism* cannot
+// do that: neither caller can name a field its own guard does not read.
+// `scoreMatch` reads `counterpart` only for a `contract` decision, so only then
+// can it be the field that refused the match — naming it for a `defect` would
+// send an operator to edit a field that changes nothing. The condition is the
+// CALLER's, and deliberately not part of the walk: `anchorsAgree`
+// (src/decisions.mjs) compares `counterpart` for every kind, so a walk that
+// skipped it there would answer "a field this check does not compare" about a
+// field the check had just compared and refused on. Measured before it was
+// moved out.
+export function scoreMatchAnchors(decision) {
+  return decision.kind === 'contract' ? ['kind', 'file', 'counterpart'] : ['kind', 'file'];
+}
+
+// `tolerateNullClaims` is the second half of "the condition is the caller's",
+// and it is not symmetric between the two callers: `scoreMatch` compares every
+// anchor by strict equality, while `anchorsAgree` (src/decisions.mjs) passes a
+// field the decision left `null` — a decision that states nothing about `file`
+// makes no claim there, so there is nothing to disagree with. Without it the
+// walk answers on a field the guard had waved through: a decision with
+// `file: null` and a stated, disagreeing `counterpart` was refused BY the
+// counterpart and told "the files differ (none here, src/auth.py in the
+// report)", sending its author to edit the one field that was already right.
+// That is verbatim the misdirection this shared walk exists to end, one field
+// over, so the tolerance travels with the field list rather than being
+// remembered by whoever reads the message.
+export function identityGap(decision, finding, fields = scoreMatchAnchors(decision),
+  { tolerateNullClaims = false } = {}) {
   const pair = (a, b) => `(${a ?? 'none'} here, ${b ?? 'none'} in the report)`;
-  if ((decision.kind ?? null) !== (finding.kind ?? null)) {
-    return `the kinds differ ${pair(decision.kind, finding.kind)}`;
-  }
-  if ((decision.file ?? null) !== (finding.file ?? null)) {
-    return `the files differ ${pair(decision.file, finding.file)}`;
-  }
-  if (decision.kind === 'contract'
-      && (decision.counterpart ?? null) !== (finding.counterpart ?? null)) {
-    return `the counterparts differ ${pair(decision.counterpart, finding.counterpart)}`;
+  const plural = { kind: 'kinds', file: 'files', counterpart: 'counterparts' };
+  for (const field of fields) {
+    const claimed = decision[field] ?? null;
+    if (tolerateNullClaims && claimed === null) continue;
+    if (claimed !== (finding[field] ?? null)) {
+      return `the ${plural[field] ?? `${field}s`} differ ${pair(decision[field], finding[field])}`;
+    }
   }
   return 'they differ in a field this check does not compare';
 }
