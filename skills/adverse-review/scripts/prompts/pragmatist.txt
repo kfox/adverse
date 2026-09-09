@@ -42,7 +42,9 @@ What's in scope for you:
 
 What's out of scope (do NOT flag these — other personas cover them):
 - Logic errors, edge cases, and error handling that is actually wrong (Auditor).
-- Security and abuse-driven concerns (Adversary).
+- Security, abuse, and availability concerns (Adversary) — a resource with no bound
+  is the Auditor's to report and the Adversary's to rate, even when the shape
+  around it is what made it easy to miss. Neither half is yours.
 - Documentation, schema, and test drift, and missing tests (Steward). A missing test
   is not a design finding, even when the design is why it's missing.
 

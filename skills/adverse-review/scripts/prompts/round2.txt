@@ -185,7 +185,7 @@ payload that can be truncated or misremembered.
       "counterpart": "<path this code contradicts (kind=contract), else null>",
       "title":       "<short noun phrase, <= 80 chars>",
       "detail":      "<2-6 sentences explaining the mechanism and impact>",
-      "fix":         "<concrete remediation, or null if you don't have one>"
+      "fix":         "<the property that must hold, and a call only as one way to reach it; or null>"
     }
   ]
 }

@@ -40,6 +40,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 import { refuseDirectRun } from './entryGuard.mjs';
+import { MAX_REASON_CHARS } from './limits.mjs';
 import { ADVISORY_KINDS } from './taxonomy.mjs';
 import { isBlocking, isOpenBlocking } from './synthesis.mjs';
 
@@ -77,18 +78,29 @@ export const SETTLING_SCORE = 3;
 // which the first few do as well as all of them.
 const MAX_NAMED_FILES = 5;
 
-// Longest ledger `reason` copied into a briefing. The ledger is a JSON file on
-// disk, and its text is rendered into the round-2 prompt, so it is a channel
-// for whoever can write that file. Clipping bounds the payload; labeling it in
-// the briefing is what tells a reviewer it is data, not instruction.
-const MAX_REASON_CHARS = 500;
-
 // How many of a recorded root cause's citations ride into a briefing. The
 // group comes off the same JSON file on disk as everything else here, so its
 // member list is as attacker-chosen as its `reason` is; a decision covering
 // twenty citations has already said what it needs to.
 const MAX_RECORDED_CITATIONS = 20;
 
+// Bound and strip one string read off disk, so it can be interpolated into
+// prose a later pass is told to trust.
+//
+// The general one: every disk-read string in this tool goes through it, not
+// just a decision's `reason` — titles, ids, dispositions, commits, file paths.
+// It bounds length at `MAX_REASON_CHARS` (src/limits.mjs) and strips MOST
+// control characters — `\n` and `\t` both survive, which prose needs and which
+// is why `GROUP_ID` below does not use this function for a machine-minted
+// identifier. The exact set is the regex below; do not restate it in prose,
+// because a comment that sounds exact and is not is worse here than one that
+// says "most": what survives this call is what reaches a round-2 reviewer as
+// text they are told to trust.
+//
+// Why the cap is a shared constant rather than a local one is recorded where
+// the constant lives. Why the strings need bounding at all is recorded on each
+// caller: the ledger is a JSON file on disk and its text reaches the round-2
+// prompt, so it is a channel for whoever can write that file.
 export function clipReason(text) {
   const flat = String(text ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ');
   return flat.length > MAX_REASON_CHARS ? `${flat.slice(0, MAX_REASON_CHARS)}… [clipped]` : flat;

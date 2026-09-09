@@ -726,6 +726,34 @@ test('fix prompt says declining is a complete outcome, and reserves `deferred`',
   assert.match(FIX_INSTRUCTIONS, /`named_not_fixed` closes nothing/);
 });
 
+// The brief is the one input to a repair that nothing downstream can check: the
+// agent has no premise to hold the mechanism against, the regression pass sees
+// a diff that matches its brief, and the ledger records a reason restating the
+// mechanism. So the prompt has to tell the agent that a mechanism arriving
+// without a property is an incomplete brief, and that reporting what else the
+// mechanism changed is owed — the second clause is the one that is useless
+// without the first, because "what else it changed" has nothing to compare
+// against when no property was stated.
+test('fix prompt tells the agent a brief naming only a mechanism is incomplete', () => {
+  const { FIX_INSTRUCTIONS } = PROMPTS;
+  assert.match(FIX_INSTRUCTIONS, /a brief that names a mechanism and no\s+property is incomplete/);
+  // Both obligations must name a destination that exists. An instruction to
+  // record something nowhere is how the property ends up in `reason`, which is
+  // clipped at MAX_REASON_CHARS on its way into the next briefing.
+  assert.match(FIX_INSTRUCTIONS,
+    /Derive the property from the finding and state it in the commit message/);
+  assert.match(FIX_INSTRUCTIONS, /Do not put\s+it in `reason`/);
+  assert.match(FIX_INSTRUCTIONS,
+    /A mechanism you were handed is a mechanism you must report on/);
+  assert.match(FIX_INSTRUCTIONS, /"What else this changed" section of section 6/);
+
+  // The dominant channel is not the prose an orchestrator types, it is the
+  // reviewer's own `fix`, forwarded verbatim into the brief. Telling only the
+  // agent and the orchestrator leaves it open at the producer.
+  assert.match(PROMPTS.PHASE1_INSTRUCTIONS,
+    /"fix":\s+"<the property that must hold, and a call only as one way to reach it; or null>"/);
+});
+
 // --- regression pass ----------------------------------------------------------
 // The read-only pass over one fix commit, run by a lane that did not report the
 // findings it closes (src/regression.mjs picks which). Its payload is
@@ -1006,14 +1034,94 @@ test('regression prompt states the three-way classification and that silence is 
   assert.match(REGRESSION_INSTRUCTIONS, /usually a `contract` finding/);
 });
 
+test('the verify pass has an availability form of the class-versus-instance test', () => {
+  // Question 2 asks the verifier to re-run the original attack with a field
+  // varied. An availability finding has no attack to re-run, so without an
+  // analogue the pass that DECIDES whether the class is closed closes it on the
+  // instance — the widening reaching the reporting lane and not the deciding one.
+  //
+  // The LABEL is pinned along with the examples, because a draft said "vary the
+  // load" over three examples that all vary the SITE. A verifier obeying the
+  // label raises the arrival rate against the one call just given a deadline,
+  // finds it bounded, and closes the class with three siblings still unbounded
+  // — the exact failure this paragraph exists to prevent, reached by following
+  // it. Collapsed, so a reflow is not a failure.
+  const verify = PROMPTS.VERIFY_INSTRUCTIONS.replace(/\s+/g, ' ');
+  assert.match(verify, /so vary the SITE and\s?the load/);
+  assert.match(verify, /a second resource the same request holds, or the same operation one retry deeper/);
+  assert.match(verify, /Varying only the load re-tests the one call that was just bounded, which passes/);
+  assert.match(verify, /a deadline on the cited call and none on its three siblings is the instance, and load alone will never find the siblings/);
+});
+
+test('fix prompt bounds the derived property to the brief it came from', () => {
+  // Collapsed: these pin sentences, not line breaks.
+  const FIX_INSTRUCTIONS = PROMPTS.FIX_INSTRUCTIONS.replace(/\s+/g, ' ');
+
+  // The clause that settles the conflict with section 3, and the one a
+  // prompt-budget trim would take out first: it is the only place the agent is
+  // told what to do when the handed mechanism and the derived property
+  // disagree. Pinned separately from the routing clauses above it, because the
+  // generated-copy drift test proves the copies AGREE and passes just as
+  // happily on text that was trimmed out of all of them.
+  assert.match(FIX_INSTRUCTIONS, /fix to the property, and say in the commit message which call you were given/);
+  assert.match(FIX_INSTRUCTIONS, /That is not exceeding your brief/);
+
+  // …and the bound on it, without which the license reaches a second finding's
+  // worth of scope. The last clause names the rule it does NOT outrank.
+  assert.match(FIX_INSTRUCTIONS, /The property is still bounded by the finding that produced it/);
+  assert.match(FIX_INSTRUCTIONS, /by its \*\*mechanism\*\*, not by its line/);
+
+  // The half a first draft of this clause got wrong: bounding the property to
+  // the cited LINE contradicts section 2, which mandates the sibling sweep and
+  // the near-miss re-run. A class-closing property is section 2's rule, not an
+  // exception to it, and both sections are named as surviving this clause.
+  assert.match(FIX_INSTRUCTIONS, /Section 2 requires the sibling sweep and the near-miss re-run/);
+  assert.match(FIX_INSTRUCTIONS, /narrowing a property to the cited line to satisfy this paragraph would ship the speed bump section 2 exists to refuse/);
+
+  // The sweep's license stops at another batch's assignment. Without this the
+  // annex guard below fires only on a site that is BOTH uncited and unswept, so
+  // a same-mechanism site the brief gave to another batch sits inside "reaches
+  // every site that mechanism reaches" while fix.txt's own hard constraints
+  // refuse it — two batches editing one site, or the agent left arbitrating.
+  assert.match(FIX_INSTRUCTIONS, /reaches every site that mechanism reaches, unless your brief draws a boundary short of one/);
+  // The condition, and it is the whole correction: the carve-out used to assert
+  // that another batch's sites "are named in your brief and the hard
+  // constraints refuse them outright". Neither is true, so an agent that
+  // checked found nothing excluded and swept on.
+  assert.match(FIX_INSTRUCTIONS, /Your brief carries your own findings and says nothing about anyone else's, so it may draw no such boundary at all/);
+  assert.match(FIX_INSTRUCTIONS, /when it draws none the sweep runs to the mechanism's last site/);
+  assert.match(FIX_INSTRUCTIONS, /the orchestrator's error to hear about, reported the same way and not corrected by you/);
+  // "Reported the same way" pointed only at a commit-message section, which is
+  // prose nothing reads back. `named_not_fixed` is the channel with a JSON
+  // field and a recorded disposition (`noted`), and it is the one that reaches
+  // the next iteration's briefing — so a site left in the section alone is a
+  // site the orchestrator was told about in the one place it does not look.
+  assert.match(FIX_INSTRUCTIONS, /"Reported the\s+same way" means `named_not_fixed` as well as the commit message/);
+  assert.match(FIX_INSTRUCTIONS, /the channel that carries\s+a disposition and reaches the next iteration's briefing/);
+  assert.match(FIX_INSTRUCTIONS, /a site left in the\s+section alone is left where nothing reads it back/);
+  assert.doesNotMatch(FIX_INSTRUCTIONS, /the hard constraints refuse them outright/);
+  assert.match(FIX_INSTRUCTIONS, /What the property may not do is annex a second finding/);
+  // The earlier form of this pinned "Sections 2 and 3 both stand … outranks
+  // neither", which was the defect: a rule that names a tension and then
+  // declares a draw leaves the agent facing it with nothing to decide on. What
+  // the prompt now has to say is which mechanism it is looking at.
+  assert.match(FIX_INSTRUCTIONS, /Sections 2 and 3 do not compete, so there is nothing here to rank/);
+  assert.match(FIX_INSTRUCTIONS, /the mechanism is the boundary between them/);
+  assert.match(FIX_INSTRUCTIONS, /section 3 begins at the next mechanism/);
+});
+
 test('regression prompt shows one finding schema, not a second copy of it', () => {
-  // The schema is FINDING_SCHEMA with `classification` spliced in. If that
-  // splice ever stops matching, the prompt silently ships the shared schema
-  // without the field the validator requires.
+  // The schema is FINDING_SCHEMA with `classification` spliced in. A FAILED
+  // splice is not what this guards: `withExtraKey` throws on a no-op replace
+  // and `CLASSIFIED_FINDING_SCHEMA` is built at module scope, so that case is
+  // an import-time error for every consumer, not a silent ship. What the
+  // second assertion pins is the splice POSITION — that `classification`
+  // lands directly after `fix`, i.e. that `fix` is still the last key of the
+  // shared schema — which is what a reworded `fix` description would move.
   const { REGRESSION_INSTRUCTIONS } = PROMPTS;
   assert.match(REGRESSION_INSTRUCTIONS, /"counterpart": "<path this code contradicts/);
   assert.match(REGRESSION_INSTRUCTIONS,
-    /"fix":\s+"<concrete remediation, or null if you don't have one>",\n\s+"classification"/);
+    /"fix":\s+"[^"]*",\n\s+"classification"/);
 });
 
 test('an enum value containing `$&` splices nothing into the classified schema', () => {

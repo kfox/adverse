@@ -40,7 +40,7 @@ instruction exists to avoid.
       "counterpart": "<path this code contradicts (kind=contract), else null>",
       "title":       "<short noun phrase, <= 80 chars>",
       "detail":      "<2-6 sentences explaining the mechanism and impact>",
-      "fix":         "<concrete remediation, or null if you don't have one>",
+      "fix":         "<the property that must hold, and a call only as one way to reach it; or null>",
       "probe": {
         "script":   "<path to a script you wrote, relative to your own output directory>",
         "expect":   "<what this finding predicts will happen when it runs>",

@@ -34,7 +34,7 @@
 // enough (not advisory, not `info`) to hold a change open.
 
 import { refuseDirectRun } from './entryGuard.mjs';
-import { fenced, flatten, verbatim, verbatimCell } from './markdown.mjs';
+import { fenced, flatten, quoted, verbatim, verbatimCell } from './markdown.mjs';
 import { isLaneAgent } from './personas.mjs';
 import { indexProbes, probeDeclaration, probeKey, probeState } from './probe.mjs';
 import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
@@ -183,7 +183,7 @@ const BRIDGE_STAMPED_FIELD = 'provenance';
 // tells the orchestrator to append this bridge's stderr line to the retry
 // prompt it sends the agent. Measured before the bound: a 2.16 MB key produced
 // a single 2,160,328-byte stderr message in 0.05 s. `MAX_REASON_CHARS` in
-// src/ledger.mjs bounds ledger text for exactly this reason; the length here is
+// src/limits.mjs bounds ledger text for exactly this reason; the length here is
 // its own constant rather than an import, since a field NAME needs far less
 // room than a sentence and one number serving two purposes is how the next one
 // drifts.
@@ -1273,13 +1273,13 @@ function renderFinding(f) {
   if (f.validators.length) {
     out.push('');
     for (const { persona, reason } of f.validators) {
-      out.push(`> ✅ **${verbatim(persona)} validates:** ${reason}`);
+      out.push(quoted(`✅ **${verbatim(persona)} validates:** ${reason}`));
     }
   }
   if (f.challengers.length) {
     out.push('');
     for (const { persona, reason } of f.challengers) {
-      out.push(`> ⚠️ **${verbatim(persona)} challenges:** ${reason}`);
+      out.push(quoted(`⚠️ **${verbatim(persona)} challenges:** ${reason}`));
     }
   }
   return out;

@@ -36,6 +36,13 @@ refuseDirectRun(import.meta.url);
 //   which is a formatting choice inside a block that is already labeled as
 //   that reviewer's words. It is not a claim the tool is making.
 //
+//   That last clause is a CONDITION, not an observation, and `quoted` below is
+//   what makes it hold. A prose field rendered after a one-line `> ` prefix is
+//   labeled only until its first newline, at which point the rest of it is
+//   document body — where a reviewer's sentences are indistinguishable from
+//   the tool's. Prose rendered into a container has to be rendered into the
+//   whole container.
+//
 // The HTML renderer (src/html.mjs) makes no such distinction — `esc` runs on
 // everything, prose included — because there the alternative is live markup in
 // a browser rather than emphasis in a text file.
@@ -125,4 +132,31 @@ export function fenced(text, info = '') {
   const longest = (body.match(/`+/g) ?? []).reduce((n, run) => Math.max(n, run.length), 0);
   const fence = '`'.repeat(Math.max(3, longest + 1));
   return [`${fence}${info}`, body, fence];
+}
+
+// Prose rendered inside a blockquote, with the quote carried across every line.
+//
+// The header's prose exemption is justified by containment — markup is a
+// reviewer's formatting choice "inside a block that is already labeled as that
+// reviewer's words". A blockquote ends at the first line that does not continue
+// it, so a `> ` prefix on the first line alone claimed that containment
+// without delivering it.
+//
+// Measured, on the real `synthesize`/`renderMarkdown`: an HONEST multi-line
+// validator reason — a sentence, three bullets, and "I would have rated this
+// `critical`" — rendered four of its lines at document level under the
+// finding's own header, so a `warning` finding appeared to carry a reviewer's
+// `critical` as the report's own text. A crafted one produced an entire extra
+// `### [CRITICAL·defect]` section with a fabricated `_Reported by: … ·
+// confidence: demonstrated_` line: the tool's own sentences, written by a lane.
+// The prompts now ask this field for a multi-clause load story, which is what
+// turned a latent shape into the ordinary case.
+//
+// `>` alone on a blank line rather than `> `: a trailing space is what a
+// formatter strips, and a stripped `> ` breaks the quote back open.
+export function quoted(text) {
+  return String(text ?? '')
+    .split('\n')
+    .map((line) => (line === '' ? '>' : `> ${line}`))
+    .join('\n');
 }

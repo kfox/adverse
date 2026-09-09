@@ -237,9 +237,9 @@ function toDecision(d, { disposition, agent, finding = null, checked = false }) 
 
 // `reason` is the only free-text field `recordDecisions` preserves, so a
 // suggestion that does not go in it is a suggestion that is lost. Appended
-// rather than dropped; `clipReason` bounds the rendered form at 500 characters,
-// which is a reason to keep `detail` short and not a reason to discard the
-// remedy the agent already worked out.
+// rather than dropped; `clipReason` bounds the rendered form at
+// `MAX_REASON_CHARS` (src/limits.mjs), which is a reason to keep `detail`
+// short and not a reason to discard the remedy the agent already worked out.
 function toNamedNotFixed(item, { agent, n, finding = null, checked = false }) {
   const label = `named-not-fixed item ${JSON.stringify(item?.title)} from ${agent}`;
   const detail = requireReason(item.detail, label);

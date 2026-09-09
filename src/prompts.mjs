@@ -9,6 +9,7 @@
 // PHASE2_BRIEFING_INSTRUCTIONS.
 
 import { refuseDirectRun } from './entryGuard.mjs';
+import { MAX_REASON_CHARS } from './limits.mjs';
 import { MAX_PROBES_PER_LANE, PROBE_OUTCOMES } from './probe.mjs';
 import { GROUP_RULINGS, KINDS, SEVERITIES } from './taxonomy.mjs';
 
@@ -45,7 +46,7 @@ const FINDING_SCHEMA = `    {
       "counterpart": "<path this code contradicts (kind=contract), else null>",
       "title":       "<short noun phrase, <= 80 chars>",
       "detail":      "<2-6 sentences explaining the mechanism and impact>",
-      "fix":         "<concrete remediation, or null if you don't have one>"
+      "fix":         "<the property that must hold, and a call only as one way to reach it; or null>"
     }`;
 
 // A JSON-schema union, rendered from the list the validator enforces.
@@ -648,6 +649,12 @@ the defects a careful read of the diff does not surface.
    to a test usually narrows an exploit rather than removing it. Re-run the
    original attack with a single field changed. If the narrowed version still
    works, the fix is a speed bump and should be reported \`open\`, not closed.
+   For an availability bound there is no attack to re-run, so vary the SITE and
+   the load: another call site reached through the same client, a second resource
+   the same request holds, or the same operation one retry deeper. Varying only
+   the load re-tests the one call that was just bounded, which passes — a
+   deadline on the cited call and none on its three siblings is the instance,
+   and load alone will never find the siblings.
 
 3. **Is the fix reachable on the path that matters?** A gate can be perfectly
    correct in the module that defines it and never invoked by the caller the
@@ -738,6 +745,67 @@ you can run the code. In one batch a reviewer supplied a constant to pin
 same batch, two of that reviewer's three proposed remedies were weaker than what
 the fix agent arrived at after reproducing. Take a proposed fix as a suggestion,
 and say what was weaker about it if you use your own.
+
+**Your brief is a hypothesis too, and a brief that names a mechanism and no
+property is incomplete.** "Use X" and "hold P, and X may get you there" produce
+the same commit when the orchestrator is right and different commits when it is
+wrong, which is the only case that matters. One brief said "use a context that
+does not inherit the caller's cancellation" for a finding that needed the write
+to survive a disconnect **and** to stay bounded; the named call delivers the
+first and removes the second. Every check downstream passed: the agent did what
+it was told, the gate was green, the new tests were mutation-verified, and the
+commit shipped an unbounded database write.
+
+You cannot ask for the missing half — this protocol gives you one reply and it
+is a path — so do this instead, and both halves have a destination already:
+
+- **Derive the property from the finding and state it in the commit message**,
+  above the change, as the thing the code must now hold. That is where section 1
+  already sends your argument and where the regression pass reads it. Do not put
+  it in \`reason\`: that field is copied into the next iteration's briefing and
+  clipped at ${MAX_REASON_CHARS} characters, so a property appended to an already-long
+  reason is the first thing to disappear. Say it in the commit message, where
+  nothing clips it.
+- **A mechanism you were handed is a mechanism you must report on**, in the
+  "What else this changed" section of section 6 — that section exists for
+  exactly this and a handed call is the case most likely to fill it, because a
+  call chosen for one property routinely drops a second one nobody stated.
+
+If the mechanism you were handed does not deliver the property you derived, fix
+to the property, and say in the commit message which call you were given and
+what it would have cost. That is not exceeding your brief; it is the only
+reading of your brief that is about the code.
+
+The property is still bounded by the finding that produced it — by its
+**mechanism**, not by its line. Section 2 requires the sibling sweep and the
+near-miss re-run, so a property that closes the class — "no write in this
+module leaves without a deadline" — is the right shape and reaches every site
+that mechanism reaches, unless your brief draws a boundary short of one. If it
+does — a file list, a site it names as another batch's — stop there and report
+the site in "What else this changed" rather than editing over somebody else's
+assignment. Your brief carries your own findings and says nothing about anyone
+else's, so it may draw no such boundary at all; when it draws none the sweep
+runs to the mechanism's last site, and a site that turns out to have belonged to
+another batch is a mechanism split across two batches — the orchestrator's error
+to hear about, reported the same way and not corrected by you. "Reported the
+same way" means \`named_not_fixed\` as well as the commit message: the section
+is prose a human reads once, and \`named_not_fixed\` is the channel that carries
+a disposition and reaches the next iteration's briefing, so a site left in the
+section alone is left where nothing reads it back. That is section
+2's rule, not an exception to it, and narrowing a property to the cited line to
+satisfy this paragraph would ship the speed bump section 2 exists to refuse.
+
+What the property may not do is annex a second finding. If you cannot state it
+without also changing something your brief did not cite and the sweep did not
+reach, you have derived a second finding's property: report it in "What else
+this changed" and leave it.
+
+Sections 2 and 3 do not compete, so there is nothing here to rank: the mechanism
+is the boundary between them. Section 2's sweep runs to that mechanism's last
+site — every one of them, which is the whole point of it — and section 3 begins
+at the next mechanism. If you find yourself weighing the two against each other,
+the question to answer is not which one wins but which mechanism you are looking
+at.
 
 **Declining a finding, with reasoning, is a complete and legitimate outcome.**
 The loop's exit condition is *decisions recorded*, not *findings fixed*. A

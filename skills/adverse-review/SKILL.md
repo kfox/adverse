@@ -58,8 +58,8 @@ shape you are running.
 
 | Persona | Owns | Kinds |
 |---|---|---|
-| **Auditor** | correctness: does it compute the right answer | `defect`, `behavioral` |
-| **Adversary** | what an attacker can do | `defect`, `behavioral` (with an attack) |
+| **Auditor** | correctness: does it compute the right answer — and does every operation have a bound | `defect`, `behavioral` |
+| **Adversary** | what an attacker can do, and what runs out | `defect`, `behavioral` (with an attack, or an availability bound) |
 | **Steward** | what the code says about itself: docs, schemas, rules, and tests | `contract` — **advisory**, `behavioral` |
 | **Pragmatist** | shape: structure, coupling, complexity | `design` — **advisory** |
 
@@ -389,7 +389,7 @@ chat, has this shape:
       "counterpart": "<path this contradicts, for kind=contract; else null>",
       "title": "<short noun phrase>",
       "detail": "<2-6 sentences>",
-      "fix": "<concrete remediation or null>"
+      "fix": "<the property that must hold, a call only as one way there, or null>"
     }
   ]
 }
@@ -911,8 +911,41 @@ fix agent is a batch of repair work, not a lane) with:
 1. `${SKILL_DIR}/scripts/prompts/fix.txt`
 2. **the repository's own constraint block** — see below
 3. this batch's briefing entries, verbatim, with their `id`, `kind`, `severity`,
-   `confidence`, `file`, `line` and `counterpart`
+   `file`, `line`, `counterpart` and `fix` — every field `src/briefing.mjs`
+   emits that the agent needs. Not `confidence`: the briefing carries none, so
+   an orchestrator reading this list either passed nothing or invented one.
 4. the path to write its own JSON object to: `$ADVERSE_RUN/fix-<batch>/fix-<batch>.json`
+
+**State the invariant, not the call.** A brief carries a mechanism through two
+channels, and the one you type is the smaller. Item 3's `fix` field is a remedy
+a *reviewer* proposed, which you copy out of `briefing.json` by hand — no code
+renders it and no tool adds it, so an orchestrator that adds nothing of its own
+still hands over a call, and satisfies this rule vacuously while doing it. Both
+channels are yours: say what must be true after the change **and what must
+remain true** — the second half is the one that gets dropped — and where item
+3's own `fix` names a call and no property, supply the property **beside** it.
+Never strike or rewrite the field: `fix.txt` tells the agent to take a proposed
+fix as a suggestion and to say what was weaker about it if it uses its own, and
+that instruction needs the reviewer's proposal to arrive intact. Editing it
+removes the input the fix prompt asks the agent to argue against and leaves no
+trace that it had, because `fix` is not one of the identity fields the ledger
+matches on.
+
+One brief line read "use a context that does not inherit the caller's
+cancellation for the reap write (`context.WithoutCancel`)", for a finding that
+required both that the write survive the caller disconnecting and that it stay
+bounded. That call
+delivers the first property and silently removes the second, which is its
+documented behavior and no surprise to anyone reading it as a requirement rather
+than as an instruction. Everything downstream then worked exactly as designed:
+the fix agent did what it was told, the gate was green, the tests it wrote
+asserted the new behavior faithfully and were mutation-verified, and the
+verification question — *is the finding closed?* — had a truthful answer of yes.
+The commit shipped an unbounded database write, and no participant was in a
+position to notice, because none of them had been told what the code was
+supposed to hold. Name a mechanism where you have one, as a suggestion with the
+property beside it; `fix.txt` tells the agent to report what else a handed
+mechanism changed, and it can only do that against a property.
 
 **The constraint block is not optional and it is not obvious.** A subagent
 inherits nothing from you: not the rule that a test run prints only pass/fail
