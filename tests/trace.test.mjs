@@ -3,11 +3,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, renameSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync, renameSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { clearRefCache, filesChangedIn, followRename, makeAnchorTracer, parseHunks, projectLine, resolveRef, traceAnchor } from '../src/trace.mjs';
+import { clearTraceCaches, filesChangedIn, followRename, makeAnchorTracer, parseHunks, projectLine, resolveRef, traceAnchor } from '../src/trace.mjs';
 
 // --- pure arithmetic ---------------------------------------------------------
 
@@ -74,6 +74,14 @@ function git(cwd, ...args) {
   execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: 'pipe', env: GIT_ENV });
 }
 
+function initRepo(dir) {
+  git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'config', 'user.email', 'test@example.invalid');
+  git(dir, 'config', 'user.name', 'Test');
+  git(dir, 'config', 'commit.gpgsign', 'false');
+  git(dir, 'config', 'tag.gpgSign', 'false');
+}
+
 const body = (n, marker = null) =>
   Array.from({ length: n }, (_, i) => (i + 1 === marker ? `line ${i + 1} MARKED` : `line ${i + 1}`))
     .join('\n') + '\n';
@@ -81,11 +89,7 @@ const body = (n, marker = null) =>
 let repo;
 test.before(() => {
   repo = mkdtempSync(path.join(os.tmpdir(), 'adverse-trace-'));
-  git(repo, 'init', '-q', '-b', 'main');
-  git(repo, 'config', 'user.email', 'test@example.invalid');
-  git(repo, 'config', 'user.name', 'Test');
-  git(repo, 'config', 'commit.gpgsign', 'false');
-  git(repo, 'config', 'tag.gpgSign', 'false');
+  initRepo(repo);
   writeFileSync(path.join(repo, 'app.py'), body(40, 30));
   writeFileSync(path.join(repo, 'keep.py'), body(10));
   writeFileSync(path.join(repo, 'doomed.py'), body(5));
@@ -208,19 +212,29 @@ test('projectLine never returns line 0 when a hunk deletes the top of the file',
   assert.equal(r.line, 1);
 });
 
-test('resolveRef caches resolutions but not failures, and clears on demand', () => {
-  // A ref that does not exist YET must not be remembered as unresolvable, or a
-  // long-lived process could never see it appear. Positive results are cached,
-  // which is safe for the one-shot CLIs that call this — but a symbolic ref is
-  // frozen at first resolution, so the invalidation hook has to work.
-  clearRefCache();
+test('resolveRef caches a failure, so a repeated bad ref costs one spawn', () => {
+  // The repeat count is model-chosen: N decisions naming one bogus sha used to
+  // be N `git rev-parse` spawns, because `filesChangedIn` reaches its own memo
+  // only after this resolves. Spawn counts are not directly observable, but the
+  // memo is: create the ref between two calls and the cached answer is the one
+  // that does not notice.
+  clearTraceCaches();
   assert.equal(resolveRef(repo, 'not-a-ref-yet'), null);
   execFileSync('git', ['tag', 'not-a-ref-yet', 'v1'], { cwd: repo, env: GIT_ENV });
-  assert.ok(resolveRef(repo, 'not-a-ref-yet'), 'a negative result must not be cached');
+  assert.equal(resolveRef(repo, 'not-a-ref-yet'), null,
+    'the failure is remembered rather than re-spawned');
 
+  clearTraceCaches();
+  assert.ok(resolveRef(repo, 'not-a-ref-yet'),
+    'and clearTraceCaches is what makes the ref visible again');
+});
+
+test('clearTraceCaches re-resolves a symbolic ref rather than breaking it', () => {
+  // A positive result is frozen at first resolution, so HEAD goes stale the
+  // moment it moves; the invalidation hook has to work in that direction too.
   const first = resolveRef(repo, 'HEAD');
-  clearRefCache();
-  assert.equal(resolveRef(repo, 'HEAD'), first, 'clearRefCache re-resolves rather than breaking');
+  clearTraceCaches();
+  assert.equal(resolveRef(repo, 'HEAD'), first);
 });
 
 test('makeAnchorTracer answers a repeated anchor from the memo', () => {
@@ -253,16 +267,65 @@ test('makeAnchorTracer does not memoize its way past a missing anchor', () => {
 
 // --- what one commit changed -------------------------------------------------
 
-test('filesChangedIn lists the paths a commit touched', () => {
+test('filesChangedIn names both sides of a rename', () => {
   const r = filesChangedIn(repo, 'v2');
   assert.equal(r.status, 'ok');
-  // `moved.py` and not `keep.py`: git detects the rename and names only the
-  // path that exists afterward. So a fix that renames the file a finding cites
-  // reads as "touched other files" rather than as touching the cited one —
-  // which is the reported branch, not the silent one, and that is the right
-  // direction for a change big enough to move the file out from under a
-  // finding.
-  assert.deepEqual([...r.files].sort(), ['app.py', 'doomed.py', 'moved.py']);
+  // `keep.py` AND `moved.py`. With git's default rename detection this printed
+  // only `moved.py`, and `unsupportedFixes` answered "that commit does not
+  // touch keep.py; it touches moved.py" about a finding cited at `keep.py`
+  // whose fix moved the file — a false accusation from the check that exists to
+  // catch fictional fixes. v2 renames with no edit at all, which is the 100%
+  // similarity case where detection is hardest to avoid.
+  assert.deepEqual([...r.files].sort(), ['app.py', 'doomed.py', 'keep.py', 'moved.py']);
+});
+
+test('a commit that renames the cited file and edits it names the old path too', () => {
+  // The reported reproduction: a rename plus an edit scores below 100% (R097
+  // here) and takes a different path through git's detection than v2's pure
+  // rename above.
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-rename-'));
+  try {
+    initRepo(dir);
+    writeFileSync(path.join(dir, 'old.py'), body(60));
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'one');
+
+    const edited = body(60).split('\n');
+    edited[3] = 'line 4 EDITED';
+    writeFileSync(path.join(dir, 'new.py'), edited.join('\n'));
+    unlinkSync(path.join(dir, 'old.py'));
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'two');
+
+    assert.deepEqual([...filesChangedIn(dir, 'HEAD').files].sort(), ['new.py', 'old.py']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a copy does not put its untouched source in the changed list', () => {
+  // The near-miss for the rename fix, and it must NOT come out the same way: a
+  // copy leaves its source exactly where it was, so naming the source would let
+  // a `fixed` claim rest on a file the commit only read. `diff.renames=copies`
+  // is set here because that is the config under which git reports the pair at
+  // all — as `C100<TAB>src.py<TAB>copy.py` — and taking both of those columns is
+  // the shape of fix this test rules out.
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-copy-'));
+  try {
+    initRepo(dir);
+    git(dir, 'config', 'diff.renames', 'copies');
+    writeFileSync(path.join(dir, 'src.py'), body(60));
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'one');
+
+    writeFileSync(path.join(dir, 'copy.py'), body(60));
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'two');
+
+    assert.deepEqual(filesChangedIn(dir, 'HEAD').files, ['copy.py']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('filesChangedIn reports an unresolvable ref rather than an empty list', () => {
@@ -277,10 +340,52 @@ test('filesChangedIn reports an unresolvable ref rather than an empty list', () 
   assert.match(r.why, /names no commit in this repository/);
 });
 
+test('filesChangedIn answers a repeated unresolvable ref without asking git again', () => {
+  // A folded batch names one `fixCommit` per citation, so N decisions naming
+  // one bogus ref used to be N `git rev-parse` spawns — the memo below is
+  // consulted only after the resolve succeeds, so it never saw the repeat.
+  clearTraceCaches();
+  assert.equal(filesChangedIn(repo, 'not-a-commit-yet').status, 'unresolved');
+  execFileSync('git', ['tag', 'not-a-commit-yet', 'v1'], { cwd: repo, env: GIT_ENV });
+  assert.equal(filesChangedIn(repo, 'not-a-commit-yet').status, 'unresolved',
+    'the second ask is answered from the memo, not from a fresh spawn');
+
+  clearTraceCaches();
+  assert.equal(filesChangedIn(repo, 'not-a-commit-yet').status, 'ok');
+});
+
 test('filesChangedIn refuses a ref the safe-ref pattern rejects', () => {
   // `resolveRef` is the guard; this asserts the refusal survives the extra hop
   // rather than the ref reaching an argument position.
   assert.equal(filesChangedIn(repo, '--output=/tmp/pwned').status, 'unresolved');
+});
+
+test('resolveRef refuses a rev spelling git itself would resolve', () => {
+  // SAFE_REF is an allowlist, deliberately narrower than git's rev grammar:
+  // `HEAD@{0}` resolves fine at the command line and is refused here, because
+  // the pattern admits no `@` and no `=`. Pinning a spelling git ACCEPTS is what
+  // makes this an assertion about the pattern — a rejected ref that git would
+  // also reject proves nothing about which of the two did the rejecting.
+  assert.ok(resolveRef(repo, 'HEAD^{commit}'), 'the allowlist still admits real spellings');
+  assert.equal(resolveRef(repo, 'HEAD@{0}'), null);
+});
+
+test('a flag-shaped ref reaches no git invocation filesChangedIn makes', () => {
+  // Refusing the ref is the claim; the file is the evidence. `git show
+  // --output=FILE …` exits 0 and truncates FILE — measured — so if the ref ever
+  // reached an argument position of either `git show` behind `filesChangedIn`,
+  // the parent read or the file listing, this path would exist afterward. The
+  // resolve in front of them runs `git rev-parse`, which has no `--output` and
+  // so cannot be the one that writes; that is why this is worth asserting at
+  // the callers rather than at the guard.
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-argv-'));
+  try {
+    const proof = path.join(dir, 'written');
+    assert.equal(filesChangedIn(repo, `--output=${proof}`).status, 'unresolved');
+    assert.equal(existsSync(proof), false, 'no git invocation was handed the ref as a flag');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('filesChangedIn returns paths git would otherwise C-quote', () => {
@@ -291,10 +396,7 @@ test('filesChangedIn returns paths git would otherwise C-quote', () => {
   // escaped form at the operator.
   const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-quotepath-'));
   try {
-    git(dir, 'init', '-q', '-b', 'main');
-    git(dir, 'config', 'user.email', 'test@example.invalid');
-    git(dir, 'config', 'user.name', 'Test');
-    git(dir, 'config', 'commit.gpgsign', 'false');
+    initRepo(dir);
     writeFileSync(path.join(dir, 'café.py'), 'x\n');
     git(dir, 'add', '-A');
     git(dir, 'commit', '-qm', 'one');

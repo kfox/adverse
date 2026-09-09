@@ -139,17 +139,33 @@ export function resolveRef(repo, ref) {
   } catch {
     sha = null;
   }
-  // Negative results are NOT cached: a ref that does not exist yet would stay
-  // unresolvable for the life of the process. Positive results are, which is
-  // safe for the one-shot CLIs that call this — but a symbolic ref like HEAD
-  // is frozen at first resolution, so a long-lived process that moves HEAD
-  // must call clearRefCache.
-  if (sha !== null) refCache.set(key, sha);
+  // Failures are cached too, and that reverses an earlier decision here. The
+  // old rule — "a ref that does not exist yet must stay resolvable later" —
+  // bought nothing any caller can use: every one is a one-shot CLI that creates
+  // no ref while it runs, and this memo is process-local, so a ref that appears
+  // mid-run is resolvable to the NEXT run either way. What the rule cost is
+  // paid per repeat, and the repeat count is model-chosen: `filesChangedIn`
+  // consults its own memo only AFTER this resolves, so N decisions naming one
+  // bogus sha were N `git rev-parse` spawns. Measured on git 2.55, 300 calls
+  // naming one bad sha took 4644 ms against 55 ms for 300 naming a good one.
+  // `checkBinding` had already hand-rolled a per-call negative cache over this
+  // very function for the same reason, which is the sign that the cache belongs
+  // here rather than once per caller.
+  //
+  // A cached failure is also the safe direction to be wrong in: it reaches
+  // `unsupportedFixes` as `unresolved`, that function's loudest branch. Nor is
+  // the staleness a new kind — a positive result is already frozen at first
+  // resolution, so a symbolic ref like HEAD is already stale once it moves.
+  // `clearTraceCaches` is the hook for both.
+  refCache.set(key, sha);
   return sha;
 }
 
-// Tests that build a repo, resolve a ref, then rewrite history need this.
-export function clearRefCache() {
+// Tests that build a repo, resolve a ref, then rewrite history need this, and
+// so does any caller that outlives a ref moving or appearing. Named for the
+// caches it actually empties: the resolutions above, and the file lists below
+// that are keyed on those resolutions and would otherwise outlive them.
+export function clearTraceCaches() {
   refCache.clear();
   filesCache.clear();
 }
@@ -162,6 +178,11 @@ export function clearRefCache() {
 // has to be distinguishable from genuinely having read an empty one. Collapsed
 // to `[]` on error, a git that could not run would accuse every fix in the
 // batch of being invented.
+//
+// A rename contributes BOTH of its paths, because the question every caller
+// asks is "did this commit touch the file this finding cites" and a commit that
+// renames `old.py` did touch `old.py` — it removed it. See `readFilesChanged`
+// for how, and for why a COPY contributes only its destination.
 //
 // A merge is `unknown`, not `ok: []`. `git show --name-only` prints no files
 // for a merge unless told which parent to diff against, and choosing one here
@@ -208,8 +229,38 @@ function readFilesChanged(repo, sha) {
       + 'which parent it is read against' };
   }
 
+  // `--no-renames`, so that a rename lists BOTH of its paths.
+  //
+  // With git's rename detection — on by default since 2.9 — `--name-only`
+  // prints only the post-image path: a commit that renames `old.py` to `new.py`
+  // and edits it prints `new.py` and nothing else. `unsupportedFixes` then
+  // answers "that commit does not touch old.py; it touches new.py" about a
+  // finding cited at `old.py` whose fix RENAMED that file. That is a false
+  // accusation manufactured by the check whose whole job is to catch fictional
+  // fixes, which is worse than missing one. Reproduced verbatim on git 2.55.
+  //
+  // `--name-status` is the other candidate and carries both paths too, as
+  // `R097<TAB>old.py<TAB>new.py`. `--no-renames` was taken instead, on three
+  // counts, all measured on git 2.55:
+  //   - it keeps the output one path per line. `--name-status` needs a parse of
+  //     tab-separated rows whose arity varies with the status letter, and of a
+  //     similarity score glued to that letter.
+  //   - it does not leave the SHAPE of that output to the reader's
+  //     `diff.renames`, which decides it three ways: `false` gives `A`/`D` rows,
+  //     `true` an `R` row, `copies` `R` and `C` rows. Under `--no-renames` all
+  //     three give the same `A`/`D` pair. This module already pins
+  //     `core.quotePath` for exactly that reason.
+  //   - it never names a path the commit did not change. Under
+  //     `diff.renames=copies` a COPY is reported as
+  //     `C100<TAB>src.py<TAB>copy.py`, and reading both columns of that row the
+  //     way a rename's are read would rest a fix claim on a file the commit only
+  //     read. Copy detection only ever draws a source from a file the commit
+  //     modified, so under `--no-renames` such a file still appears — as its own
+  //     `M` row, which is the truth.
+  // Neither candidate prints anything at all for a merge, so neither is what
+  // keeps a merge from reading as "changed no file"; the parent count above is.
   try {
-    const out = git(repo, ['show', '--name-only', '--format=', '--end-of-options', sha]);
+    const out = git(repo, ['show', '--name-only', '--format=', '--no-renames', '--end-of-options', sha]);
     return { status: 'ok', files: out.split('\n').map((s) => s.trim()).filter(Boolean) };
   } catch (e) {
     return { status: 'failed', why: `git could not list what ${sha} changed: ${e.message}` };
