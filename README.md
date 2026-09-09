@@ -81,7 +81,7 @@ The naive way to do "AI code review" is one model, one shot. You get one perspec
 
 The next step up is what some prior projects did: two **different** models (Claude + GPT Codex), so each catches what the other misses. This works but it's expensive, slow, requires two API keys, and ties you to whichever two providers the script knows about.
 
-`adverse` does the third thing: one model, several **personas**, with explicit cross-examination between them. The personas are designed to be orthogonal — the Auditor catches logic bugs the Adversary won't go looking for; the Adversary names attack chains the Auditor won't think about; the Steward notices the docstring that stopped being true; the Pragmatist sees the design problem the rest ignore. Then in round 2 each persona has to go on record about the others' findings — validate or challenge — so the synthesizer can tell you which findings have multi-perspective support and which are one reviewer's hunch.
+`adverse` does the third thing: one model, several **personas**, with explicit cross-examination between them. The personas are designed to be orthogonal — the Auditor catches logic bugs the Adversary won't go looking for; the Adversary names attack chains the Auditor won't think about, and rates an unbounded operation against the load this deployment actually sees — the Auditor reports the missing bound itself and rates it on what the code shows, because it runs on every diff and the Adversary does not; the Steward notices the docstring that stopped being true; the Pragmatist sees the design problem the rest ignore. Then in round 2 each persona has to go on record about the others' findings — validate or challenge — so the synthesizer can tell you which findings have multi-perspective support and which are one reviewer's hunch.
 
 Trade-off, named honestly: a single model running several personas has anchoring bias that two separate models don't. The cross-review round mitigates this (each persona must defend a position visible to the others), and the personas themselves are written with explicit "stay in your lane / do not duplicate the others" instructions. But if you genuinely need decorrelated outputs across the model boundary, run `adverse` twice with different agents and diff the reports.
 
@@ -192,7 +192,7 @@ its report and still exits on its verdict. Full schema and worked queries:
 | Persona      | Lens                                     |
 |------------- |------------------------------------------|
 | **Auditor**    | Correctness, logic, and algorithmic soundness — does this code compute the right answer? |
-| **Adversary**  | Security, abuse, trust boundaries — what can a hostile caller do? |
+| **Adversary**  | Security, abuse, trust boundaries — what can a hostile caller do, and what runs out under load? |
 | **Steward**    | Contracts — what does this code *say* about itself, and is that still true? |
 | **Pragmatist** | Shape — structure, coupling, complexity. **Advisory: never blocks.** |
 
@@ -347,6 +347,7 @@ One test is load-bearing rather than incidental: [`tests/prompts.test.mjs`](test
 src/                          # Shared core, used by both CLI and Skill
   personas.mjs                # Four persona system prompts + the lane partition
   taxonomy.mjs                # The kind axis + severity rank, shared with no prompt prose
+  limits.mjs                  # Bounds two layers have to agree on, owned by neither
   prompts.mjs                 # Round-1/2/verify/fix/regression prompts, validators
   parse.mjs                   # JSON extraction across every wrapper shape
   collect.mjs                 # Directory walk + git-diff source collection

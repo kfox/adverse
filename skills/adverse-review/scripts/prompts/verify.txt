@@ -53,6 +53,12 @@ the defects a careful read of the diff does not surface.
    to a test usually narrows an exploit rather than removing it. Re-run the
    original attack with a single field changed. If the narrowed version still
    works, the fix is a speed bump and should be reported `open`, not closed.
+   For an availability bound there is no attack to re-run, so vary the SITE and
+   the load: another call site reached through the same client, a second resource
+   the same request holds, or the same operation one retry deeper. Varying only
+   the load re-tests the one call that was just bounded, which passes — a
+   deadline on the cited call and none on its three siblings is the instance,
+   and load alone will never find the siblings.
 
 3. **Is the fix reachable on the path that matters?** A gate can be perfectly
    correct in the module that defines it and never invoked by the caller the

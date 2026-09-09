@@ -58,8 +58,8 @@ shape you are running.
 
 | Persona | Owns | Kinds |
 |---|---|---|
-| **Auditor** | correctness: does it compute the right answer | `defect`, `behavioral` |
-| **Adversary** | what an attacker can do | `defect`, `behavioral` (with an attack) |
+| **Auditor** | correctness: does it compute the right answer — and does every operation have a bound | `defect`, `behavioral` |
+| **Adversary** | what an attacker can do, and what runs out | `defect`, `behavioral` (with an attack, or an availability bound) |
 | **Steward** | what the code says about itself: docs, schemas, rules, and tests | `contract` — **advisory**, `behavioral` |
 | **Pragmatist** | shape: structure, coupling, complexity | `design` — **advisory** |
 
@@ -911,20 +911,30 @@ fix agent is a batch of repair work, not a lane) with:
 1. `${SKILL_DIR}/scripts/prompts/fix.txt`
 2. **the repository's own constraint block** — see below
 3. this batch's briefing entries, verbatim, with their `id`, `kind`, `severity`,
-   `confidence`, `file`, `line`, `counterpart` and `fix`
+   `file`, `line`, `counterpart` and `fix` — every field `src/briefing.mjs`
+   emits that the agent needs. Not `confidence`: the briefing carries none, so
+   an orchestrator reading this list either passed nothing or invented one.
 4. the path to write its own JSON object to: `$ADVERSE_RUN/fix-<batch>/fix-<batch>.json`
 
 **State the invariant, not the call.** A brief carries a mechanism through two
-channels, and the one you type is the smaller. Item 3's `fix` field is a
-remedy a *reviewer* proposed, forwarded verbatim and rendered to the agent as
-**Fix:** — so an orchestrator that adds nothing of its own still hands over a
-call, and satisfies this rule vacuously while doing it. Both channels are yours:
-say what must be true after the change **and what must remain true** — the
-second half is the one that gets dropped — and where item 3's own `fix` names a
-call and no property, supply the property or strike the call. One brief line
-read "use a context that does not inherit the caller's cancellation for the reap
-write (`context.WithoutCancel`)", for a finding that required both that the
-write survive the caller disconnecting and that it stay bounded. That call
+channels, and the one you type is the smaller. Item 3's `fix` field is a remedy
+a *reviewer* proposed, which you copy out of `briefing.json` by hand — no code
+renders it and no tool adds it, so an orchestrator that adds nothing of its own
+still hands over a call, and satisfies this rule vacuously while doing it. Both
+channels are yours: say what must be true after the change **and what must
+remain true** — the second half is the one that gets dropped — and where item
+3's own `fix` names a call and no property, supply the property **beside** it.
+Never strike or rewrite the field: `fix.txt` tells the agent to take a proposed
+fix as a suggestion and to say what was weaker about it if it uses its own, and
+that instruction needs the reviewer's proposal to arrive intact. Editing it
+removes the input the fix prompt asks the agent to argue against and leaves no
+trace that it had, because `fix` is not one of the identity fields the ledger
+matches on.
+
+One brief line read "use a context that does not inherit the caller's
+cancellation for the reap write (`context.WithoutCancel`)", for a finding that
+required both that the write survive the caller disconnecting and that it stay
+bounded. That call
 delivers the first property and silently removes the second, which is its
 documented behavior and no surprise to anyone reading it as a requirement rather
 than as an instruction. Everything downstream then worked exactly as designed:

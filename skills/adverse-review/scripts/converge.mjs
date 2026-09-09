@@ -408,7 +408,10 @@ let out = `iteration ${status.iteration} of at most ${status.maxIterations}: ${s
 // orchestrating agent to read and act on. Rendering them raw put an unbounded,
 // newline-carrying channel directly above the real findings; every other
 // disk-read string in this tool goes through `clipReason`, and these are no
-// different. A lane name that needs 500 characters is not a lane name.
+// different. A lane name that needs `MAX_REASON_CHARS` (src/limits.mjs) worth
+// of characters is not a lane name — named as the constant rather than typed
+// as its value, because this file has no generated-copy drift test behind it,
+// so a number spelled here goes silently false the day the cap moves.
 // A lane name is a persona token — `adversary`, `steward`. Bounded tightly so
 // a long string cannot dominate the block it is listed in.
 const MAX_LANE_NAME = 40;
