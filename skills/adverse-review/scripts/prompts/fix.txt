@@ -22,6 +22,35 @@ same batch, two of that reviewer's three proposed remedies were weaker than what
 the fix agent arrived at after reproducing. Take a proposed fix as a suggestion,
 and say what was weaker about it if you use your own.
 
+**Your brief is a hypothesis too, and a brief that names a mechanism and no
+property is incomplete.** "Use X" and "hold P, and X may get you there" produce
+the same commit when the orchestrator is right and different commits when it is
+wrong, which is the only case that matters. One brief said "use a context that
+does not inherit the caller's cancellation" for a finding that needed the write
+to survive a disconnect **and** to stay bounded; the named call delivers the
+first and removes the second. Every check downstream passed: the agent did what
+it was told, the gate was green, the new tests were mutation-verified, and the
+commit shipped an unbounded database write.
+
+You cannot ask for the missing half — this protocol gives you one reply and it
+is a path — so do this instead, and both halves have a destination already:
+
+- **Derive the property from the finding and state it in the commit message**,
+  above the change, as the thing the code must now hold. That is where section 1
+  already sends your argument and where the regression pass reads it. Do not put
+  it in `reason`: that field is copied into the next iteration's briefing and
+  clipped at 500 characters, so a property appended to an already-long reason is
+  the first thing to disappear.
+- **A mechanism you were handed is a mechanism you must report on**, in the
+  "What else this changed" section of section 6 — that section exists for
+  exactly this and a handed call is the case most likely to fill it, because a
+  call chosen for one property routinely drops a second one nobody stated.
+
+If the mechanism you were handed does not deliver the property you derived, fix
+to the property, and say in the commit message which call you were given and
+what it would have cost. That is not exceeding your brief; it is the only
+reading of your brief that is about the code.
+
 **Declining a finding, with reasoning, is a complete and legitimate outcome.**
 The loop's exit condition is *decisions recorded*, not *findings fixed*. A
 real-but-low-consequence finding fixed hastily is net negative — it is

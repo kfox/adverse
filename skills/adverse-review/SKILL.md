@@ -389,7 +389,7 @@ chat, has this shape:
       "counterpart": "<path this contradicts, for kind=contract; else null>",
       "title": "<short noun phrase>",
       "detail": "<2-6 sentences>",
-      "fix": "<concrete remediation or null>"
+      "fix": "<the property that must hold, a call only as one way there, or null>"
     }
   ]
 }
@@ -911,8 +911,31 @@ fix agent is a batch of repair work, not a lane) with:
 1. `${SKILL_DIR}/scripts/prompts/fix.txt`
 2. **the repository's own constraint block** — see below
 3. this batch's briefing entries, verbatim, with their `id`, `kind`, `severity`,
-   `confidence`, `file`, `line` and `counterpart`
+   `confidence`, `file`, `line`, `counterpart` and `fix`
 4. the path to write its own JSON object to: `$ADVERSE_RUN/fix-<batch>/fix-<batch>.json`
+
+**State the invariant, not the call.** A brief carries a mechanism through two
+channels, and the one you type is the smaller. Item 3's `fix` field is a
+remedy a *reviewer* proposed, forwarded verbatim and rendered to the agent as
+**Fix:** — so an orchestrator that adds nothing of its own still hands over a
+call, and satisfies this rule vacuously while doing it. Both channels are yours:
+say what must be true after the change **and what must remain true** — the
+second half is the one that gets dropped — and where item 3's own `fix` names a
+call and no property, supply the property or strike the call. One brief line
+read "use a context that does not inherit the caller's cancellation for the reap
+write (`context.WithoutCancel`)", for a finding that required both that the
+write survive the caller disconnecting and that it stay bounded. That call
+delivers the first property and silently removes the second, which is its
+documented behavior and no surprise to anyone reading it as a requirement rather
+than as an instruction. Everything downstream then worked exactly as designed:
+the fix agent did what it was told, the gate was green, the tests it wrote
+asserted the new behavior faithfully and were mutation-verified, and the
+verification question — *is the finding closed?* — had a truthful answer of yes.
+The commit shipped an unbounded database write, and no participant was in a
+position to notice, because none of them had been told what the code was
+supposed to hold. Name a mechanism where you have one, as a suggestion with the
+property beside it; `fix.txt` tells the agent to report what else a handed
+mechanism changed, and it can only do that against a property.
 
 **The constraint block is not optional and it is not obvious.** A subagent
 inherits nothing from you: not the rule that a test run prints only pass/fail

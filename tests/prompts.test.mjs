@@ -726,6 +726,34 @@ test('fix prompt says declining is a complete outcome, and reserves `deferred`',
   assert.match(FIX_INSTRUCTIONS, /`named_not_fixed` closes nothing/);
 });
 
+// The brief is the one input to a repair that nothing downstream can check: the
+// agent has no premise to hold the mechanism against, the regression pass sees
+// a diff that matches its brief, and the ledger records a reason restating the
+// mechanism. So the prompt has to tell the agent that a mechanism arriving
+// without a property is an incomplete brief, and that reporting what else the
+// mechanism changed is owed — the second clause is the one that is useless
+// without the first, because "what else it changed" has nothing to compare
+// against when no property was stated.
+test('fix prompt tells the agent a brief naming only a mechanism is incomplete', () => {
+  const { FIX_INSTRUCTIONS } = PROMPTS;
+  assert.match(FIX_INSTRUCTIONS, /a brief that names a mechanism and no\s+property is incomplete/);
+  // Both obligations must name a destination that exists. An instruction to
+  // record something nowhere is how the property ends up in `reason`, which is
+  // clipped at MAX_REASON_CHARS on its way into the next briefing.
+  assert.match(FIX_INSTRUCTIONS,
+    /Derive the property from the finding and state it in the commit message/);
+  assert.match(FIX_INSTRUCTIONS, /Do not put\s+it in `reason`/);
+  assert.match(FIX_INSTRUCTIONS,
+    /A mechanism you were handed is a mechanism you must report on/);
+  assert.match(FIX_INSTRUCTIONS, /"What else this changed" section of section 6/);
+
+  // The dominant channel is not the prose an orchestrator types, it is the
+  // reviewer's own `fix`, forwarded verbatim into the brief. Telling only the
+  // agent and the orchestrator leaves it open at the producer.
+  assert.match(PROMPTS.PHASE1_INSTRUCTIONS,
+    /"fix":\s+"<the property that must hold, and a call only as one way to reach it; or null>"/);
+});
+
 // --- regression pass ----------------------------------------------------------
 // The read-only pass over one fix commit, run by a lane that did not report the
 // findings it closes (src/regression.mjs picks which). Its payload is
@@ -1013,7 +1041,7 @@ test('regression prompt shows one finding schema, not a second copy of it', () =
   const { REGRESSION_INSTRUCTIONS } = PROMPTS;
   assert.match(REGRESSION_INSTRUCTIONS, /"counterpart": "<path this code contradicts/);
   assert.match(REGRESSION_INSTRUCTIONS,
-    /"fix":\s+"<concrete remediation, or null if you don't have one>",\n\s+"classification"/);
+    /"fix":\s+"[^"]*",\n\s+"classification"/);
 });
 
 test('an enum value containing `$&` splices nothing into the classified schema', () => {
