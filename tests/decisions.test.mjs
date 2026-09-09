@@ -378,7 +378,8 @@ test('a mis-copied title cannot move a decision onto the finding it names', () =
   assert.equal(d.file, 'src/a.c', 'the anchor the operator actually examined');
   assert.equal(d.line, 10);
   assert.deepEqual(reconciliations([payload({ fixed: [], declined: [transposed] })], report),
-    [{ agent: 'fix-auth-guard', title: 'the retry loop never exits', bound: false, fields: [] }]);
+    [{ agent: 'fix-auth-guard', title: 'the retry loop never exits', disposition: 'declined',
+       bound: false, fields: [] }]);
 
   // And it is reported rather than silently settling the wrong finding.
   const [uncovered] = uncoveredDecisions([d], report);
@@ -461,4 +462,107 @@ test('a stated file that disagrees still refuses to bind', () => {
   assert.equal(d.file, 'src/session.py');
   assert.equal(d.kind, 'design', 'nothing bound, so nothing was corrected');
   assert.equal(uncoveredDecisions([d], report).length, 1);
+});
+
+// --- a `noted` identity is the ledger's one vouching token -------------------
+//
+// `onNotedRecord` grants `uncoveredDecisions`' single exemption to any decision
+// a recorded `noted` entry matches at SETTLING_SCORE, and this file is where
+// those entries are minted — out of fields a fix agent supplies. So what the
+// fold will and will not mint is what decides whether the party being checked
+// can write its own exemption.
+
+test('a named-not-fixed item takes the report\'s identity where the report has it', () => {
+  // `fix.txt` sends an ASSIGNED finding here whenever a batch leaves one for
+  // later, so the report frequently does carry the item — and the briefing the
+  // agent copied is per-lane while the report is merged. This list used to skip
+  // the correction the other two dispositions get.
+  const [d] = foldFixPayloads([payload({
+    fixed: [],
+    named_not_fixed: [namedItem({
+      title: 'the guard is unreachable', kind: 'design', file: null, line: null,
+    })],
+  })], { report: merged });
+  assert.equal(d.kind, 'defect', 'an advisory kind here matches no blocking finding, ever');
+  assert.equal(d.file, 'src/auth.py');
+  assert.equal(d.line, 88);
+  assert.equal(d.reconciled, true);
+  assert.equal(d.severity, null, 'nobody triaged it, so it still claims no severity');
+  assert.equal(isSettled(d.disposition), false, 'and it still settles nothing');
+});
+
+test('a folded entry says whether the report answered it, in three answers', () => {
+  // "Nobody looked" and "we looked and the report answers nothing" are
+  // different claims, and only the second is the identity that becomes an
+  // exemption on fields no lane ever filed.
+  const bound = foldFixPayloads([payload()], { report: merged });
+  assert.equal(bound[0].reconciled, true);
+
+  const unbound = foldFixPayloads(
+    [payload({ fixed: [], named_not_fixed: [namedItem()] })], { report: merged });
+  assert.equal(unbound[0].reconciled, false, 'checked, and no finding carries this title');
+
+  const unchecked = foldFixPayloads([payload({ fixed: [], named_not_fixed: [namedItem()] })]);
+  assert.equal(unchecked[0].reconciled, null, 'no report was given, so nothing was checked');
+});
+
+test('a batch cannot name the identity of a decision it is asserting', () => {
+  // The self-serve exemption channel, end to end. A payload that both claims a
+  // fix and names the same identity as not-fixed mints the `noted` token that
+  // excuses its own claim from the SETTLES NOTHING check from the next
+  // iteration on — the party being checked writing its own exemption.
+  const launder = payload({
+    named_not_fixed: [namedItem({
+      title: decision().title, kind: 'defect', file: 'src/auth.py', line: 88,
+    })],
+  });
+  assert.throws(() => foldFixPayloads([launder], { report: merged }),
+    /carries the identity of the fixed decision from fix-auth-guard/);
+  // With no report neither side is corrected and the identities still coincide,
+  // so the refusal cannot be stepped around by withholding report.json.
+  assert.throws(() => foldFixPayloads([launder]), /would excuse that decision/);
+});
+
+test('a declined decision cannot be vouched for by its own batch either', () => {
+  // `onNotedRecord` does not ask what disposition it is excusing, so neither
+  // does this: a decline that settles the wrong finding is the failure the
+  // coverage check exists to name.
+  assert.throws(() => foldFixPayloads([payload({
+    fixed: [],
+    declined: [decision({ reason: 'reproduced it; unreachable from any caller' })],
+    named_not_fixed: [namedItem({
+      title: decision().title, kind: 'defect', file: 'src/auth.py', line: 88,
+    })],
+  })], { report: merged }), /carries the identity of the declined decision/);
+});
+
+test('a named item beside a decision it does not settle is minted, not refused', () => {
+  // The discriminating half, one field varied at a time. The refusal is keyed
+  // on the identity `scoreMatch` settles at, so a title one word off and a
+  // second file are both different findings and both legitimate footnotes.
+  const near = foldFixPayloads([payload({
+    named_not_fixed: [namedItem({
+      title: 'the guard is unreachable now', kind: 'defect', file: 'src/auth.py', line: 88,
+    })],
+  })], { report: merged });
+  assert.deepEqual(near.map((d) => d.disposition), ['fixed', 'noted']);
+
+  const elsewhere = foldFixPayloads([payload({
+    named_not_fixed: [namedItem({
+      title: decision().title, kind: 'defect', file: 'src/session.py', line: 12,
+    })],
+  })], { report: merged });
+  assert.deepEqual(elsewhere.map((d) => d.disposition), ['fixed', 'noted']);
+  assert.equal(elsewhere[1].file, 'src/session.py', 'a stated anchor that disagrees does not bind');
+});
+
+test('an unbound named-not-fixed entry is reported as unbound, not as corrected', () => {
+  // What the bridge prints under its own heading. `converge.mjs --record` never
+  // names a `noted` entry — it skips the disposition — so the earliest anyone
+  // sees the identity that is about to become an exemption is here.
+  const p = [payload({ fixed: [], named_not_fixed: [namedItem()] })];
+  assert.deepEqual(reconciliations(p, merged), [{
+    agent: 'fix-auth-guard', title: 'preflight_emu is not budgeted', disposition: 'noted',
+    bound: false, fields: [],
+  }]);
 });

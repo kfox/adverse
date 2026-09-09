@@ -358,3 +358,81 @@ test('a --report that is not a synthesis report exits 2, not 1', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a named-not-fixed identity in no finding is named as the exemption it becomes', () => {
+  // Under its own heading, never folded into the block above it: `converge.mjs
+  // --record` skips the `noted` disposition outright, so this print is the only
+  // place anyone sees the identity that will excuse the next decision matching
+  // it — on fields this batch chose and no lane ever filed.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix, named_not_fixed: goodFix.named_not_fixed,
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--report', report, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /UNREPORTED IDENTITY/);
+    assert.match(r.stdout, /preflight_emu is not budgeted/);
+    // The `fixed` entry beside it DID bind, so the other unbound heading — a
+    // different accusation about a different half of a decision — stays off.
+    assert.doesNotMatch(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a named-not-fixed item the report does carry is corrected, not accused', () => {
+  // The legitimate path: a batch leaving an assigned finding for later. It
+  // binds, so it takes the merged report's identity and appears under the
+  // correction heading rather than the exemption one.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      named_not_fixed: [{
+        ...goodFix.named_not_fixed[0],
+        title: 'the guard is unreachable', kind: 'design', file: null, line: null,
+      }],
+      fixed: [],
+      commits: [],
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--report', report, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /UNREPORTED IDENTITY/);
+    assert.match(r.stdout, /identity corrected from the report/);
+
+    const [d] = JSON.parse(readFileSync(out, 'utf-8')).decisions;
+    assert.equal(d.disposition, 'noted');
+    assert.equal(d.kind, 'defect');
+    assert.equal(d.file, 'src/auth.py');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a batch naming the identity of its own decision is refused, and writes nothing', () => {
+  // Exit 1: the payload was read and does not describe repair work — it claims
+  // one finding both decided and undecided, and the `noted` half of that is the
+  // token that would excuse the other half from the coverage check.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...goodFix,
+      named_not_fixed: [{
+        ...goodFix.named_not_fixed[0],
+        title: goodFix.fixed[0].title, kind: 'defect', file: 'src/auth.py', line: 88,
+      }],
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--report', report, '--out', out]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /carries the identity of the fixed decision/);
+    assert.equal(existsSync(out), false, 'a refused fold left a decisions.json behind');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

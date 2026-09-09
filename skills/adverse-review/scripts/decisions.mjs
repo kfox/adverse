@@ -148,14 +148,17 @@ let out = `${decisions.length} decision(s) from ${payloads.length} fix payload(s
   + `  ${summarizeDispositions(decisions)}\n`;
 
 // A fold that rewrites the fields a fix agent supplied and says nothing is a
-// fold whose output cannot be read back against the payload it came from. Both
-// halves are printed: what was corrected, and what could not be bound to the
-// report at all — the second is what `converge.mjs --record` is about to name
-// at exit 1, said here at the earlier of the two moments the operator can act
-// on it.
+// fold whose output cannot be read back against the payload it came from. All
+// three outcomes are printed: what was corrected, what could not be bound to
+// the report at all — which is what `converge.mjs --record` is about to name at
+// exit 1, said here at the earlier of the two moments the operator can act on
+// it — and, under its own heading, the unbound `noted` entries, which record
+// cleanly and become the identity that excuses the next decision matching them.
 const changes = report ? reconciliations(payloads, report) : [];
+const isNamed = (c) => c.disposition === NAMED_NOT_FIXED_DISPOSITION;
 const corrected = changes.filter((c) => c.bound);
-const unbound = changes.filter((c) => !c.bound);
+const unbound = changes.filter((c) => !c.bound && !isNamed(c));
+const unreported = changes.filter((c) => !c.bound && isNamed(c));
 if (corrected.length) {
   out += `  identity corrected from the report — the briefing's copy predates a lane`
        + ` merge (${corrected.length}):\n`
@@ -176,6 +179,24 @@ if (unbound.length) {
        + unbound.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`).join('')
        + '    A title is how a decision finds the finding it answers, and `fix.txt`\n'
        + '    tells the agent to copy it verbatim. Correct it against report.json.\n';
+}
+if (unreported.length) {
+  // Its own heading, never folded into the block above: an unbound `noted`
+  // entry is not the same accusation. It records fine and settles nothing by
+  // design — and it is also the one entry `converge.mjs --record` lets vouch
+  // for a later decision, on fields this batch chose and no lane ever filed.
+  // The fold refuses the case where the vouching would be for a decision in
+  // this same batch; a token minted now and spent an iteration later is the
+  // case only an operator holding the report can catch, which is why it is
+  // printed here rather than counted somewhere.
+  out += `  UNREPORTED IDENTITY — no finding in the report carries these titles, so each`
+       + ` becomes an exemption (${unreported.length}):\n`
+       + unreported.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`).join('')
+       + `    Recorded ${NAMED_NOT_FIXED_DISPOSITION}, which is what this channel is for — but from`
+       + ' the next\n'
+       + '    iteration on, any decision with the same title, kind and file is excused from\n'
+       + '    `--record`\'s SETTLES NOTHING check by this entry alone, on fields this batch\n'
+       + '    chose. Read each line against report.json before you record it.\n';
 }
 
 // Named as settling, and listed, because that is the whole of what --record

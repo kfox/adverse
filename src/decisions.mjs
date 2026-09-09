@@ -26,7 +26,9 @@
 // from memory that had never been written to a file at all.
 
 import { refuseDirectRun } from './entryGuard.mjs';
-import { UNREPORTED_DISPOSITION, normalizeTitle, requireFindings } from './ledger.mjs';
+import {
+  SETTLING_SCORE, UNREPORTED_DISPOSITION, normalizeTitle, requireFindings, scoreMatch,
+} from './ledger.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -63,11 +65,21 @@ const namedItemId = (agent, n) => `NF-${agent}-${n}`;
 // all: the item reaches the next iteration's briefing with the agent's own
 // reasoning attached, so nobody re-derives it. See `annotate`'s noted branch.
 // Taken from src/ledger.mjs rather than spelled again, because the ledger has
-// to know the same fact from the other side: `uncoveredDecisions` reports a
-// decision matching no finding in the report, and every entry this file mints
-// matches none by design. Two spellings of one disposition is how the summary
-// line stopped counting `noted` at all.
+// to know the same fact from the other side: `uncoveredDecisions` skips this
+// disposition outright, and `onNotedRecord` lets an entry carrying it excuse
+// the next decision that matches it. Two spellings of one disposition is how
+// the summary line stopped counting `noted` at all.
 export const NAMED_NOT_FIXED_DISPOSITION = UNREPORTED_DISPOSITION;
+
+// Does this entry carry the identity that SETTLES that one?
+//
+// The predicate `onNotedRecord` grants its one exemption on, imported rather
+// than spelled again: this file mints the entries that exemption is granted
+// BY, so it has to refuse exactly the pairs the ledger would let vouch for
+// each other. A second copy of a scoring rule is how two copies drift.
+function settlesSameThing(a, b) {
+  return (scoreMatch(a, b)?.score ?? 0) >= SETTLING_SCORE;
+}
 
 // `recordDecisions` throws on a decision with no reason, three frames
 // downstream, in a message that names the ledger rather than the payload that
@@ -155,7 +167,21 @@ function anchorsAgree(d, finding) {
   });
 }
 
-function toDecision(d, disposition, agent, finding = null) {
+// What the report said about this entry's identity, in three answers rather
+// than two: bound to a finding, checked against a report that carries none, or
+// never checked because no report was given. "Nobody looked" and "we looked and
+// it answers nothing" are different claims, and only the second is worth a
+// block of its own on the bridge's output.
+//
+// The fold's own statement, carried on the decision. `recordDecisions` builds
+// its ledger entries from a fixed field list and does not keep this one, so a
+// reader downstream of the ledger still has only the disposition to go on —
+// which is precisely what `onNotedRecord` re-derives trust from today.
+function reconciledAgainst(finding, checked) {
+  return checked ? finding !== null : null;
+}
+
+function toDecision(d, { disposition, agent, finding = null, checked = false }) {
   const label = `${disposition} decision ${JSON.stringify(d?.title)} from ${agent}`;
   return {
     id: d.id ?? null,
@@ -165,6 +191,7 @@ function toDecision(d, disposition, agent, finding = null) {
     confidence: d.confidence ?? null,
     disposition,
     reason: requireReason(d.reason, label),
+    reconciled: reconciledAgainst(finding, checked),
     // The batch, and no claim about who reported anything. This label was
     // written into `reporters` — so the ledger said `fix-auth-guard` had
     // reported the finding `fix-auth-guard` fixed, and the only field that
@@ -192,40 +219,30 @@ function toDecision(d, disposition, agent, finding = null) {
 // rather than dropped; `clipReason` bounds the rendered form at 500 characters,
 // which is a reason to keep `detail` short and not a reason to discard the
 // remedy the agent already worked out.
-function toNamedNotFixed(item, agent, n) {
+function toNamedNotFixed(item, { agent, n, finding = null, checked = false }) {
   const label = `named-not-fixed item ${JSON.stringify(item?.title)} from ${agent}`;
   const detail = requireReason(item.detail, label);
   const suggestion = typeof item.suggestion === 'string' ? item.suggestion.trim() : '';
   return {
     id: namedItemId(agent, n),
     title: requireTitle(item.title, label),
-    kind: item.kind ?? null,
+    // Through the same correction the other two dispositions get, including
+    // the `counterpart` this list once hardcoded to null — `scoreMatch`'s
+    // contract guard sits above the title branch, so a `contract` item, the
+    // likeliest kind here, matched nothing ever again without it.
+    ...identityOf(item, finding),
     // No severity: nobody triaged this item, and `scoreMatch` treats a missing
     // severity as equal to nothing, including another missing one. That costs a
     // positional match the stronger of two annotation scores and costs settling
     // nothing at all, since a `noted` entry settles nothing by disposition.
     severity: null,
     confidence: null,
-    file: item.file ?? null,
-    line: item.line ?? null,
-    // Carried, exactly as `toDecision` twenty lines up carries it. It was
-    // hardcoded null, and `scoreMatch`'s contract guard sits above the title
-    // branch — so a `contract` item, the likeliest kind for this list, matched
-    // nothing ever again and the channel was broken for its main case.
-    //
-    // Landing this carry while the disposition still settled would have been a
-    // net loss: today's counterpart guard kills a contract item BEFORE the
-    // title branch, which is an accidental protection against the settle hole
-    // above. Verified by execution — the same folded entry scores `null` with
-    // the counterpart dropped and `{score: 3}` with it carried. So the two
-    // changes ship together or not at all.
-    counterpart: item.counterpart ?? null,
     disposition: NAMED_NOT_FIXED_DISPOSITION,
     reason: suggestion ? `${detail} Suggested: ${suggestion}` : detail,
+    reconciled: reconciledAgainst(finding, checked),
     // The batch that noticed it, which is the whole of what is known about
-    // where this item came from: no review lane reported it, and it closed no
-    // commit. `reportersOf` will match it against nothing in the report, which
-    // is correct — the report has never seen it.
+    // where this item came from when no lane reported it, and it closed no
+    // commit either way.
     agent,
     fixCommit: null,
   };
@@ -254,6 +271,36 @@ function requireAgent(payload) {
   return agent;
 }
 
+// A batch may not mint the `noted` identity that excuses its own decision.
+//
+// `onNotedRecord` grants `uncoveredDecisions`' one exemption to any decision a
+// recorded `noted` entry matches at SETTLING_SCORE, and this file is where
+// those entries are minted — out of fields the fix agent supplies, for an item
+// the check never sees the report for. So a fold that both asserts a decision
+// and names the same identity as not-fixed hands the ledger the token that
+// excuses that decision from the next iteration on: the party whose decisions
+// are being checked writing its own exemption.
+//
+// Refused rather than reported, because the two claims cannot both be true.
+// One title, one kind and one file is ONE finding here — `upsert` merges on
+// exactly that key — so a batch saying it both decided that finding and did
+// not decide it has written something incoherent, and dropping the named item
+// loses nothing the `fixed` or `declined` entry does not already say. Across
+// batches too: which agent minted the token does not change what it excuses.
+function refuseSelfIssuedExemptions(decisions) {
+  for (const entry of decisions) {
+    if (entry.disposition !== NAMED_NOT_FIXED_DISPOSITION) continue;
+    const excused = decisions.find((d) => d.disposition !== NAMED_NOT_FIXED_DISPOSITION
+      && settlesSameThing(entry, d));
+    if (!excused) continue;
+    throw new Error(`named-not-fixed item ${JSON.stringify(entry.title)} from ${entry.agent} `
+      + `carries the identity of the ${excused.disposition} decision from ${excused.agent}, so `
+      + 'recording it would excuse that decision from the coverage check from the next iteration '
+      + 'on. Name the item under an identity of its own, or drop it — the decision already '
+      + 'says what happened to that finding');
+  }
+}
+
 // Every decision a batch of fix payloads implies, in payload order, ready for
 // `recordDecisions`.
 //
@@ -264,23 +311,33 @@ function requireAgent(payload) {
 // the ledger's name.
 export function foldFixPayloads(payloads, { report = null } = {}) {
   const findingFor = reportIndex(report);
+  // The FLAG, not the match: "no report was given" and "the report answers
+  // nothing" are different claims and `reconciledAgainst` keeps them apart.
+  const checked = report !== null && report !== undefined;
   const decisions = [];
+
   for (const payload of payloads) {
     const agent = requireAgent(payload);
     for (const d of payload.fixed ?? []) {
-      decisions.push(toDecision(d, 'fixed', agent, findingFor(d)));
+      decisions.push(toDecision(d, { disposition: 'fixed', agent, finding: findingFor(d), checked }));
     }
     for (const d of payload.declined ?? []) {
-      decisions.push(toDecision(d, 'declined', agent, findingFor(d)));
+      decisions.push(toDecision(d, { disposition: 'declined', agent, finding: findingFor(d), checked }));
     }
-    // Never reconciled, because there is nothing to reconcile against: no lane
-    // reported these, so the report has never seen them. `reportIndex` would
-    // return null for every one of them anyway; saying so here is what stops a
-    // later reader assuming the omission was an oversight.
+    // Reconciled against the report exactly as the two lists above are. This
+    // one used to skip it, on the grounds that no lane had reported these items
+    // so there was nothing to reconcile against, and two things were wrong with
+    // that. `fix.txt` sends an ASSIGNED finding here whenever a batch leaves one
+    // for later, so the report frequently does carry the item; and an identity
+    // that reaches the ledger unchecked is the identity `onNotedRecord` later
+    // vouches with, which made this the one list a fix agent could write its own
+    // exemption into.
     (payload.named_not_fixed ?? []).forEach((item, i) => {
-      decisions.push(toNamedNotFixed(item, agent, i + 1));
+      decisions.push(toNamedNotFixed(item, { agent, n: i + 1, finding: findingFor(item), checked }));
     });
   }
+
+  refuseSelfIssuedExemptions(decisions);
   return decisions;
 }
 
@@ -288,22 +345,38 @@ export function foldFixPayloads(payloads, { report = null } = {}) {
 // it would change. The bridge prints this: a fold that silently rewrites the
 // fields a fix agent supplied is a fold whose output nobody can read back
 // against the payload it came from.
+//
+// Every list the fold reads, `named_not_fixed` included, and each row says
+// which disposition it will become. The two unbound cases are different
+// accusations and the bridge prints them under different headings: an unbound
+// `fixed` or `declined` settles nothing and `converge.mjs --record --report`
+// names it, while an unbound `noted` records fine and becomes the identity that
+// excuses the next decision matching it.
+function payloadEntries(payload) {
+  return [
+    ...(payload.fixed ?? []).map((d) => ({ d, disposition: 'fixed' })),
+    ...(payload.declined ?? []).map((d) => ({ d, disposition: 'declined' })),
+    ...(payload.named_not_fixed ?? [])
+      .map((d) => ({ d, disposition: NAMED_NOT_FIXED_DISPOSITION })),
+  ];
+}
+
 export function reconciliations(payloads, report) {
   const findingFor = reportIndex(report);
   const changes = [];
   for (const payload of payloads) {
     const agent = payload?.agent ?? null;
-    for (const d of [...(payload.fixed ?? []), ...(payload.declined ?? [])]) {
+    for (const { d, disposition } of payloadEntries(payload)) {
       const finding = findingFor(d);
       if (!finding) {
-        changes.push({ agent, title: d.title, bound: false, fields: [] });
+        changes.push({ agent, title: d.title, disposition, bound: false, fields: [] });
         continue;
       }
       const before = identityOf(d, null);
       const after = identityOf(d, finding);
       const fields = Object.keys(after).filter((k) => before[k] !== after[k])
         .map((k) => ({ field: k, from: before[k], to: after[k] }));
-      if (fields.length) changes.push({ agent, title: d.title, bound: true, fields });
+      if (fields.length) changes.push({ agent, title: d.title, disposition, bound: true, fields });
     }
   }
   return changes;
