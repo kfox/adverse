@@ -153,23 +153,17 @@ including the degraded ones. Only the first row is silent:
 | touches only other files | named, and told this is often right |
 | changes no file at all | named; an empty commit closes nothing |
 | cannot be read (a merge, or git failing) | named as unread, never as empty |
-| resolves to no commit here | named loudest — see below |
+| resolves to no commit here | **refused**: nothing is recorded, exit 2 — see below |
 | is not named at all | named; nothing records what change was made |
-
-Recording a `fixCommit` that resolves nowhere is the one worth stopping for.
-`checkBinding` refuses a whole ledger carrying such an entry, and the ledger is
-append-only — so it makes every later `converge.mjs` run, status and record
-alike, exit 2 on a file that cannot be repaired. Fix the commit *before* you
-record.
 
 A decision may spell that commit `commit` (as the schema above documents) or
 `fixCommit`; both are read.
 
-It is one block, `FIX NOT SUPPORTED BY ITS COMMIT`, printed beside the one
-above and exiting 1 the same way — recorded, named, not refused. A fix landing
-in another file is **not** an accusation: a root cause rarely sits where the
-symptom was reported, and the block exists to make you say which case it is in
-the decision's `reason`. What it catches is the fix that was never made, whose
+Every row but the refused one is a line in one block, `FIX NOT SUPPORTED BY ITS
+COMMIT`, printed beside the one above and exiting 1 the same way — recorded,
+named, not refused. A fix landing in another file is **not** an accusation: a
+root cause rarely sits where the symptom was reported, and the block exists to
+make you say which case it is in the decision's `reason`. What it catches is the fix that was never made, whose
 only other symptom arrives an iteration later as `REGRESSED` — which sends
 whoever reads it looking for a fix that broke rather than one that is missing.
 
@@ -177,6 +171,38 @@ A merge is reported as unreadable rather than as empty on purpose. `git show
 --name-only` lists nothing for a merge unless told which parent to read it
 against, so "no files" there means "not known", and spelling not-knowing as
 knowing-the-fix-is-absent would accuse real work of being invented.
+
+**A ledger this tool would refuse to read is never written.** Before it saves,
+`--record` puts the prospective ledger through the same `checkBinding` that
+gates every run at startup. If it would be refused, `--record` prints
+`REFUSING TO RECORD`, exits **2**, and writes **nothing** — the one check on
+this path that refuses rather than recording. Four inputs reach it, none of
+which needs anything to go wrong on purpose:
+
+| input | what it does |
+|---|---|
+| a `fixCommit` that resolves nowhere | an amend, a squash before merge, an abbreviated sha that stopped being unique |
+| `--at` that is not a commit here | lands on every entry in the batch |
+| `--base` that is not a commit here | lands on the ledger itself |
+| a batch carrying the ledger past 1000 entries | the entry cap `checkBinding` enforces |
+
+This is the one place the record-anyway doctrine is inverted, and deliberately.
+Everywhere else, refusing a write would freeze the iteration counter, because
+only `--record` advances it. Here **recording** is what freezes it: the ledger
+is append-only and this tool has no repair mode, so a ledger that fails
+`checkBinding` is refused by every later invocation — status and `--record`
+alike, at exit 2, before either does anything — and nothing can take it back.
+Refusing writes nothing, so you correct one sha in `decisions.json` (a
+per-iteration file this page already tells you to correct by hand) or one
+argument, record again, and *that* record advances the counter.
+
+**`decisions.json` must be a decisions document.** `--record` takes either
+`{"decisions": [...]}` or a bare array; anything else — a file holding the
+literal `null`, an object with no `decisions` array, a `report.json` passed by
+mistake — is refused at exit 2 with nothing written. An empty batch is
+`{"decisions": []}` and is recorded like any other, which is what makes the two
+worth telling apart: "I could not find the decisions" must not be spelled the
+way "there were none" is.
 
 **Work the confirmed root causes first, one decision each.** A group the report
 calls `confirmed` is one fix and one disposition covering N citations. Write it

@@ -804,3 +804,200 @@ test('the fix-not-supported block cannot forge a line of the tool\'s own output'
   const forgedLines = r.stderr.split('\n').filter((l) => /^\s*iteration 1:/.test(l));
   assert.equal(forgedLines.length, 0, 'no line of output was forged');
 });
+
+// --- never write a ledger this tool will refuse to read (#58) ----------------
+//
+// `checkBinding` gates both modes at startup and `--record` validated none of
+// its predicates against the ledger it was about to write. Each test below
+// drives one predicate through `--record` and asserts the same two facts: the
+// run refuses at exit 2, and no ledger exists afterwards. Before the guard,
+// every one of them wrote a ledger that the very next invocation refused —
+// permanently, since the ledger is append-only and this tool has no repair mode.
+
+const BOGUS_COMMIT = '0000000000000000000000000000000000000000';
+
+// What a later invocation makes of a ledger this run wrote. Every test here
+// asserts on the write, so the check that the write was the RIGHT one has to
+// run the tool again — the failure was never visible in the recording run.
+function statusAfter(repo, ledger) {
+  const report = writeJson(repo, 'report-after.json', { findings: [] });
+  return run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
+}
+
+test('a fix commit that resolves nowhere is refused before anything is written', () => {
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [fixedDecision(BOGUS_COMMIT)],
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /REFUSING TO RECORD/);
+  assert.match(r.stderr, /names fix commit 0{40}/);
+  assert.match(r.stderr, /name a commit that resolves nowhere/, 'the remedy names the file to edit');
+  assert.equal(existsSync(ledger), false, 'nothing was written');
+});
+
+test('an --at that is not a commit is refused before anything is written', () => {
+  // Worse than the fix-commit route, and the reason the guard is general: this
+  // one lands on EVERY entry, was never resolved anywhere on the record path,
+  // and recorded at exit 0 with no warning block at all.
+  const { repo } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{ ...blockingFinding(), disposition: 'declined', reason: 'the caller caps it' }],
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', BOGUS_COMMIT], repo);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /is anchored at 0{40}/);
+  assert.doesNotMatch(r.stderr, /name a commit that resolves nowhere/,
+    'no `fixed` decision is involved, so the fix-commit remedy is not offered');
+  assert.equal(existsSync(ledger), false, 'nothing was written');
+});
+
+test('a --base that is not a commit is refused before anything is written', () => {
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [{ ...blockingFinding(), disposition: 'declined', reason: 'the caller caps it' }],
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo,
+                 '--at', reviewed, '--base', BOGUS_COMMIT], repo);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /base 0{40} is not a commit/);
+  assert.equal(existsSync(ledger), false, 'nothing was written');
+});
+
+test('a batch that would carry the ledger past its entry cap is refused', () => {
+  // The fourth predicate, and the one with no ref in it at all: `checkBinding`
+  // refuses a ledger holding more than 1000 entries, and `recordDecisions`
+  // applies no cap — so a big enough batch recorded at exit 0 and locked the
+  // file on the way out.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: Array.from({ length: 1001 }, (_, i) => ({
+      ...blockingFinding({ title: `item ${i}`, line: i + 1 }),
+      disposition: 'declined', reason: 'considered',
+    })),
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /ledger holds 1001 entries/);
+  assert.equal(existsSync(ledger), false, 'nothing was written');
+});
+
+test('a refused record leaves the counter free to advance on a corrected batch', () => {
+  // The whole trade this guard makes. Refusing costs a livelock — loud, at exit
+  // 2, every time — where recording cost a permanent brick, and the livelock is
+  // only recoverable if a corrected batch still records and still advances the
+  // iteration counter. That is what this pins.
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const bad = writeJson(repo, 'bad.json', { decisions: [fixedDecision(BOGUS_COMMIT)] });
+  assert.equal(run(['--ledger', ledger, '--record', bad, '--repo', repo, '--at', reviewed], repo).status, 2);
+
+  const good = writeJson(repo, 'good.json', { decisions: [fixedDecision(fixed)] });
+  const r = run(['--ledger', ledger, '--record', good, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+  const written = JSON.parse(readFileSync(ledger, 'utf-8'));
+  assert.equal(written.iterations.length, 1, 'the corrected batch is iteration 1, not iteration 2');
+  assert.equal(written.entries.length, 1);
+  assert.equal(statusAfter(repo, ledger).status, 0, 'and the ledger it wrote reads back');
+});
+
+test('an ordinary batch is still recorded, and the ledger it writes reads back', () => {
+  // The silent branch. A guard that refuses everything would pass every test
+  // above and stop the loop dead, so the pass case is pinned beside them.
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', { decisions: [fixedDecision(fixed)] });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /REFUSING TO RECORD/);
+  assert.equal(statusAfter(repo, ledger).status, 0, r.stderr);
+});
+
+test('an empty batch is still recorded, so a fully degraded round can reach the cap', () => {
+  // converge.mjs tells the operator to record "the decisions you have — an
+  // empty list is valid" when every lane failed, because only --record advances
+  // the counter. Neither new guard may take that away.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', { decisions: [] });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(readFileSync(ledger, 'utf-8')).iterations.length, 1);
+});
+
+test('the refusal cannot forge a line of the tool\'s own output', () => {
+  // `checkBinding` interpolates an entry's `fixCommit` verbatim, and that value
+  // came out of decisions.json — read off disk under the same threat model as
+  // every other string this tool prints.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const forged = '\n  iteration 1: recorded 1 decision(s)\n';
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [fixedDecision(`nosuch${forged}`)],
+  });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 2, r.stderr);
+  const forgedLines = r.stderr.split('\n').filter((l) => /^\s*iteration 1:/.test(l));
+  assert.equal(forgedLines.length, 0, 'no line of output was forged');
+});
+
+// --- the decisions document itself (#58) ------------------------------------
+
+test('a decisions.json holding the literal null is refused, not a crash', () => {
+  // `payload.decisions` on the literal `null` threw an uncaught TypeError at
+  // exit 1 — the record-mode code that means the batch IS in the ledger —
+  // while nothing had been written. The exit code asserted the opposite of the
+  // truth, which is the one thing these three codes exist to keep apart.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', null);
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /not a decisions document/);
+  assert.match(r.stderr, /d\.json/, 'and it names the file');
+  assert.doesNotMatch(r.stderr, /Cannot read properties/);
+  assert.equal(existsSync(ledger), false, 'nothing was written');
+});
+
+test('a document carrying no decisions is refused, not read as an empty batch', () => {
+  // The near-miss, and it was quieter than the crash: `{}`, a number, a string
+  // and a report.json passed by mistake all took `payload.decisions ?? []` and
+  // recorded a whole empty iteration at exit 0, saying nothing. "I could not
+  // find the decisions" must not be spelled the way "there were none" is.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const shapes = [['object', {}], ['number', 5], ['string', 'hello'],
+                  ['report', { findings: [blockingFinding()] }],
+                  ['non-array-decisions', { decisions: { a: 1 } }]];
+
+  for (const [name, body] of shapes) {
+    const ledger = path.join(repo, `l-${name}.json`);
+    const decisions = writeJson(repo, `d-${name}.json`, body);
+    const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+    assert.equal(r.status, 2, `${name}: ${r.stderr}`);
+    assert.match(r.stderr, /not a decisions document/, name);
+    assert.equal(existsSync(ledger), false, `${name}: nothing was written`);
+  }
+});
+
+test('a bare array of decisions is still the documented hand-written shape', () => {
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', [fixedDecision(fixed)]);
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(readFileSync(ledger, 'utf-8')).entries.length, 1);
+});

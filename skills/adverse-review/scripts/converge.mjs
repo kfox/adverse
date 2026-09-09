@@ -20,6 +20,11 @@
 // because a branch that does not record makes the cap unreachable and the loop
 // non-terminating. Each check prints its own named block, so "which one" is
 // read off stderr rather than guessed from the code.
+//
+// One check on this path does refuse, at exit 2 with nothing written: the
+// prospective ledger is put through `checkBinding` before it is saved, because
+// a ledger this tool will not read back is the one write it cannot take back.
+// See "Never write a ledger this tool will refuse to read" below.
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -28,9 +33,9 @@ import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
-  UNREPORTED_DISPOSITION, checkBinding, clipReason, convergenceStatus, emptyLedger,
-  loadLedger, recordDecisions, requireFindings, saveLedger, summarizeDispositions,
-  uncoveredDecisions, unsupportedFixes,
+  FIX_SUPPORT, UNREPORTED_DISPOSITION, checkBinding, clipReason, convergenceStatus,
+  emptyLedger, loadLedger, recordDecisions, requireFindings, saveLedger,
+  summarizeDispositions, uncoveredDecisions, unsupportedFixes,
 } = await importFromSrc('ledger.mjs');
 const { filesChangedIn, makeAnchorTracer, resolveRef } = await importFromSrc('trace.mjs');
 
@@ -70,6 +75,27 @@ function digest(file) {
   }
 }
 
+// The decisions a `--record` payload carries, in either documented shape — the
+// `{ decisions: [...] }` object decisions.mjs writes, or the bare array
+// references/convergence-loop.md teaches an operator to hand-write — or null
+// for a document that is neither.
+//
+// Null rather than an empty list, and the caller refuses on it, because this is
+// `requireFindings`' rule applied to the file beside the report: "I could not
+// find the decisions" must not be spelled the same way as "there were none".
+// An empty batch IS legitimate and stays so — the loop reference instructs one
+// when every lane failed — which is exactly why the two must be told apart
+// here. Both halves of the confusion were live: a document holding the literal
+// `null` died on `payload.decisions` with an uncaught TypeError at exit 1 —
+// the record-mode code that means the batch IS in the ledger — while nothing
+// had been written; and `{}`, `5`, `"hello"` and a report.json passed by
+// mistake each recorded a whole empty iteration at exit 0 and said nothing.
+function decisionsIn(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.decisions)) return payload.decisions;
+  return null;
+}
+
 // Both modes below render strings out of JSON read off disk — untrusted files —
 // as PLAIN TEXT to stdout, which is what the Skill tells the orchestrating agent
 // to read and act on. `clipReason` bounds length and strips control bytes but
@@ -90,21 +116,40 @@ try {
   process.exit(2);
 }
 
+const resolveHere = (ref) => resolveRef(repo, ref);
+
+// One rendering of a `checkBinding` refusal, for the two places that make one:
+// the ledger read at startup, and the ledger about to be written below. Every
+// problem is flattened and clipped like every other disk-read string this tool
+// prints — `checkBinding` interpolates an entry's `atCommit` and `fixCommit`
+// verbatim, and those come off the same untrusted JSON as a `reason`, so a ref
+// carrying a newline could otherwise forge a line of this tool's own output.
+function refuseBinding(problems, lead, tail = '') {
+  process.stderr.write(`converge: ${lead}\n`
+    + problems.map((p) => `  - ${oneLine(p)}\n`).join('')
+    + tail);
+  process.exit(2);
+}
+
 // A ledger naming another repository used to load and adjudicate findings it
 // had never seen — loadLedger checks only `version`. Commits cannot be faked
 // across repositories, so they are the binding.
-const bindingProblems = checkBinding(ledger, (ref) => resolveRef(repo, ref));
+const bindingProblems = checkBinding(ledger, resolveHere);
 if (bindingProblems.length) {
-  process.stderr.write(`converge: this ledger does not belong to this repository:\n`
-    + bindingProblems.map((p) => `  - ${p}\n`).join(''));
-  process.exit(2);
+  refuseBinding(bindingProblems, 'this ledger does not belong to this repository:');
 }
 
 // --- record mode -------------------------------------------------------------
 
 if (values.record) {
-  const payload = readJson(values.record, 'converge');
-  const decisions = Array.isArray(payload) ? payload : payload.decisions ?? [];
+  const decisions = decisionsIn(readJson(values.record, 'converge'));
+  if (decisions === null) {
+    process.stderr.write(`converge: ${oneLine(values.record)}: this is not a decisions `
+      + 'document — it carries no `decisions` array and is not one itself. Pass the file\n'
+      + '  `decisions.mjs --out` wrote, or a bare array. An empty batch is spelled\n'
+      + '  `{"decisions": []}` and is recorded like any other.\n');
+    process.exit(2);
+  }
 
   // `atCommit` means "the commit these line numbers are valid at", and that is
   // the tree the panel READ — not the tree that exists after the fixes. Passing
@@ -184,6 +229,62 @@ if (values.record) {
   // decisions.json carries no `base` field (SKILL.md Phase 7) — the repo's
   // pinned base comes from the CLI, the same way triage.mjs already takes it.
   next.base ??= values.base ?? null;
+
+  // Never write a ledger this tool will refuse to read.
+  //
+  // `checkBinding` gates BOTH modes at startup, above, and `--record` used to
+  // validate none of its predicates against the ledger it was about to write.
+  // Four ways in, none needing an attacker: a `fixCommit` that resolves nowhere
+  // (`git commit --amend`, a squash before merge, an abbreviated sha that
+  // stopped being unique), an `--at` or a `--base` that is not a commit here —
+  // neither is resolved anywhere else on this path — and a batch that carries
+  // the ledger past the entry cap. The ledger is append-only and this tool has
+  // no repair mode, so such a write is permanent: every later invocation, status
+  // and `--record` alike, exits 2 before doing anything, the iteration counter
+  // freezes where it stands, and the cap can never fire. Checked against `next`
+  // rather than a special case per predicate, because the predicates belong to
+  // `checkBinding` and a copy here would drift from them.
+  //
+  // This REFUSES where every other check on this path records anyway, and the
+  // inversion is deliberate — assume it was, rather than that it was written
+  // backwards. The standing doctrine is right for the others: only `--record`
+  // advances the counter, so a check that stopped the write would make the cap
+  // unreachable. It is inverted here because RECORDING is the action that stops
+  // the counter forever. Refusing writes nothing, so the operator corrects one
+  // sha in decisions.json — a per-iteration input references/convergence-loop.md
+  // already tells them to correct by hand — or one argument, records again, and
+  // THAT advances the counter.
+  //
+  // A reviewer proposed recording the batch with the offending entry's
+  // `fixCommit` nulled and its reason kept, so the counter advances. Weighed and
+  // declined: it writes a permanently unverifiable `fixed` claim into an
+  // append-only file, which is the exact silence the `fixed`-claim check exists
+  // to break, and it closes one of the four ways in. Its real point stands —
+  // refusing trades a permanent brick for a recoverable livelock — and the trade
+  // is worth it only because a livelock needs an operator or agent that keeps
+  // supplying the same bad ref and is loud at exit 2 every time, while the brick
+  // arrives by accident, once, in silence.
+  const wouldRefuse = checkBinding(next, resolveHere);
+  if (wouldRefuse.length) {
+    // Selected on the branch `unsupportedFixes` reports, not on the wording of
+    // its message: the remedy for this one names a file to edit, and the others
+    // name an argument.
+    const unresolvedFixes = unsupported.filter((u) => u.status === FIX_SUPPORT.UNRESOLVED);
+    refuseBinding(wouldRefuse,
+      'REFUSING TO RECORD — this ledger would be unreadable from the next run on:',
+      (unresolvedFixes.length
+        ? `  ${unresolvedFixes.length} \`fixed\` decision(s) name a commit that resolves `
+          + `nowhere: ${unresolvedFixes.map((u) => oneLine(u.commit)).join(', ')}.\n`
+        : '')
+      + '  NOTHING was written and the iteration counter did not advance. This is the\n'
+      + '  one check here that refuses instead of recording: the ledger is append-only\n'
+      + '  and this tool has no repair mode, so a ledger that fails this check is\n'
+      + '  refused by every later run, at exit 2, with no way back. Correct the input —\n'
+      + `  ${oneLine(values.record)} is a per-iteration file meant to be corrected by\n`
+      + '  hand, and --at and --base are arguments — then record again. That record\n'
+      + '  advances the counter.\n');
+  }
+
   saveLedger(values.ledger, next);
   // recordDecisions derived the iteration number itself; read back what it
   // used rather than computing (ledger.iterations ?? []).length + 1 a second

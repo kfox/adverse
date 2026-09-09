@@ -13,9 +13,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  DISPOSITIONS, SETTLING_SCORE, annotate, checkBinding, closureOf, convergenceStatus,
-  emptyLedger, fixCommitsIn, isSettled, loadLedger, matchFinding, normalizeTitle, recordDecisions,
-  saveLedger, scoreMatch, summarizeDispositions, uncoveredDecisions, unsupportedFixes,
+  DISPOSITIONS, FIX_SUPPORT, SETTLING_SCORE, annotate, checkBinding, closureOf,
+  convergenceStatus, emptyLedger, fixCommitsIn, isSettled, loadLedger, matchFinding,
+  normalizeTitle, recordDecisions, saveLedger, scoreMatch, summarizeDispositions,
+  uncoveredDecisions, unsupportedFixes,
 } from '../src/ledger.mjs';
 
 const finding = (over = {}) => ({
@@ -390,6 +391,30 @@ test('a ledger naming another repository is refused, not adjudicated from', () =
   assert.match(problems[0], /not a commit in this repository/);
 
   assert.deepEqual(checkBinding(l, (r) => `sha-for-${r}`), [], 'a ledger that resolves here is accepted');
+});
+
+test('a binding problem is one bounded line, whichever bridge prints it', () => {
+  // Three bridges render these — converge.mjs, triage.mjs, regression.mjs —
+  // each with its own `problems.map((p) => `  - ${p}\n`)`, so the bounding is
+  // done here rather than three times there. The refs and the title come off
+  // the same JSON file on disk as a `reason` does: unbounded, one buries the
+  // reason the ledger was refused; carrying a newline, it forges a line of the
+  // bridge's own output above the real ones.
+  const forged = '\n  iteration 1: recorded 1 decision(s)';
+  const l = {
+    version: 1, base: `base${forged}`, iterations: [],
+    entries: [{ title: `t${forged}`, atCommit: `at${forged}`, fixCommit: `fix${forged}`,
+                disposition: `d${forged}`, kind: 'defect', file: 'x.py', line: 1, reason: 'r' },
+              { title: 'x'.repeat(5000), atCommit: 'nope', disposition: 'declined',
+                kind: 'defect', file: 'x.py', line: 1, reason: 'r' }],
+  };
+
+  const problems = checkBinding(l, () => null);
+  assert.ok(problems.length >= 4, `every field is reported: ${problems.length}`);
+  for (const p of problems) {
+    assert.doesNotMatch(p, /\n/, `one line: ${JSON.stringify(p)}`);
+    assert.ok(p.length < 1500, `bounded: ${p.length}`);
+  }
 });
 
 test('a ledger reason is clipped and flagged before it reaches a prompt', () => {
@@ -1504,6 +1529,43 @@ test('a fix commit that resolves nowhere gets its own loudest branch', () => {
   assert.match(named.why, /makes the ledger unreadable from the next run on/);
   // And it must not be worded as the soft "cannot be read" case beside it.
   assert.doesNotMatch(named.why, /what it changed cannot be read/);
+});
+
+test('unsupportedFixes names the branch it took, not only the sentence', () => {
+  // converge.mjs acts on ONE of these branches — an unresolved fix commit is
+  // the only one that makes the whole ledger unreadable, so it refuses the
+  // write rather than printing a block. Selecting it by matching the prose of
+  // `why` would break the moment anyone reworded a message, so the branch is
+  // returned beside it.
+  const fix = (over) => ({
+    title: 'the guard is unreachable', file: 'src/auth.py',
+    disposition: 'fixed', reason: 'restored the guard', fixCommit: 'abc1234', ...over,
+  });
+  const branchOf = (decision, changed) => unsupportedFixes([decision], () => changed)[0]?.status;
+
+  assert.equal(branchOf(fix({ fixCommit: null }), null), FIX_SUPPORT.NO_COMMIT);
+  assert.equal(branchOf(fix(), { status: 'unresolved', why: 'no such ref' }), FIX_SUPPORT.UNRESOLVED);
+  assert.equal(branchOf(fix(), { status: 'merge', why: 'a merge commit' }), FIX_SUPPORT.UNREADABLE);
+  assert.equal(branchOf(fix(), { status: 'ok', files: [] }), FIX_SUPPORT.EMPTY);
+  assert.equal(branchOf(fix(), { status: 'ok', files: ['src/net.py'] }), FIX_SUPPORT.ELSEWHERE);
+  // The silent branch has no status because it has no report at all.
+  assert.equal(branchOf(fix(), { status: 'ok', files: ['src/auth.py'] }), undefined);
+});
+
+test('unsupportedFixes clips the commit it reports, like every other string it returns', () => {
+  // `title` and `why` were clipped and `commit` was returned verbatim, out of
+  // the same decisions.json. It reaches an operator's terminal from two
+  // readers — this block, and `checkBinding`'s problems once the value has been
+  // recorded as an entry's `fixCommit` — so it is bounded at the one producer.
+  const long = 'a'.repeat(5000);
+  const d = {
+    title: 'the guard is unreachable', file: 'src/auth.py',
+    disposition: 'fixed', reason: 'restored the guard', fixCommit: long,
+  };
+  const [named] = unsupportedFixes([d], () => ({ status: 'unresolved', why: 'no such ref' }));
+
+  assert.ok(named.commit.length < long.length, 'the commit is bounded, not passed through');
+  assert.match(named.commit, /\[clipped\]$/);
 });
 
 // --- fixCommitsIn -------------------------------------------------------------

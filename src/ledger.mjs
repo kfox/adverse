@@ -166,6 +166,19 @@ export function loadLedger(file) {
 export function checkBinding(ledger, resolve) {
   const problems = [];
 
+  // A value read off the ledger, rendered for a problem line.
+  //
+  // Bounded and flattened at the PRODUCER, because three bridges print these
+  // — converge.mjs, triage.mjs, regression.mjs — each with its own
+  // `problems.map((p) => \`  - ${p}\n\`)`, and every one of them rendered a
+  // title, a ref and a disposition straight off a JSON file on disk. Unbounded,
+  // one of those buries the reason the ledger was refused under its own output;
+  // carrying a newline, it can forge a line of the bridge's own output above
+  // the real ones. Every problem here is one sentence a bridge prints as one
+  // line, so a newline in an interpolated value is never content — unlike a
+  // `reason`, which is prose and is why `clipReason` keeps them.
+  const shown = (v) => clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
+
   // Resolve each distinct ref once, negatives included.
   //
   // `resolveRef` deliberately does not cache negatives — a ref that does not
@@ -188,7 +201,7 @@ export function checkBinding(ledger, resolve) {
   };
 
   if (ledger.base && !resolveOnce(ledger.base)) {
-    problems.push(`base ${ledger.base} is not a commit in this repository`);
+    problems.push(`base ${shown(ledger.base)} is not a commit in this repository`);
   }
   for (const e of ledger.entries ?? []) {
     // The caller refuses the ledger on the first problem, so listing every one
@@ -202,11 +215,11 @@ export function checkBinding(ledger, resolve) {
     // and it passed clean. `recordDecisions` always writes one, so an entry
     // without it did not come from this tool.
     if (!e.atCommit) {
-      problems.push(`entry ${JSON.stringify(e.title)} carries no atCommit; every recorded decision has one`);
+      problems.push(`entry ${JSON.stringify(shown(e.title))} carries no atCommit; every recorded decision has one`);
       continue;
     }
     if (!resolveOnce(e.atCommit)) {
-      problems.push(`entry ${JSON.stringify(e.title)} is anchored at ${e.atCommit}, which is not a commit in this repository`);
+      problems.push(`entry ${JSON.stringify(shown(e.title))} is anchored at ${shown(e.atCommit)}, which is not a commit in this repository`);
     }
     // Validity when present, not presence. `atCommit` above is required
     // because every entry carries one; `fixCommit` is null on every
@@ -217,10 +230,14 @@ export function checkBinding(ledger, resolve) {
     // silence: the ledger would answer "this commit closed nothing", which is
     // the derived form of `--closed-by-none`.
     if (e.fixCommit && !resolveOnce(e.fixCommit)) {
-      problems.push(`entry ${JSON.stringify(e.title)} names fix commit ${e.fixCommit}, which is not a commit in this repository`);
+      problems.push(`entry ${JSON.stringify(shown(e.title))} names fix commit ${shown(e.fixCommit)}, which is not a commit in this repository`);
     }
     if (e.disposition !== undefined && !DISPOSITIONS.includes(e.disposition)) {
-      problems.push(`entry ${JSON.stringify(e.title)} has disposition ${JSON.stringify(e.disposition)}, which is not one of ${DISPOSITIONS.join(', ')}`);
+      // Stringified first and bounded second, unlike the title beside it: a
+      // disposition that is not a string at all is exactly what this branch
+      // reports, and `String(…)` would render every such value as the same
+      // `[object Object]`.
+      problems.push(`entry ${JSON.stringify(shown(e.title))} has disposition ${shown(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
   }
   return problems;
@@ -876,10 +893,36 @@ export function fixCommitOf(decision) {
 // about a location to check — so it is silent rather than reported. And this
 // REPORTS; it does not refuse, for the reason `uncoveredDecisions` gives at
 // length: only `--record` advances the iteration counter, and a branch that
-// does not record makes the cap unreachable.
+// does not record makes the cap unreachable. `UNRESOLVED` is the exception its
+// own branch explains, and converge.mjs acts on it by name.
+
+// Which of the branches below a report came from, carried beside the sentence.
+//
+// The branch is what a caller has to act on — `UNRESOLVED` alone makes the
+// whole ledger unreadable, so converge.mjs treats it differently from the rest
+// — and the alternative is matching the prose of `why`, which is output text
+// and free to be reworded by anyone improving a message.
+export const FIX_SUPPORT = Object.freeze({
+  NO_COMMIT: 'no-commit',
+  UNRESOLVED: 'unresolved',
+  UNREADABLE: 'unreadable',
+  EMPTY: 'empty',
+  ELSEWHERE: 'elsewhere',
+});
+
 export function unsupportedFixes(decisions, filesChanged) {
   const unsupported = [];
-  const name = (d, commit, why) => ({ title: clipReason(d.title ?? ''), commit, why });
+  // `commit` is clipped like every other string this returns. It comes off the
+  // same decisions.json as `title`, and it reaches an operator's terminal from
+  // two readers: this function's own block, and `checkBinding`'s problems once
+  // the value has been recorded as an entry's `fixCommit`. Clipping at the one
+  // producer covers both rather than leaving each reader to remember.
+  const name = (d, { commit = null, status, why }) => ({
+    title: clipReason(d.title ?? ''),
+    commit: commit === null ? null : clipReason(commit),
+    status,
+    why,
+  });
 
   for (const d of decisions) {
     if (d?.disposition !== 'fixed') continue;
@@ -893,8 +936,8 @@ export function unsupportedFixes(decisions, filesChanged) {
     // so today a fix recorded this way is invisible to the machinery that
     // picks a disinterested reviewer, silently.
     if (!commit) {
-      unsupported.push(name(d, null,
-        'it names no commit at all, so nothing records what change it made'));
+      unsupported.push(name(d, { status: FIX_SUPPORT.NO_COMMIT,
+        why: 'it names no commit at all, so nothing records what change it made' }));
       continue;
     }
 
@@ -904,29 +947,32 @@ export function unsupportedFixes(decisions, filesChanged) {
     // an entry whose fix commit resolves nowhere, and the ledger is append-only
     // — so recording this makes every later `converge.mjs` run, status and
     // record both, exit 2 on a file that cannot be repaired. The remedies the
-    // block offers for the other branches do not apply to it.
+    // block offers for the other branches do not apply to it, and converge.mjs
+    // refuses the write outright on `FIX_SUPPORT.UNRESOLVED` rather than
+    // printing one.
     if (changed.status === 'unresolved') {
-      unsupported.push(name(d, commit,
-        `${clipReason(changed.why ?? 'that commit does not resolve here')}. Recording this `
-        + 'makes the ledger unreadable from the next run on — fix the commit before you record'));
+      unsupported.push(name(d, { commit, status: FIX_SUPPORT.UNRESOLVED,
+        why: `${clipReason(changed.why ?? 'that commit does not resolve here')}. Recording this `
+          + 'makes the ledger unreadable from the next run on — fix the commit before you record' }));
       continue;
     }
     if (changed.status !== 'ok') {
-      unsupported.push(name(d, commit,
-        `what it changed cannot be read: ${clipReason(changed.why ?? 'no reason given')}`));
+      unsupported.push(name(d, { commit, status: FIX_SUPPORT.UNREADABLE,
+        why: `what it changed cannot be read: ${clipReason(changed.why ?? 'no reason given')}` }));
       continue;
     }
     if (!changed.files.length) {
-      unsupported.push(name(d, commit, 'that commit changes no file at all'));
+      unsupported.push(name(d, { commit, status: FIX_SUPPORT.EMPTY,
+        why: 'that commit changes no file at all' }));
       continue;
     }
     if (!d.file) continue;
     if (changed.files.includes(d.file)) continue;
 
-    unsupported.push(name(d, commit,
-      `that commit does not touch ${clipReason(d.file)}; it touches `
-      + `${changed.files.slice(0, MAX_NAMED_FILES).map((f) => clipReason(f)).join(', ')}`
-      + `${changed.files.length > MAX_NAMED_FILES ? ', …' : ''}`));
+    unsupported.push(name(d, { commit, status: FIX_SUPPORT.ELSEWHERE,
+      why: `that commit does not touch ${clipReason(d.file)}; it touches `
+        + `${changed.files.slice(0, MAX_NAMED_FILES).map((f) => clipReason(f)).join(', ')}`
+        + `${changed.files.length > MAX_NAMED_FILES ? ', …' : ''}` }));
   }
   return unsupported;
 }
