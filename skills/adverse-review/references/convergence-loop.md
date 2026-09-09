@@ -133,8 +133,19 @@ advanced, for the reason spelled out under Phase 8: a branch that does not
 record makes the cap unreachable and the loop non-terminating. Three ordinary
 things legitimately match no report finding — a `noted` item decided in a later
 iteration, a root-cause citation synthesis could not resolve, and any decision
-recorded without `--report` — and the first two are exempted by the ledger
-check rather than by refusing.
+recorded without `--report`. Only the first is exempted, by the ledger check;
+the second is listed like any other, and the third is not checked at all
+because there is no report to check it against. This paragraph used to promise
+an exemption for the root-cause one that no code has ever granted.
+
+**The exemption is not granted by every `noted` entry.** One the fold checked
+against `report.json` and could not bind excuses nothing: its title, kind and
+file came from the fix payload and nothing corrected them, so honoring it would
+let a batch mint in one iteration the token that excuses its own decision in
+the next. Such a decision is listed with its own sentence, saying that is what
+happened. A `noted` entry the report DID carry still excuses the decision that
+answers it — the report chose its fields — and so does one from a hand-written
+`decisions.json`, which makes no reconciliation claim at all.
 
 The fix is upstream: pass `--report` to `decisions.mjs` and it corrects the
 fields off `report.json` before they ever reach a decision. A hand-written
@@ -323,10 +334,17 @@ heading that said "out of scope, named not fixed"; nothing was recorded, and the
 next iteration two independent round-1 reviewers spent a lane-pair's attention
 re-deriving it. So the payload carries a `named_not_fixed` list, `decisions.mjs`
 mints an id for each entry (`NF-<batch>-<n>`, which cannot collide with triage's
-`F<n>`) and records it `noted` with the agent's own reasoning. `noted` settles
-nothing, deliberately: an untriaged footnote annotates the next briefing and
-adjudicates no finding. It used to be recorded `deferred`, which settles — so a
-fix agent copying a blocking critical's title into `named_not_fixed`, which
+`F<n>`) and records it `noted` with the agent's own reasoning. Its identity
+fields are corrected off `report.json` exactly as `fixed` and `declined` are:
+`fix.txt` routes an ASSIGNED finding into this list whenever a batch leaves one
+for later, so the report often does carry the item, and an identity that
+reaches the ledger unchecked is one the coverage check would otherwise have to
+take the batch's word for. Each entry records which of the two it was, and the
+fold prints the ones the report does not carry under their own heading.
+`noted` settles nothing, deliberately: an untriaged footnote annotates the next
+briefing and adjudicates no finding. It used to be recorded `deferred`, which
+settles — so a fix agent copying a blocking critical's title into
+`named_not_fixed`, which
 `fix.txt` tells it to do verbatim, closed that critical with no code change and
 no warning. Read the block it prints before you record — a channel you forward
 without reading is the same footnote in a new place, and **an item that is

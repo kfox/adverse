@@ -122,6 +122,24 @@ test('an item with no detail is refused here, not left to die inside the ledger'
     /no reason/);
 });
 
+test('a null in a payload list is refused by name, not by TypeError', () => {
+  // The sibling of the `[null]` a decisions document could carry into the
+  // ledger, one step earlier in the flow. `validateFix` runs first and the
+  // bridge runs it — and this file keeps its own guards anyway, precisely so a
+  // caller that skipped the validator cannot mint an entry that dies elsewhere
+  // wearing another component's name. All three lists, because a guard on one
+  // of three is how two of them drift.
+  for (const list of ['fixed', 'declined', 'named_not_fixed']) {
+    for (const bad of [null, 5, 'hello', []]) {
+      const p = [payload({ fixed: [], declined: [], named_not_fixed: [], [list]: [bad] })];
+      assert.throws(() => foldFixPayloads(p),
+        new RegExp(`${list}\\[0\\] from fix-auth-guard is `), `${list} holding ${String(bad)}`);
+      assert.throws(() => reconciliations(p, merged),
+        new RegExp(`${list}\\[0\\] from fix-auth-guard is `), `reconciliations, ${list}`);
+    }
+  }
+});
+
 test('a payload with no agent label is refused — every decision names its reporter', () => {
   assert.throws(() => foldFixPayloads([payload({ agent: '  ' })]), /`agent` label/);
   assert.throws(() => foldFixPayloads([{}]), /`agent` label/);
@@ -466,9 +484,10 @@ test('a stated file that disagrees still refuses to bind', () => {
 
 // --- a `noted` identity is the ledger's one vouching token -------------------
 //
-// `onNotedRecord` grants `uncoveredDecisions`' single exemption to any decision
-// a recorded `noted` entry matches at SETTLING_SCORE, and this file is where
-// those entries are minted — out of fields a fix agent supplies. So what the
+// `uncoveredDecisions` grants its single exemption to any decision a recorded
+// `noted` entry matches at SETTLING_SCORE — and, since the cross-iteration
+// form was closed, only when the report carried that entry. This file is where
+// those entries are minted, out of fields a fix agent supplies, so what the
 // fold will and will not mint is what decides whether the party being checked
 // can write its own exemption.
 
@@ -524,7 +543,7 @@ test('a batch cannot name the identity of a decision it is asserting', () => {
 });
 
 test('a declined decision cannot be vouched for by its own batch either', () => {
-  // `onNotedRecord` does not ask what disposition it is excusing, so neither
+  // The exemption does not ask what disposition it is excusing, so neither
   // does this: a decline that settles the wrong finding is the failure the
   // coverage check exists to name.
   assert.throws(() => foldFixPayloads([payload({
@@ -554,6 +573,26 @@ test('a named item beside a decision it does not settle is minted, not refused',
   })], { report: merged });
   assert.deepEqual(elsewhere.map((d) => d.disposition), ['fixed', 'noted']);
   assert.equal(elsewhere[1].file, 'src/session.py', 'a stated anchor that disagrees does not bind');
+});
+
+test('the fold\'s reconciliation reaches the ledger, which is where it is read', () => {
+  // The field the ledger's whitelist used to end one short of. `ac8f729` wrote
+  // it onto every folded decision and nothing downstream could see it, so a
+  // `noted` identity the report CARRIED and one a payload made up were the same
+  // entry to every later reader — and `uncoveredDecisions` grants its one
+  // exemption on exactly that difference.
+  const bound = foldFixPayloads([payload()], { report: merged });
+  const unbound = foldFixPayloads(
+    [payload({ fixed: [], named_not_fixed: [namedItem()] })], { report: merged });
+  const unchecked = foldFixPayloads([payload({ fixed: [], named_not_fixed: [namedItem()] })]);
+
+  const recorded = (decisions) => recordDecisions(emptyLedger(), decisions,
+    { atCommit: 'deadbee' }).entries[0].reconciled;
+  assert.equal(recorded(bound), true);
+  assert.equal(recorded(unbound), false);
+  assert.equal(recorded(unchecked), null);
+  assert.equal(recorded([{ title: 'hand written', disposition: 'noted', reason: 'r' }]), null,
+    'a decision no fold ever touched makes no claim about a report');
 });
 
 test('an unbound named-not-fixed entry is reported as unbound, not as corrected', () => {

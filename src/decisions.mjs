@@ -66,17 +66,18 @@ const namedItemId = (agent, n) => `NF-${agent}-${n}`;
 // reasoning attached, so nobody re-derives it. See `annotate`'s noted branch.
 // Taken from src/ledger.mjs rather than spelled again, because the ledger has
 // to know the same fact from the other side: `uncoveredDecisions` skips this
-// disposition outright, and `onNotedRecord` lets an entry carrying it excuse
-// the next decision that matches it. Two spellings of one disposition is how
-// the summary line stopped counting `noted` at all.
+// disposition outright, and lets an entry carrying it excuse the next decision
+// that matches it — provided the report carried the entry, which is what
+// `reconciled` below records. Two spellings of one disposition is how the
+// summary line stopped counting `noted` at all.
 export const NAMED_NOT_FIXED_DISPOSITION = UNREPORTED_DISPOSITION;
 
 // Does this entry carry the identity that SETTLES that one?
 //
-// The predicate `onNotedRecord` grants its one exemption on, imported rather
-// than spelled again: this file mints the entries that exemption is granted
-// BY, so it has to refuse exactly the pairs the ledger would let vouch for
-// each other. A second copy of a scoring rule is how two copies drift.
+// The predicate `uncoveredDecisions` grants its one exemption on, imported
+// rather than spelled again: this file mints the entries that exemption is
+// granted BY, so it has to refuse exactly the pairs the ledger would let vouch
+// for each other. A second copy of a scoring rule is how two copies drift.
 function settlesSameThing(a, b) {
   return (scoreMatch(a, b)?.score ?? 0) >= SETTLING_SCORE;
 }
@@ -98,6 +99,24 @@ function requireTitle(title, what) {
   const t = String(title ?? '').trim();
   if (!t) throw new Error(`${what} has no title; title is what the next pass matches on`);
   return t;
+}
+
+// One entry of a payload list, before anything reads a field off it.
+//
+// The two guards above refuse an entry whose title or reason is missing, and a
+// `null` beside them in the same list got neither: `Cannot read properties of
+// null (reading 'id')`, naming no batch, no list and no position. Same class as
+// the `[null]` a decisions document could carry into the ledger, one file
+// earlier in the flow — and this file states the doctrine for it, that a caller
+// who skipped `validateFix` must not be able to mint an entry that dies
+// somewhere else wearing another component's name.
+function requireItem(item, what) {
+  if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+    const shape = Array.isArray(item) ? 'an array' : JSON.stringify(item);
+    throw new Error(`${what} is ${shape}; every entry in a fix payload list is an object `
+      + 'carrying at least a title and a reason');
+  }
+  return item;
 }
 
 // The identity fields `scoreMatch` reads next iteration, taken from the REPORT
@@ -173,10 +192,12 @@ function anchorsAgree(d, finding) {
 // it answers nothing" are different claims, and only the second is worth a
 // block of its own on the bridge's output.
 //
-// The fold's own statement, carried on the decision. `recordDecisions` builds
-// its ledger entries from a fixed field list and does not keep this one, so a
-// reader downstream of the ledger still has only the disposition to go on —
-// which is precisely what `onNotedRecord` re-derives trust from today.
+// The fold's own statement, carried on the decision and now kept by the ledger
+// too. Its whitelist used to end one field short of this one, so every reader
+// downstream had only the disposition to go on — and `uncoveredDecisions`
+// grants its one exemption on exactly this difference: a `noted` identity the
+// report CARRIED excuses the decision answering it, and one this fold made up
+// out of the payload does not.
 function reconciledAgainst(finding, checked) {
   return checked ? finding !== null : null;
 }
@@ -273,13 +294,15 @@ function requireAgent(payload) {
 
 // A batch may not mint the `noted` identity that excuses its own decision.
 //
-// `onNotedRecord` grants `uncoveredDecisions`' one exemption to any decision a
-// recorded `noted` entry matches at SETTLING_SCORE, and this file is where
-// those entries are minted — out of fields the fix agent supplies, for an item
-// the check never sees the report for. So a fold that both asserts a decision
-// and names the same identity as not-fixed hands the ledger the token that
-// excuses that decision from the next iteration on: the party whose decisions
-// are being checked writing its own exemption.
+// `uncoveredDecisions` grants its one exemption to any decision a recorded
+// `noted` entry matches at SETTLING_SCORE, and this file is where those
+// entries are minted — out of fields the fix agent supplies. So a fold that
+// both asserts a decision and names the same identity as not-fixed hands the
+// ledger the token that excuses that decision: the party whose decisions are
+// being checked writing its own exemption. The cross-iteration form of the
+// same move is closed on the ledger's side, by refusing to vouch with an
+// entry this fold could not bind to a report; this refuses the same-batch
+// form, where the two claims sit in one payload and contradict each other.
 //
 // Refused rather than reported, because the two claims cannot both be true.
 // One title, one kind and one file is ONE finding here — `upsert` merges on
@@ -318,21 +341,24 @@ export function foldFixPayloads(payloads, { report = null } = {}) {
 
   for (const payload of payloads) {
     const agent = requireAgent(payload);
-    for (const d of payload.fixed ?? []) {
+    (payload.fixed ?? []).forEach((d, i) => {
+      requireItem(d, `fixed[${i}] from ${agent}`);
       decisions.push(toDecision(d, { disposition: 'fixed', agent, finding: findingFor(d), checked }));
-    }
-    for (const d of payload.declined ?? []) {
+    });
+    (payload.declined ?? []).forEach((d, i) => {
+      requireItem(d, `declined[${i}] from ${agent}`);
       decisions.push(toDecision(d, { disposition: 'declined', agent, finding: findingFor(d), checked }));
-    }
+    });
     // Reconciled against the report exactly as the two lists above are. This
     // one used to skip it, on the grounds that no lane had reported these items
     // so there was nothing to reconcile against, and two things were wrong with
     // that. `fix.txt` sends an ASSIGNED finding here whenever a batch leaves one
     // for later, so the report frequently does carry the item; and an identity
-    // that reaches the ledger unchecked is the identity `onNotedRecord` later
-    // vouches with, which made this the one list a fix agent could write its own
-    // exemption into.
+    // that reaches the ledger unchecked is the identity `uncoveredDecisions`
+    // later vouches with, which made this the one list a fix agent could write
+    // its own exemption into.
     (payload.named_not_fixed ?? []).forEach((item, i) => {
+      requireItem(item, `named_not_fixed[${i}] from ${agent}`);
       decisions.push(toNamedNotFixed(item, { agent, n: i + 1, finding: findingFor(item), checked }));
     });
   }
@@ -353,11 +379,20 @@ export function foldFixPayloads(payloads, { report = null } = {}) {
 // names it, while an unbound `noted` records fine and becomes the identity that
 // excuses the next decision matching it.
 function payloadEntries(payload) {
+  const agent = payload?.agent ?? null;
+  // Guarded here as well as in the fold, and with the same helper: this reader
+  // walks the same three lists and the bridge runs it FIRST, so a `null` in one
+  // of them reached `Cannot read properties of null (reading 'title')` from
+  // here rather than from the refusal the fold now makes.
+  const list = (name, disposition) => (payload?.[name] ?? []).map((d, i) => {
+    requireItem(d, `${name}[${i}] from ${agent}`);
+    return { d, disposition };
+  });
+
   return [
-    ...(payload.fixed ?? []).map((d) => ({ d, disposition: 'fixed' })),
-    ...(payload.declined ?? []).map((d) => ({ d, disposition: 'declined' })),
-    ...(payload.named_not_fixed ?? [])
-      .map((d) => ({ d, disposition: NAMED_NOT_FIXED_DISPOSITION })),
+    ...list('fixed', 'fixed'),
+    ...list('declined', 'declined'),
+    ...list('named_not_fixed', NAMED_NOT_FIXED_DISPOSITION),
   ];
 }
 

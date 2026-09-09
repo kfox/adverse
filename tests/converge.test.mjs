@@ -644,6 +644,74 @@ test('a decision answering something already on record is not accused', () => {
   assert.doesNotMatch(r.stderr, /SETTLES NOTHING/);
 });
 
+test('a noted identity a batch minted cannot excuse its decision an iteration later', () => {
+  // The cross-iteration half of the self-issued exemption, end to end. The
+  // same-batch form is refused by the fold; this one waits an iteration, and
+  // the `fixed` claim used to record clean — reproduced before the fix, with
+  // the ledger the coverage check answered `[]`.
+  //
+  // `reconciled: false` is what `decisions.mjs --fix --report` writes onto a
+  // folded entry the report carries no finding for, and decisions.json is that
+  // fold's output verbatim.
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const minted = {
+    id: 'NF-fix-loop-bound-1', title: 'the session cache is unbounded',
+    kind: 'defect', severity: null, file: 'other.py', line: 12, counterpart: null,
+    agent: 'fix-loop-bound', reconciled: false,
+  };
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const first = writeJson(repo, 'd1.json', {
+    decisions: [{ ...minted, disposition: 'noted', reason: 'out of scope for this batch' }],
+  });
+  assert.equal(run(['--ledger', ledger, '--record', first, '--report', report,
+                    '--repo', repo, '--at', reviewed], repo).status, 0);
+
+  const second = writeJson(repo, 'd2.json', {
+    decisions: [{ ...minted, disposition: 'fixed', reason: 'bounded it', fixCommit: fixed }],
+  });
+  const r = run(['--ledger', ledger, '--record', second, '--report', report,
+                 '--repo', repo, '--at', reviewed], repo);
+
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /SETTLES NOTHING/);
+  assert.match(r.stderr, /excusing its own decision with its own footnote/);
+  assert.doesNotMatch(r.stderr, /FIX NOT SUPPORTED/, 'the commit does touch the file it names');
+});
+
+test('a decisions array holding null is refused by name, not by TypeError', () => {
+  // `decisionsIn` accepts the array and every reader past it assumed an object,
+  // so the run died on `Cannot read properties of null (reading 'disposition')`
+  // — the right exit code and nothing written, attached to a sentence naming
+  // neither the file nor which entry.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json', { decisions: [null] });
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const r = run(['--ledger', ledger, '--record', decisions, '--report', report,
+                 '--repo', repo, '--at', reviewed], repo);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /decisions\[0\] is null/);
+  assert.doesNotMatch(r.stderr, /Cannot read properties/);
+  assert.equal(existsSync(ledger), false, 'nothing was established, so nothing was written');
+});
+
+test('a ledger file holding null is refused by shape, not by version', () => {
+  // The identical shape one file over: `Cannot read properties of null (reading
+  // 'version')` names neither the ledger nor what is wrong with it.
+  const { repo } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  writeFileSync(ledger, 'null');
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /not a ledger object/);
+  assert.doesNotMatch(r.stderr, /Cannot read properties/);
+});
+
 test('a --report that parses to null is refused, not read as no report at all', () => {
   // `readJson` returns null for a file containing the literal `null`, and both
   // `report ?` and `recordDecisions`' `report !== null` read that as "no report
