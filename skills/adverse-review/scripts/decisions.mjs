@@ -181,7 +181,8 @@ let out = `${decisions.length} decision(s) from ${payloads.length} fix payload(s
 // the report at all — which is what `converge.mjs --record` is about to name at
 // exit 1, said here at the earlier of the two moments the operator can act on
 // it — and, under its own heading, the unbound `noted` entries, which record
-// cleanly and become the identity that excuses the next decision matching them.
+// cleanly and excuse nothing, because the fold looked and no lane had filed
+// them.
 //
 // Computed whenever EITHER document was given, not only when a report was. The
 // three report blocks below are empty without one anyway — nothing binds, so
@@ -273,20 +274,26 @@ if (misanchored.length) {
 if (unreported.length) {
   // Its own heading, never folded into the block above: an unbound `noted`
   // entry is not the same accusation. It records fine and settles nothing by
-  // design — and it is also the one entry `converge.mjs --record` lets vouch
-  // for a later decision, on fields this batch chose and no lane ever filed.
-  // The fold refuses the case where the vouching would be for a decision in
-  // this same batch; a token minted now and spent an iteration later is the
-  // case only an operator holding the report can catch, which is why it is
-  // printed here rather than counted somewhere.
-  out += `  UNREPORTED IDENTITY — no finding in the report carries these titles, so each`
-       + ` becomes an exemption (${unreported.length}):\n`
+  // design, and it vouches for nothing either — a `noted` entry vouches only
+  // when the report CARRIED it (`isSelfIdentified`, src/ledger.mjs), and this
+  // block is built from the ones it did not. What reaches the ledger is
+  // therefore the batch's own claim about a finding no lane reported, on
+  // fields nothing corrected, which is a thing only an operator holding the
+  // report can check — which is why it is printed here rather than counted
+  // somewhere.
+  out += `  UNREPORTED IDENTITY — no finding in the report carries these titles`
+       + ` (${unreported.length}):\n`
        + unreported.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`).join('')
-       + `    Recorded ${NAMED_NOT_FIXED_DISPOSITION}, which is what this channel is for — but from`
-       + ' the next\n'
-       + '    iteration on, any decision with the same title, kind and file is excused from\n'
-       + '    `--record`\'s SETTLES NOTHING check by this entry alone, on fields this batch\n'
-       + '    chose. Read each line against report.json before you record it.\n';
+       + `    Recorded ${NAMED_NOT_FIXED_DISPOSITION}, which settles nothing — and excuses nothing`
+       + ' either.\n'
+       + '    The fold checked each of these against the report and no lane had filed it,\n'
+       + '    which is the one fact `--record`\'s SETTLES NOTHING check withholds its\n'
+       + '    exemption on: a later decision whose only cover is one of these entries is\n'
+       + '    named there anyway (`isSelfIdentified`, src/ledger.mjs). So what reaches the\n'
+       + '    ledger is this batch\'s own claim about a finding no lane reported, on fields\n'
+       + '    nothing corrected. Read each line against report.json before you record it:\n'
+       + '    an item no lane filed is either a finding none of them has reported yet, or\n'
+       + '    this title mis-citing one that was.\n';
 }
 
 // Named as settling, and listed, because that is the whole of what --record

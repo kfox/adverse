@@ -495,8 +495,9 @@ export function foldFixPayloads(payloads, { report = null, briefing = null } = {
 // which disposition it will become. The two unbound cases are different
 // accusations and the bridge prints them under different headings: an unbound
 // `fixed` or `declined` settles nothing and `converge.mjs --record --report`
-// names it, while an unbound `noted` records fine and becomes the identity that
-// excuses the next decision matching it.
+// names it, while an unbound `noted` records fine and excuses nothing — the
+// fold's own `reconciled: false` is what `uncoveredDecisions` withholds its
+// exemption on. Only a `noted` identity the report CARRIED excuses anything.
 function payloadEntries(payload) {
   const agent = payload?.agent ?? null;
   // Guarded here as well as in the fold, and with the same helper: this reader

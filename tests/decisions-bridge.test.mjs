@@ -551,11 +551,20 @@ test('a --report that is not a synthesis report exits 2, not 1', () => {
   }
 });
 
-test('a named-not-fixed identity in no finding is named as the exemption it becomes', () => {
+test('a named-not-fixed identity in no finding is named, and excuses nothing', () => {
   // Under its own heading, never folded into the block above it: `converge.mjs
   // --record` skips the `noted` disposition outright, so this print is the only
-  // place anyone sees the identity that will excuse the next decision matching
-  // it — on fields this batch chose and no lane ever filed.
+  // place anyone sees an identity that reaches the ledger entirely on the
+  // batch's own say-so, on fields no lane ever filed.
+  //
+  // The consequence is pinned because the block used to state its inverse. It
+  // promised that from the next iteration any decision with the same title,
+  // kind and file is excused from the SETTLES NOTHING check — but the fold
+  // stamps `reconciled: false` on exactly this population, `isSelfIdentified`
+  // (src/ledger.mjs) is that field being false, and `uncoveredDecisions`
+  // withholds its one exemption on it. A block whose stated consequence does
+  // not happen teaches an operator who checks once to skip the block, which
+  // costs the one read it exists to prompt.
   const dir = freshTmp();
   try {
     const src = write(dir, 'fix-auth-guard.json', {
@@ -566,6 +575,12 @@ test('a named-not-fixed identity in no finding is named as the exemption it beco
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /UNREPORTED IDENTITY/);
     assert.match(r.stdout, /preflight_emu is not budgeted/);
+    assert.match(r.stdout, /settles nothing — and excuses nothing either/);
+    assert.match(r.stdout, /no lane had filed it/);
+    assert.match(r.stdout, /is\s+named there anyway/);
+    assert.match(r.stdout, /Read each line against report\.json before you record it/);
+    assert.doesNotMatch(r.stdout, /becomes an exemption/);
+    assert.doesNotMatch(r.stdout, /is excused from/);
     // The `fixed` entry beside it DID bind, so the other unbound heading — a
     // different accusation about a different half of a decision — stays off.
     assert.doesNotMatch(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
