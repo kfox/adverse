@@ -1672,6 +1672,28 @@ test('unsupportedFixes names the branch it took, not only the sentence', () => {
   assert.equal(branchOf(fix(), { status: 'ok', files: ['src/auth.py'] }), undefined);
 });
 
+test('a fix claiming no file at all is passed over, not accused of missing it', () => {
+  // The other silent branch, and the one that had no test: `if (!d.file)`.
+  // Reached by every disposition on a finding that carries no file — a `design`
+  // advisory has none by construction, and `scoreMatch` treats a null file as a
+  // field to compare rather than a malformed decision, so these are ordinary.
+  //
+  // Passing over is right: this check asks whether the commit touched the file
+  // the finding cites, and there is no such file to ask about. What makes it
+  // worth pinning is that the branch BELOW it is the accusing one. Were the
+  // order ever reversed, or the guard dropped, a fix with no cited file would
+  // fall into `ELSEWHERE` and be told it "does not touch null" — a fictional-fix
+  // accusation against a decision whose shape is documented and correct, from
+  // the check whose whole purpose is catching fictional fixes.
+  const fileless = {
+    title: 'ledger.mjs is three modules wearing one filename', file: null,
+    disposition: 'fixed', reason: 'split the policy half out', fixCommit: 'abc1234',
+  };
+  const touchedSomething = () => ({ status: 'ok', files: ['src/ledger.mjs'] });
+
+  assert.deepEqual(unsupportedFixes([fileless], touchedSomething), []);
+});
+
 test('unsupportedFixes clips the commit it reports, like every other string it returns', () => {
   // `title` and `why` were clipped and `commit` was returned verbatim, out of
   // the same decisions.json. It reaches an operator's terminal from two
