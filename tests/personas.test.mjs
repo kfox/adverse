@@ -57,6 +57,37 @@ test('a persona that owns an advisory kind is told so in its prompt, per kind', 
   }
 });
 
+// The Adversary's resource lens bounded quantity and never time, and the whole
+// class fell between the lanes: the Auditor is told DoS is not its business, and
+// the Steward only checks claims the code makes about itself — a codebase with no
+// timeouts makes none. So each clause here is pinned individually rather than
+// left to the generated-copy drift test, which proves the three copies AGREE and
+// passes just as happily on text somebody trimmed back out.
+test('the Adversary bounds duration, not only count and size', () => {
+  const { system } = PERSONAS.adversary;
+
+  // The dimension itself, and the question that finds it. "Ask", not "say": the
+  // round-1 contract is one JSON object with 1-10 findings and a 200-char
+  // summary, so an instruction to enumerate every resource has nowhere to land
+  // and costs the lane either its parse or its findings slots.
+  assert.match(system, /unbounded \*\*duration\*\*/);
+  assert.match(system, /a count, a size, and a clock — so ask which of the three is missing/);
+
+  // Widening the scope list alone changes nothing, because the attack-story gate
+  // filters exactly this class: a driver with no operation timeout hanging a
+  // handler on a merely-slow dependency has no attacker to name.
+  assert.match(system,
+    /An availability bound is in scope even where the attacker is only load/);
+  assert.match(system, /reason to describe the load, not a\s+reason to drop the finding/);
+
+  // One-directional, and the direction matters. A per-attempt timeout inside an
+  // unbounded retry loop makes "the source sets no timeout" false and "the
+  // operation is unbounded" true, so requiring BOTH to be established would
+  // forbid reporting the shape the clause above asks for.
+  assert.match(system,
+    /"The source sets no timeout" does not\s+establish "the operation is unbounded"/);
+});
+
 test('every persona hands off to every other persona by name', () => {
   // The exclusion lists are the handoff. A persona that never names another is
   // the one that will duplicate its lane.
