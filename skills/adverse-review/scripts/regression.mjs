@@ -62,7 +62,9 @@ import { makeWriteQueue, parseBridgeArgs, readJson, requireKnownPersona, usage }
 import { importFromSrc } from './package-root.mjs';
 
 const { closeQuietly, openRegularFileSync } = await importFromSrc('fsSafe.mjs');
-const { annotate, checkBinding, closureOf, emptyLedger, loadLedger } = await importFromSrc('ledger.mjs');
+const {
+  annotate, checkBinding, closureOf, emptyLedger, fixCommitsIn, loadLedger,
+} = await importFromSrc('ledger.mjs');
 const { makeAnchorTracer, resolveRef } = await importFromSrc('trace.mjs');
 const { chooseRegressionLane, unresolvedLanes } = await importFromSrc('regression.mjs');
 const { validateRegression } = await importFromSrc('prompts.mjs');
@@ -70,7 +72,16 @@ const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
 const { stampedFieldClaim } = await importFromSrc('synthesis.mjs');
 const { PROVENANCE } = await importFromSrc('taxonomy.mjs');
 
+// Refused wherever a model-written string is interpolated into a line an
+// operator reads: an embedded escape or a carriage return rewrites what that
+// line says, and no honest rev spelling or reason contains one.
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+
 const MAX_FOLD_COMMITS = 64;
+
+// The `--no-pass` declarations, parsed at argv time and read after the fold.
+// See the parse site for why the two are not the same moment.
+let declaredSkips = [];
 
 // Positionals are payloads, so `--payload run/regression-*.json` works — the
 // same reason triage.mjs and verify.mjs accept them: strict parsing without
@@ -79,7 +90,8 @@ const MAX_FOLD_COMMITS = 64;
 const USAGE = 'Usage: regression.mjs --repo <dir> --commit <rev>'
   + ' (--closed-by <persona>… | --closed-by-none | --closed-by-ledger <ledger.json>) [--json]\n'
   + '       regression.mjs --payload a.json [--payload b.json …] --outdir <dir>'
-  + ' [--refold] [--choice <lane-choice.json>]… [--repo <dir>] [--ledger <ledger.json>]';
+  + ' [--refold] [--choice <lane-choice.json>]… [--repo <dir>] [--ledger <ledger.json>]'
+  + ' [--no-pass <commit>=<why>]…';
 
 const { values, positionals } = parseBridgeArgs({
   prefix: 'regression',
@@ -94,6 +106,7 @@ const { values, positionals } = parseBridgeArgs({
     outdir:           { type: 'string' },
     choice:           { type: 'string', multiple: true },
     ledger:           { type: 'string' },
+    'no-pass':        { type: 'string', multiple: true },
     refold:           { type: 'boolean' },
     json:             { type: 'boolean' },
   },
@@ -103,11 +116,34 @@ const { values, positionals } = parseBridgeArgs({
 
 const payloads = [...(values.payload ?? []), ...positionals];
 
+// Refused rather than ignored, the same call `recordDecisions` makes on a
+// `reporters` it did not ask for: accepting one silently would let an operator
+// believe a skip was on record when nothing read it. Both halves of that are
+// checked HERE, outside the mode dispatch below, because a guard that lives
+// inside one branch is a guard the other branch does not have — the choose mode
+// took `--no-pass` and exited 0 without mentioning it.
+if ((values['no-pass'] ?? []).length && !payloads.length) {
+  usage('regression: --no-pass declares a skipped pass on one of this iteration\'s fix'
+    + ' commits, which is a fact about folding this iteration\'s passes — the lane-choice'
+    + ` mode has nothing to record it against\n${USAGE}`);
+}
+
 if (payloads.length) {
   if (!values.outdir) usage(USAGE);
   if (values.ledger && !values.repo) {
     usage(`regression: --ledger requires --repo, the repository the ledger is bound to\n${USAGE}`);
   }
+  if ((values['no-pass'] ?? []).length && !values.ledger) {
+    usage('regression: --no-pass declares a skipped pass on one of this iteration\'s fix'
+      + ` commits, which only --ledger can name — pass it too\n${USAGE}`);
+  }
+  // Parsed HERE, before a byte is written, and not where it is used. The fold
+  // is a publish: `refuseKnownFolds` runs before any lane file is written for
+  // exactly this reason — "a fold that refuses one lane's stale pass after
+  // overwriting another lane's file has already published half of what it
+  // refused" — and a malformed `--no-pass` refused after the write would be
+  // that same failure reached through an argument instead of a file.
+  declaredSkips = readNoPass(values['no-pass'] ?? []);
   foldPayloads(payloads, values.outdir, values.ledger
     ? loadBoundLedger(values.ledger, path.resolve(values.repo)) : null);
 } else if (values.commit) {
@@ -562,12 +598,10 @@ function readChoices(files) {
   return files.map((src) => {
     const c = readJson(src, 'regression');
     requireKnownPersona(c?.persona, { prefix: 'regression', file: src, personas: DEFAULT_PERSONAS });
-    // No control characters in the commit: it is interpolated verbatim into
-    // this bridge's own stderr diagnostics, where an embedded escape or \r
-    // could rewrite what the operator sees on that line. No honest rev
-    // spelling contains one.
+    // No control characters in the commit — see CONTROL_CHARS. `readNoPass`
+    // applies the same guard to a `--no-pass` declaration.
     const ok = typeof c.commit === 'string' && c.commit && !c.commit.startsWith('-')
-      && !/[\x00-\x1f\x7f]/.test(c.commit)
+      && !CONTROL_CHARS.test(c.commit)
       && typeof c.reason === 'string' && typeof c.conflicted === 'boolean'
       && ['declared-list', 'declared-none'].includes(c.disinterest);
     if (!ok) {
@@ -726,4 +760,115 @@ function foldPayloads(sources, outdir, bound) {
   process.stdout.write(`${sources.length} pass(es) from ${byPersona.size} lane(s):`
     + ` ${findings} finding(s), stamped so the report can say a fix commit's regression`
     + ` pass found them${bound ? `; ${adjudicated} carrying a recorded decision` : ''}\n`);
+
+  if (bound) reportPassCoverage(bound.ledger, byPersona, sameCommit);
+}
+
+// Which of this iteration's fix commits a pass read, and which nobody looked at
+// (kfox/adverse#58, item 3).
+//
+// The issue asks for one pass per fix commit, enforced. The loop reference has
+// since made the pass **recommended, not required** — "skip it, out loud, for a
+// batch of small well-pinned fixes" — so enforcing a pass would contradict the
+// doctrine this tool is built to carry out. What survives is the half the issue
+// was actually about: *a skipped pass reads exactly like a clean one.* Silence
+// is what gets checked, not the skipping.
+//
+// So every fix commit must be accounted for, and there are two ways to do it: a
+// pass on record, or `--no-pass <commit>=<why>`. Neither is preferred here; a
+// commit with neither is the one thing this refuses, because that is the state
+// nobody can tell apart from a pass that ran clean.
+//
+// Refusing is safe in a way it was not for the checks in converge.mjs: this is
+// not the write that advances the iteration counter, so a refusal here cannot
+// make the cap unreachable, and the remedy is one flag away. The lane files are
+// already written — the fold is a publish and stays one — so this reports on
+// work that landed rather than withholding it.
+function reportPassCoverage(ledger, byPersona, sameCommit) {
+  const fixCommits = mergeSpellings(fixCommitsIn(ledger), sameCommit);
+  if (!fixCommits.length) return;
+
+  const passed = new Set([...byPersona.values()].flatMap((l) => l.passes.map((p) => p.commit)));
+  const matched = new Set();
+
+  const unaccounted = [];
+  for (const { commit, closes } of fixCommits) {
+    // Matched BEFORE the pass-coverage test, and every declaration naming this
+    // commit rather than the first: a declaration is either about a fix commit
+    // of this iteration or it is not, and that does not depend on whether a
+    // pass also happened to cover it. Deciding it afterwards told an operator
+    // who declared a skip on a commit that then got a pass to go hunt a typo in
+    // a sha that was correct.
+    const declared = declaredSkips.filter((d) => sameCommit(new Set([d.commit]), commit));
+    for (const d of declared) matched.add(d);
+
+    if (sameCommit(passed, commit)) continue;
+    if (declared.length) {
+      process.stdout.write(
+        `  no pass on ${commit} (closed ${closes}), declared: ${declared[0].why}\n`);
+      continue;
+    }
+    unaccounted.push({ commit, closes });
+  }
+
+  for (const d of declaredSkips.filter((x) => !matched.has(x))) {
+    process.stderr.write(`regression: --no-pass ${d.commit} names no fix commit in this`
+      + " iteration's ledger entries — check the spelling, or the ledger\n");
+  }
+
+  if (!unaccounted.length) return;
+  process.stderr.write(
+    `regression: NO PASS AND NO DECLARATION — ${unaccounted.length} of ${fixCommits.length}`
+    + ' fix commit(s) in this iteration:\n'
+    + unaccounted.map((u) => `  - ${u.commit} (closed ${u.closes} finding(s))\n`).join('')
+    + '  The pass is recommended, not required — but a skipped one reads exactly\n'
+    + '  like a clean one, which is the silence this check exists to break. Run\n'
+    + '  the pass, or say why you did not: --no-pass <commit>="<why>". The lane\n'
+    + '  files of this run are already written, so that re-run needs --refold.\n');
+  process.exitCode = 1;
+}
+
+// One commit is one commit, however the fix agents spelled it. `fixCommitsIn`
+// is distinct by spelling — it is pure and has no repository to resolve with —
+// so two decisions recording `abc1234` and `abc1234def…` arrive as two rows,
+// which would both inflate the "N of M" denominator and split what one commit
+// closed across two lines. Merged here, where `sameCommit` already resolves.
+function mergeSpellings(fixCommits, sameCommit) {
+  const merged = [];
+  for (const { commit, closes } of fixCommits) {
+    const seen = merged.find((m) => sameCommit(new Set([m.commit]), commit));
+    if (seen) seen.closes += closes;
+    else merged.push({ commit, closes });
+  }
+  return merged;
+}
+
+// `--no-pass <commit>=<why>`, and the `=<why>` is not optional.
+//
+// A bare commit would let the declaration channel become the silence it was
+// added to break: "I skipped it" and "I skipped it because these were four
+// one-line fixes to pinned paths" are the same keystrokes to write and a
+// different artifact to read six months later. The loop reference's own words
+// are "skip it, OUT LOUD".
+function readNoPass(specs) {
+  return specs.map((spec) => {
+    const at = spec.indexOf('=');
+    const commit = (at === -1 ? spec : spec.slice(0, at)).trim();
+    const why = at === -1 ? '' : spec.slice(at + 1).trim();
+    if (!commit || !why) {
+      usage(`regression: --no-pass ${JSON.stringify(spec)} needs a reason —`
+        + ' --no-pass <commit>="<why>". A skip with no reason is the silence this'
+        + ` flag exists to break\n${USAGE}`);
+    }
+    // The same guard `readChoices` puts on its commit, for the same reason and
+    // over both halves: the whole declaration is written by the orchestrating
+    // agent and interpolated verbatim into this bridge's own stdout and stderr
+    // lines — including, here, the refusal printed directly above it.
+    if (commit.startsWith('-') || CONTROL_CHARS.test(`${commit}${why}`)) {
+      usage(`regression: --no-pass ${JSON.stringify(spec)} is not a commit and a reason`
+        + ' — a control character, or a leading dash on the commit, rewrites the line'
+        + ` it is printed on\n${USAGE}`);
+    }
+    return { commit, why };
+  });
 }

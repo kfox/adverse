@@ -1029,6 +1029,58 @@ export function recordDecisions(ledger, decisions, {
   return next;
 }
 
+// Which iteration a ledger is currently on, read off its own record of them.
+//
+// NOT the highest number any ENTRY carries. An iteration that recorded no
+// entries is a documented, instructed state — `converge.mjs` tells the operator
+// to record an iteration whose lanes all failed with "the decisions you have —
+// an empty list is valid", because only `--record` advances the counter toward
+// the cap. Derived from the entries, such an iteration answers with the
+// PREVIOUS one, putting commits that were already passed or declared back on
+// the list, one iteration late and every iteration after. `recordDecisions`
+// writes `{ n: iteration }` as it writes those entries, so the row is the
+// number they carry rather than a re-derivation of it.
+//
+// The entries are the fallback for a ledger with no iteration rows at all —
+// answering 0 there would make this silent on a malformed ledger, which is the
+// direction this check exists to fail away from.
+function latestIteration(ledger) {
+  const recorded = (ledger.iterations ?? []).at(-1)?.n;
+  if (Number.isInteger(recorded)) return recorded;
+  return Math.max(0, ...(ledger.entries ?? []).map((e) => e.iteration ?? 0));
+}
+
+// The fix commits one iteration produced, and what each closed
+// (kfox/adverse#58, item 3).
+//
+// `closureOf` answers "what did THIS commit close" for a commit the caller
+// already has. This is the other direction — "which commits are there to ask
+// about" — and nothing could answer it, which is why nothing could check that
+// a regression pass was offered per fix commit. Phase 9 runs one pass per fix
+// commit, so the pass needs the list before it can say which of them it read.
+//
+// Scoped to one iteration by default, and that default is the latest. A ledger
+// accumulates every iteration's commits forever, so the whole-ledger list would
+// accuse iteration 3 of skipping passes on iteration 1's commits — which were
+// either passed or declared at the time, and are in neither case this
+// iteration's work.
+//
+// Distinct by the spelling recorded, which means two decisions naming one
+// commit two ways arrive as two rows. Resolving here would need a repository
+// and this module stays pure — the caller already has one, because it has to
+// resolve a pass's commit too (a pass names whatever the fix agent typed), so
+// it is where the merge belongs.
+export function fixCommitsIn(ledger, { iteration = null } = {}) {
+  const entries = (ledger.entries ?? []).filter((e) => e.disposition === 'fixed' && e.fixCommit);
+  const n = iteration ?? latestIteration(ledger);
+  const byCommit = new Map();
+  for (const e of entries) {
+    if ((e.iteration ?? 0) !== n) continue;
+    byCommit.set(e.fixCommit, (byCommit.get(e.fixCommit) ?? 0) + 1);
+  }
+  return [...byCommit].map(([commit, closes]) => ({ commit, closes }));
+}
+
 // What a fix commit closed, according to the ledger.
 //
 // This is the question item 6 of kfox/adverse#58 was filed because nothing

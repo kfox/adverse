@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -1069,6 +1069,307 @@ test('the printed sentence does not accuse a documentation fix of crossing a bou
     // stopped the gate claiming a boundary was crossed was right; only the
     // routing inference inside it was backwards.
     assert.match(r.stdout, /^regression lane for HEAD: adversary$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- a fix commit nobody looked at, and nobody said so (#58, item 3) ---------
+
+// A ledger whose latest iteration recorded a `fixed` decision per commit given.
+function ledgerOfFixes(dir, commits) {
+  const file = path.join(dir, 'ledger.json');
+  writeFileSync(file, JSON.stringify({
+    version: 1, base: null, iterations: [{ n: 2 }],
+    entries: commits.map((commit, i) => ({
+      id: `F${i}`, title: `finding ${i}`, kind: 'defect', severity: 'critical',
+      file: 'f.txt', line: 1, counterpart: null, citedLine: null,
+      disposition: 'fixed', reason: 'patched', fixCommit: commit,
+      iteration: 2, atCommit: commit,
+    })),
+  }));
+  return file;
+}
+
+const shaOf = (dir, rev) =>
+  execFileSync('git', ['-C', dir, 'rev-parse', rev], { encoding: 'utf-8' }).trim();
+
+test('a fix commit with no pass and no declaration is refused', () => {
+  // The half of item 3 that survives the loop reference making the pass
+  // recommended rather than required: a skipped pass reads exactly like a
+  // clean one. The skipping is fine; the silence is not.
+  const dir = gitRepo(2);
+  try {
+    const [head, prev] = [shaOf(dir, 'HEAD'), shaOf(dir, 'HEAD~1')];
+    const ledger = ledgerOfFixes(dir, [head, prev]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'),
+      JSON.stringify(pass({ commit: head })));
+
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', ledger, '--repo', dir]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /NO PASS AND NO DECLARATION — 1 of 2 fix commit\(s\)/);
+    assert.match(r.stderr, new RegExp(prev));
+    assert.doesNotMatch(r.stderr, new RegExp(head), 'the covered commit is not accused');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--no-pass accounts for a commit no pass read', () => {
+  // The other way to account for one. Neither is preferred: the doctrine says
+  // reach for the pass when a commit touched a pinned path or closed a
+  // critical, and skip it out loud otherwise.
+  const dir = gitRepo(2);
+  try {
+    const [head, prev] = [shaOf(dir, 'HEAD'), shaOf(dir, 'HEAD~1')];
+    const ledger = ledgerOfFixes(dir, [head, prev]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'),
+      JSON.stringify(pass({ commit: head })));
+
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', ledger, '--repo', dir,
+                   '--no-pass', `${prev}=a one-line fix to a pinned path, tested`]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /no pass on .* declared: a one-line fix to a pinned path, tested/);
+    assert.doesNotMatch(r.stderr, /NO PASS AND NO DECLARATION/);
+    assert.doesNotMatch(r.stderr, /names no fix commit/,
+      'a declaration that did account for a commit is not also reported as matching none');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --no-pass with no reason is refused before anything is written', () => {
+  // A bare commit would let the declaration channel become the silence it was
+  // added to break. Refused at argv time, not after the fold: the fold is a
+  // publish, and refusing after the write publishes half of what it refused.
+  const dir = gitRepo(2);
+  try {
+    const prev = shaOf(dir, 'HEAD~1');
+    const ledger = ledgerOfFixes(dir, [shaOf(dir, 'HEAD'), prev]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', ledger, '--repo', dir, '--no-pass', prev]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /needs a reason/);
+    assert.equal(existsSync(path.join(dir, 'round1-adversary.regression.json')), false,
+      'a refused run publishes nothing');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--no-pass without --ledger is refused rather than ignored', () => {
+  // The ledger is what names the fix commits, so without it a declaration has
+  // nothing to be a declaration about — and accepting one silently would let
+  // an operator believe a skip was on record when nothing read it.
+  const dir = gitRepo(1);
+  try {
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--repo', dir, '--no-pass', 'abc1234=skipped']);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /only --ledger can name/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --no-pass naming no fix commit of this iteration says so', () => {
+  // The same shape as an unmatched `--choice`: a declaration that matches
+  // nothing is a typo or a stale commit, and silently dropping it would leave
+  // the operator believing a commit was accounted for.
+  const dir = gitRepo(2);
+  try {
+    const head = shaOf(dir, 'HEAD');
+    const ledger = ledgerOfFixes(dir, [head]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'),
+      JSON.stringify(pass({ commit: head })));
+
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', ledger, '--repo', dir,
+                   '--no-pass', `${shaOf(dir, 'HEAD~1')}=not a fix commit here`]);
+    assert.match(r.stderr, /names no fix commit in this iteration/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a declaration in the option position is refused, not reported as a typo', () => {
+  // Sibling of the --commit gate above, and the same guard `readChoices` puts
+  // on its own commit. `resolveRef`'s SAFE_REF already keeps this out of git's
+  // argv, so reporting it as "names no fix commit" would be safe — but it would
+  // also be wrong, sending an operator to hunt a typo in a string that is not a
+  // rev spelling at all. Refused at argv time instead.
+  const dir = gitRepo(1);
+  try {
+    const head = shaOf(dir, 'HEAD');
+    const ledger = ledgerOfFixes(dir, [head]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'),
+      JSON.stringify(pass({ commit: head })));
+
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', ledger, '--repo', dir,
+                   '--no-pass=--output=/dev/null']);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /leading dash/);
+    assert.doesNotMatch(r.stderr, /names no fix commit/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a carriage return in a declaration cannot rewrite the line it prints on', () => {
+  // The reason is interpolated verbatim into the stdout line and, when the
+  // declaration matches nothing, into the stderr warning beside the refusal it
+  // is supposed to be answering. A \r there overwrites whichever line came
+  // first, which is the one saying a fix commit went unread.
+  const dir = gitRepo(1);
+  try {
+    const head = shaOf(dir, 'HEAD');
+    const ledger = ledgerOfFixes(dir, [head]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'),
+      JSON.stringify(pass({ commit: head })));
+
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', ledger, '--repo', dir,
+                   `--no-pass=${head}=tested\r  all fix commits accounted for`]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /control character/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a declaration for a commit that also got a pass is not called a typo', () => {
+  // Belt and braces: the operator declared a skip, then ran the pass anyway.
+  // Deciding "does this declaration name a fix commit" AFTER the pass-coverage
+  // test answered no for a sha that was correct, and the printed remedy —
+  // "check the spelling" — leads to typing a wrong one.
+  const dir = gitRepo(1);
+  try {
+    const head = shaOf(dir, 'HEAD');
+    const ledger = ledgerOfFixes(dir, [head]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'),
+      JSON.stringify(pass({ commit: head })));
+
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', ledger, '--repo', dir,
+                   '--no-pass', `${head}=declared, then run anyway`]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr.trim(), '', 'a correct sha is not reported as naming nothing');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two declarations naming one commit are both accounted for', () => {
+  // Same defect from the other side: matching only the first left the second
+  // reported as naming no fix commit, which is a duplicate to ignore rather
+  // than a spelling to correct.
+  const dir = gitRepo(2);
+  try {
+    const [head, prev] = [shaOf(dir, 'HEAD'), shaOf(dir, 'HEAD~1')];
+    const ledger = ledgerOfFixes(dir, [head, prev]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'),
+      JSON.stringify(pass({ commit: head })));
+
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', ledger, '--repo', dir,
+                   '--no-pass', `${prev}=small and pinned`,
+                   '--no-pass', `${prev.slice(0, 8)}=said twice, once abbreviated`]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /names no fix commit/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the refusal names the flag the re-run needs, and that re-run clears it', () => {
+  // The whole justification for refusing AFTER the write is that the operator
+  // can re-run with a declaration added. That re-run folds commits this outdir
+  // has already folded, so without --refold the staleness check refuses it at
+  // exit 2 and calls this run's own output an earlier iteration's leftovers.
+  const dir = gitRepo(2);
+  try {
+    const [head, prev] = [shaOf(dir, 'HEAD'), shaOf(dir, 'HEAD~1')];
+    const ledger = ledgerOfFixes(dir, [head, prev]);
+    const payload = path.join(dir, 'regression-adversary.json');
+    writeFileSync(payload, JSON.stringify(pass({ commit: head })));
+    const base = ['--payload', payload, '--outdir', dir, '--ledger', ledger, '--repo', dir];
+
+    const refused = run(base);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stderr, /needs --refold/);
+
+    const declared = ['--no-pass', `${prev}=small and pinned`];
+    assert.equal(run([...base, ...declared]).status, 2, 'the staleness check is real');
+
+    const remedy = run([...base, '--refold', ...declared]);
+    assert.equal(remedy.status, 0, remedy.stderr);
+    assert.match(remedy.stdout, /no pass on .* declared: small and pinned/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two spellings of one fix commit are one fix commit', () => {
+  // `fixCommitsIn` is pure and has no repository, so it keys by the spelling
+  // each decision recorded. Two of them for one commit would inflate the "N of
+  // M" denominator and split what that commit closed across two lines.
+  const dir = gitRepo(1);
+  try {
+    const head = shaOf(dir, 'HEAD');
+    const ledger = ledgerOfFixes(dir, [head, head.slice(0, 8)]);
+    writeFileSync(path.join(dir, 'regression-adversary.json'),
+      JSON.stringify(pass({ commit: 'nosuchcommit' })));
+
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', ledger, '--repo', dir]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /1 of 1 fix commit\(s\)/);
+    assert.match(r.stderr, /closed 2 finding\(s\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--no-pass on the lane-choice path is refused, not swallowed', () => {
+  // The refusal used to live inside the fold branch, so the other subcommand
+  // took the flag and exited 0 without mentioning it — the same "believe a skip
+  // was on record when nothing read it" failure, reached through a mode.
+  const dir = gitRepo(1);
+  try {
+    const r = run(['--repo', dir, '--commit', shaOf(dir, 'HEAD'), '--closed-by-none',
+                   '--no-pass', 'deadbeef=I skipped it']);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /--no-pass/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a ledger with no fix commits recorded says nothing at all', () => {
+  // A ledger written before per-decision fix commits existed, or an iteration
+  // that fixed nothing. Neither is a skipped pass, and accusing either would
+  // make the check noise on every run that declines everything.
+  const dir = gitRepo(1);
+  try {
+    writeFileSync(path.join(dir, 'ledger.json'), JSON.stringify({
+      version: 1, base: null, iterations: [{ n: 2 }],
+      entries: [{
+        id: 'F1', title: 'a', kind: 'defect', severity: 'critical', file: 'f.txt',
+        line: 1, counterpart: null, citedLine: null, disposition: 'declined',
+        reason: 'intentional', iteration: 2, atCommit: 'HEAD',
+      }],
+    }));
+    writeFileSync(path.join(dir, 'regression-adversary.json'), JSON.stringify(pass()));
+    const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
+                   '--outdir', dir, '--ledger', path.join(dir, 'ledger.json'), '--repo', dir]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /NO PASS AND NO DECLARATION/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

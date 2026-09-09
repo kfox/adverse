@@ -14,7 +14,7 @@ import path from 'node:path';
 
 import {
   DISPOSITIONS, SETTLING_SCORE, annotate, checkBinding, closureOf, convergenceStatus,
-  emptyLedger, isSettled, loadLedger, matchFinding, normalizeTitle, recordDecisions,
+  emptyLedger, fixCommitsIn, isSettled, loadLedger, matchFinding, normalizeTitle, recordDecisions,
   saveLedger, scoreMatch, summarizeDispositions, uncoveredDecisions, unsupportedFixes,
 } from '../src/ledger.mjs';
 
@@ -1504,4 +1504,86 @@ test('a fix commit that resolves nowhere gets its own loudest branch', () => {
   assert.match(named.why, /makes the ledger unreadable from the next run on/);
   // And it must not be worded as the soft "cannot be read" case beside it.
   assert.doesNotMatch(named.why, /what it changed cannot be read/);
+});
+
+// --- fixCommitsIn -------------------------------------------------------------
+
+test('fixCommitsIn counts what each of an iteration\'s fix commits closed', () => {
+  const l = ledgerWith(
+    entry({ title: 'one', disposition: 'fixed', fixCommit: 'fix1', iteration: 2 }),
+    entry({ title: 'two', disposition: 'fixed', fixCommit: 'fix1', iteration: 2 }),
+    entry({ title: 'three', disposition: 'fixed', fixCommit: 'fix2', iteration: 2 }));
+
+  assert.deepEqual(fixCommitsIn(l), [{ commit: 'fix1', closes: 2 }, { commit: 'fix2', closes: 1 }]);
+});
+
+test('fixCommitsIn does not re-accuse an earlier iteration\'s commits', () => {
+  // The whole point of scoping. Iteration 1's commits were passed on or
+  // declared when they landed, and a list that carried them forward would
+  // demand the same declaration again every iteration for the life of the run.
+  const l = ledgerWith(
+    entry({ title: 'old', disposition: 'fixed', fixCommit: 'fix1', iteration: 1 }),
+    entry({ title: 'new', disposition: 'fixed', fixCommit: 'fix2', iteration: 2 }));
+
+  assert.deepEqual(fixCommitsIn(l), [{ commit: 'fix2', closes: 1 }]);
+});
+
+test('an iteration that fixed nothing has no fix commits, not the previous one\'s', () => {
+  // Read off the FIX entries alone, the latest iteration would be 1 — the last
+  // one that wrote an entry carrying a commit — and iteration 2's regression
+  // pass would be told to account for commits that were accounted for an
+  // iteration ago, and every iteration after that.
+  const l = ledgerWith(
+    entry({ title: 'old', disposition: 'fixed', fixCommit: 'fix1', iteration: 1 }),
+    entry({ title: 'declined here', disposition: 'declined', iteration: 2 }));
+
+  assert.deepEqual(fixCommitsIn(l), []);
+});
+
+test('fixCommitsIn ignores dispositions that assert no code change', () => {
+  // `fixed` is the only one that asserts a commit exists, so it is the only one
+  // there could be a pass to run on. A `deferred` entry carrying a stray commit
+  // must not summon a demand for a pass on it.
+  const l = ledgerWith(
+    entry({ title: 'declined', disposition: 'declined', fixCommit: 'fix1', iteration: 1 }),
+    entry({ title: 'deferred', disposition: 'deferred', fixCommit: 'fix1', iteration: 1 }),
+    entry({ title: 'noted', disposition: 'noted', fixCommit: 'fix1', iteration: 1 }));
+
+  assert.deepEqual(fixCommitsIn(l), []);
+});
+
+test('a ledger predating per-decision fix commits yields no commits to ask about', () => {
+  // #86 is what put `fixCommit` on an entry. Before it, `fixed` recorded no
+  // commit at all — so there is nothing to name, and naming `null` would put a
+  // demand for a pass on a commit that was never written down.
+  const l = ledgerWith(entry({ title: 'old fix', disposition: 'fixed', iteration: 1 }));
+
+  assert.deepEqual(fixCommitsIn(l), []);
+});
+
+test('an iteration recorded with an empty decision list has no fix commits', () => {
+  // `converge.mjs` instructs this state by name: when every lane fails, record
+  // the iteration anyway — "the decisions you have — an empty list is valid" —
+  // because only --record advances the counter toward the cap. No entry then
+  // carries iteration 2, so reading the entries answers 1, and iteration 2's
+  // fold demands a pass or a declaration for a commit iteration 1 already
+  // accounted for. The `iterations` row is what records that it happened.
+  const l = {
+    ...ledgerWith(entry({ disposition: 'fixed', fixCommit: 'fix1', iteration: 1 })),
+    iterations: [{ n: 1, decided: 1 }, { n: 2, decided: 0 }],
+  };
+
+  assert.deepEqual(fixCommitsIn(l), []);
+});
+
+test('a ledger that has recorded nothing yet names no fix commits', () => {
+  assert.deepEqual(fixCommitsIn(emptyLedger('base0')), []);
+});
+
+test('fixCommitsIn can be asked about an iteration other than the latest', () => {
+  const l = ledgerWith(
+    entry({ title: 'old', disposition: 'fixed', fixCommit: 'fix1', iteration: 1 }),
+    entry({ title: 'new', disposition: 'fixed', fixCommit: 'fix2', iteration: 2 }));
+
+  assert.deepEqual(fixCommitsIn(l, { iteration: 1 }), [{ commit: 'fix1', closes: 1 }]);
 });

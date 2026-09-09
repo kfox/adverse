@@ -310,8 +310,10 @@ without reading is the same footnote in a new place, and **an item that is
 run by a lane that did not report the findings it closes. Reach for it when a
 commit touched a pinned path, closed a critical, or shipped verification you
 could not watch fail; skip it, out loud, for a batch of small well-pinned
-fixes. `fix.txt` tells the agent the pass may come and names the four
-questions it asks — which is what makes the agent's own "What else this
+fixes. *Out loud* has a flag: the fold refuses a fix commit with neither a pass
+nor a `--no-pass` declaration, because a skipped pass reads exactly like a clean
+one (see the fold below). `fix.txt` tells the agent the pass may come and names
+the four questions it asks — which is what makes the agent's own "What else this
 changed" section honest. When it runs, run it per commit, while the diff is
 small and its intent is still known.
 
@@ -530,6 +532,30 @@ what an earlier iteration `declined` arrives already labeled. That oscillation
 is measured, not hypothetical: a campaign's regression agent, briefed on a
 commit alone, re-proposed a fix the ledger had recorded as critical two
 iterations earlier, and only the operator's memory caught it.
+
+With `--ledger` the fold also answers *which of this iteration's fix commits
+anybody looked at*. Every commit a `fixed` decision recorded must be accounted
+for, one of two ways — a pass on record, or a declaration:
+
+```bash
+    --no-pass <commit>="four one-line fixes to pinned paths, each with its own test"
+```
+
+Neither way is preferred. The pass is recommended, not required, and skipping a
+batch of small well-pinned fixes is the documented call. What the fold refuses
+is a commit with **neither** — the one state nobody can tell apart from a pass
+that ran clean. A declaration is refused without a reason (`--no-pass <sha>`
+alone is the same silence in new syntax), refused without `--ledger` (nothing
+else names the fix commits), and reported when it matches no fix commit of this
+iteration, which is a typo or a stale sha rather than an account of anything.
+
+The refusal is exit 1 *after* the lane files are written: the fold is a publish
+and stays one, so this reports on work that landed rather than withholding it.
+That means the fold you re-run with `--no-pass` added is re-reading commits this
+outdir has already folded, so **it needs `--refold`** — without it the staleness
+check refuses at exit 2 and describes your own refused fold as an earlier
+iteration's leftovers. A malformed `--no-pass` is different again: that is
+refused at exit 2 before anything is written at all, so its re-run does not.
 
 `--phase regression` reads the persona off the basename with the pass number
 stripped, so `regression-auditor-1.json` and `regression-auditor-2.json` both
