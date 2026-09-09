@@ -119,6 +119,102 @@ paragraph is a reading of it.
 an unexplained decision cannot be reviewed later and is indistinguishable from
 an oversight.
 
+**A decision that matches nothing is recorded and named.** With `--report`
+given, `--record` checks each decision against the report's findings and the
+ledger's own entries, and **exits 1** — after writing — listing any that match
+neither, with what the report disagrees with each one about. This is the check
+for a failure that has no other symptom: a decision whose identity fields are
+subtly wrong is recorded, counted on the summary line, and settles nothing, so
+the finding it honestly decided is re-raised from scratch next iteration or
+holds the loop open until the cap.
+
+Exit 1 here is **not** a refusal. The batch is in the ledger and the counter has
+advanced, for the reason spelled out under Phase 8: a branch that does not
+record makes the cap unreachable and the loop non-terminating. Three ordinary
+things legitimately match no report finding — a `noted` item decided in a later
+iteration, a root-cause citation synthesis could not resolve, and any decision
+recorded without `--report`. Only the first is exempted, by the ledger check;
+the second is listed like any other, and the third is not checked at all
+because there is no report to check it against. This paragraph used to promise
+an exemption for the root-cause one that no code has ever granted.
+
+**The exemption is not granted by every `noted` entry.** One the fold checked
+against `report.json` and could not bind excuses nothing: its title, kind and
+file came from the fix payload and nothing corrected them, so honoring it would
+let a batch mint in one iteration the token that excuses its own decision in
+the next. Such a decision is listed with its own sentence, saying that is what
+happened. A `noted` entry the report DID carry still excuses the decision that
+answers it — the report chose its fields — and so does one from a hand-written
+`decisions.json`, which makes no reconciliation claim at all.
+
+The fix is upstream: pass `--report` to `decisions.mjs` and it corrects the
+fields off `report.json` before they ever reach a decision. A hand-written
+decision has to be corrected by hand and re-recorded as a second entry, which
+the ledger is designed for — entries are appended, never rewritten.
+
+**A `fixed` whose commit does not support it is named too.** `fixed` is the one
+disposition that asserts a code change, and `--record` now asks git whether the
+commit that decision names contains one. This check needs no `--report` — it
+reads a commit, not a panel's output — so it runs on every `--record`,
+including the degraded ones. Only the first row is silent:
+
+| the commit… | |
+|---|---|
+| touches the file the decision cites | supported; nothing is printed |
+| touches only other files | named, and told this is often right |
+| changes no file at all | named; an empty commit closes nothing |
+| cannot be read (a merge, or git failing) | named as unread, never as empty |
+| resolves to no commit here | **refused**: nothing is recorded, exit 2 — see below |
+| is not named at all | named; nothing records what change was made |
+
+A decision may spell that commit `commit` (as the schema above documents) or
+`fixCommit`; both are read.
+
+Every row but the refused one is a line in one block, `FIX NOT SUPPORTED BY ITS
+COMMIT`, printed beside the one above and exiting 1 the same way — recorded,
+named, not refused. A fix landing in another file is **not** an accusation: a
+root cause rarely sits where the symptom was reported, and the block exists to
+make you say which case it is in the decision's `reason`. What it catches is the fix that was never made, whose
+only other symptom arrives an iteration later as `REGRESSED` — which sends
+whoever reads it looking for a fix that broke rather than one that is missing.
+
+A merge is reported as unreadable rather than as empty on purpose. `git show
+--name-only` lists nothing for a merge unless told which parent to read it
+against, so "no files" there means "not known", and spelling not-knowing as
+knowing-the-fix-is-absent would accuse real work of being invented.
+
+**A ledger this tool would refuse to read is never written.** Before it saves,
+`--record` puts the prospective ledger through the same `checkBinding` that
+gates every run at startup. If it would be refused, `--record` prints
+`REFUSING TO RECORD`, exits **2**, and writes **nothing** — the one check on
+this path that refuses rather than recording. Four inputs reach it, none of
+which needs anything to go wrong on purpose:
+
+| input | what it does |
+|---|---|
+| a `fixCommit` that resolves nowhere | an amend, a squash before merge, an abbreviated sha that stopped being unique |
+| `--at` that is not a commit here | lands on every entry in the batch |
+| `--base` that is not a commit here | lands on the ledger itself |
+| a batch carrying the ledger past 1000 entries | the entry cap `checkBinding` enforces |
+
+This is the one place the record-anyway doctrine is inverted, and deliberately.
+Everywhere else, refusing a write would freeze the iteration counter, because
+only `--record` advances it. Here **recording** is what freezes it: the ledger
+is append-only and this tool has no repair mode, so a ledger that fails
+`checkBinding` is refused by every later invocation — status and `--record`
+alike, at exit 2, before either does anything — and nothing can take it back.
+Refusing writes nothing, so you correct one sha in `decisions.json` (a
+per-iteration file this page already tells you to correct by hand) or one
+argument, record again, and *that* record advances the counter.
+
+**`decisions.json` must be a decisions document.** `--record` takes either
+`{"decisions": [...]}` or a bare array; anything else — a file holding the
+literal `null`, an object with no `decisions` array, a `report.json` passed by
+mistake — is refused at exit 2 with nothing written. An empty batch is
+`{"decisions": []}` and is recorded like any other, which is what makes the two
+worth telling apart: "I could not find the decisions" must not be spelled the
+way "there were none" is.
+
 **Work the confirmed root causes first, one decision each.** A group the report
 calls `confirmed` is one fix and one disposition covering N citations. Write it
 as one entry per citation, every entry carrying the same `disposition`,
@@ -210,13 +306,25 @@ Then check what landed and fold it, the same way round 1 is checked:
 node ${SKILL_DIR}/scripts/validate.mjs --phase fix "$ADVERSE_RUN"/*/fix-*.json
 
 node ${SKILL_DIR}/scripts/decisions.mjs --fix "$ADVERSE_RUN"/*/fix-*.json \
-    --out "$ADVERSE_RUN"/decisions.json
+    --report "$ADVERSE_RUN"/report.json --out "$ADVERSE_RUN"/decisions.json
 ```
 
 `decisions.mjs` folds every payload of this iteration into the `decisions.json`
 the `--record` command above reads — `fixed` and `declined` become decisions of
 those dispositions carrying the identity fields the payload already holds, so
 you never reassemble them by hand. Fold the whole iteration in one call.
+
+`--report` is what makes those fields the right ones. A fix agent copies its
+briefing entry verbatim, as `fix.txt` tells it to, and **the briefing is
+per-lane while the report is merged**: when two lanes report one title — the
+cross-validated case — synthesis promotes `kind`, `file`, `line` and
+`counterpart` from whichever lane supplied them, so the briefed entry can read
+`design` with no file where the report reads `defect` at `src/auth.py:88`. The
+ledger has to carry the report's copy, because a merged report is what every
+later pass matches against; without `--report` the decision matches nothing,
+settles nothing, and `converge.mjs --record --report` records it and names it
+at exit 1. Every field it corrects is printed, so the rewrite can be read back
+against the payload it came from.
 
 **An item a fix agent names but does not fix is a finding with no ID.** It is
 not in `report.json`, `--record` has nowhere to put it, and it exists only in
@@ -226,10 +334,17 @@ heading that said "out of scope, named not fixed"; nothing was recorded, and the
 next iteration two independent round-1 reviewers spent a lane-pair's attention
 re-deriving it. So the payload carries a `named_not_fixed` list, `decisions.mjs`
 mints an id for each entry (`NF-<batch>-<n>`, which cannot collide with triage's
-`F<n>`) and records it `noted` with the agent's own reasoning. `noted` settles
-nothing, deliberately: an untriaged footnote annotates the next briefing and
-adjudicates no finding. It used to be recorded `deferred`, which settles — so a
-fix agent copying a blocking critical's title into `named_not_fixed`, which
+`F<n>`) and records it `noted` with the agent's own reasoning. Its identity
+fields are corrected off `report.json` exactly as `fixed` and `declined` are:
+`fix.txt` routes an ASSIGNED finding into this list whenever a batch leaves one
+for later, so the report often does carry the item, and an identity that
+reaches the ledger unchecked is one the coverage check would otherwise have to
+take the batch's word for. Each entry records which of the two it was, and the
+fold prints the ones the report does not carry under their own heading.
+`noted` settles nothing, deliberately: an untriaged footnote annotates the next
+briefing and adjudicates no finding. It used to be recorded `deferred`, which
+settles — so a fix agent copying a blocking critical's title into
+`named_not_fixed`, which
 `fix.txt` tells it to do verbatim, closed that critical with no code change and
 no warning. Read the block it prints before you record — a channel you forward
 without reading is the same footnote in a new place, and **an item that is
@@ -239,8 +354,10 @@ without reading is the same footnote in a new place, and **an item that is
 run by a lane that did not report the findings it closes. Reach for it when a
 commit touched a pinned path, closed a critical, or shipped verification you
 could not watch fail; skip it, out loud, for a batch of small well-pinned
-fixes. `fix.txt` tells the agent the pass may come and names the four
-questions it asks — which is what makes the agent's own "What else this
+fixes. *Out loud* has a flag: the fold refuses a fix commit with neither a pass
+nor a `--no-pass` declaration, because a skipped pass reads exactly like a clean
+one (see the fold below). `fix.txt` tells the agent the pass may come and names
+the four questions it asks — which is what makes the agent's own "What else this
 changed" section honest. When it runs, run it per commit, while the diff is
 small and its intent is still known.
 
@@ -443,7 +560,7 @@ node ${SKILL_DIR}/scripts/validate.mjs --phase regression "$ADVERSE_RUN"/*/regre
 
 node ${SKILL_DIR}/scripts/regression.mjs --payload "$ADVERSE_RUN"/*/regression-*.json \
     --outdir "$ADVERSE_RUN" --choice "$ADVERSE_RUN"/lane-choice-*.json \
-    --repo . ${LEDGER:+--ledger "$LEDGER"}
+    --repo . ${LEDGER:+--ledger "$LEDGER"} ${LEDGER:---no-ledger}
 ```
 
 `--repo` is unconditional: it is what lets the fold resolve two spellings of
@@ -452,13 +569,56 @@ lane choice to its pass. Without it the fold falls back to exact string
 equality — safe, but a choice recorded under an abbreviated sha then goes
 unstamped, and the lane summary reports it unrecorded.
 
-Pass `--ledger` whenever the run has one. The fold then annotates any finding
+**Pass `--ledger` whenever the run has one, and `--no-ledger` when it does
+not.** One of the two, never neither: the fold's own account of which fix
+commits anybody looked at runs only under `--ledger`, and the party who decides
+whether to pass it is the party whose fix commits it accounts for. Omitting it
+turned that whole check off at exit 0 and left nothing in the output to say the
+check had not run, which is the same shape as the check itself — a skipped one
+reads exactly like a clean one. A ledger-less fold is legitimate (iteration 1
+has none yet), so it is the ABSENCE that has to be declared, exactly as
+`--closed-by-none` declares an empty exclusion list rather than leaving the flag
+off. `--no-ledger` also prints a line saying so, so the declaration reaches
+whoever reads the run rather than only whoever typed it.
+
+With `--ledger` the fold annotates any finding
 that re-litigates a settled decision with the recorded disposition and reason —
 the same `adjudicated` block triage writes — so a pass that proposes reinstating
 what an earlier iteration `declined` arrives already labeled. That oscillation
 is measured, not hypothetical: a campaign's regression agent, briefed on a
 commit alone, re-proposed a fix the ledger had recorded as critical two
 iterations earlier, and only the operator's memory caught it.
+
+It also answers *which of this iteration's fix commits anybody looked at*. Every
+commit a `fixed` decision recorded must be accounted for, one of two ways — a
+pass on record, or a declaration:
+
+```bash
+    --no-pass <commit>="four one-line fixes to pinned paths, each with its own test"
+```
+
+Neither way is preferred. The pass is recommended, not required, and skipping a
+batch of small well-pinned fixes is the documented call. What the fold refuses
+is a commit with **neither** — the one state nobody can tell apart from a pass
+that ran clean. A declaration is refused without a reason (`--no-pass <sha>`
+alone is the same silence in new syntax), refused without `--ledger` (nothing
+else names the fix commits), and reported when it matches no fix commit of this
+iteration, which is a typo or a stale sha rather than an account of anything —
+including when this iteration recorded no fix commit at all, which is the one
+state in which every declaration matches nothing.
+
+The refusal is exit 1 and **nothing is written**, like every other refusal this
+fold makes. So the remedy is to re-run this same fold with the declaration
+added, and that re-run needs **no `--refold`**: the outdir holds no fold of
+these commits, because the refused run published none.
+
+That ordering is deliberate and it used to be the other way. Refusing after the
+write meant the remedy re-read commits the outdir had already folded, so it
+needed `--refold` — and `--refold` disarms the staleness check for every lane at
+once, the check that stops an earlier iteration's leftover pass being signed as
+this iteration's evidence. A guard the normal workflow tells you to switch off
+is not a guard. Refusing first costs a delayed publish, which one flag
+recovers, instead of a disarmed guard, which nothing does.
 
 `--phase regression` reads the persona off the basename with the pass number
 stripped, so `regression-auditor-1.json` and `regression-auditor-2.json` both

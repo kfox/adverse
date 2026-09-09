@@ -70,6 +70,13 @@ const MAX_LEDGER_ENTRIES = 1000;
 // The weakest match that may settle a finding. Below it, annotate only.
 export const SETTLING_SCORE = 3;
 
+// How many of a commit's changed paths `unsupportedFixes` names before it
+// stops. The list comes from git rather than from the model, so it is bounded
+// by the repository — but a sweeping refactor's commit legitimately touches
+// hundreds, and the point of the line is to let a reader recognize the commit,
+// which the first few do as well as all of them.
+const MAX_NAMED_FILES = 5;
+
 // Longest ledger `reason` copied into a briefing. The ledger is a JSON file on
 // disk, and its text is rendered into the round-2 prompt, so it is a channel
 // for whoever can write that file. Clipping bounds the payload; labeling it in
@@ -93,6 +100,16 @@ const SETTLED = new Set(['declined', 'deferred']);
 export function isSettled(disposition) {
   return SETTLED.has(disposition);
 }
+
+// The one disposition minted for an item the report never raised.
+//
+// Every other disposition answers a finding some lane filed, which is why
+// `uncoveredDecisions` reports one that matches nothing. This one matches
+// nothing BY DESIGN: src/decisions.mjs mints it for what a fix agent noticed
+// and no lane reported, and that channel exists precisely because the report
+// has never seen the item. Exported so that file states the fact once rather
+// than spelling `noted` a second time.
+export const UNREPORTED_DISPOSITION = 'noted';
 
 // One rendering of "what this batch decided", for every bridge that prints it.
 //
@@ -128,15 +145,72 @@ export function emptyLedger(base = null) {
   return { version: LEDGER_VERSION, base, iterations: [], entries: [] };
 }
 
+// A value read off disk, rendered into a message a bridge prints as one line.
+//
+// Bounded and flattened at the PRODUCER, because three bridges print these —
+// converge.mjs, triage.mjs, regression.mjs — each with its own
+// `problems.map((p) => \`  - ${p}\n\`)`, and every one of them rendered a
+// title, a ref and a disposition straight off a JSON file on disk. Unbounded,
+// one of those buries the reason the ledger was refused under its own output;
+// carrying a newline, it can forge a line of the bridge's own output above the
+// real ones. Every message built with this is one sentence printed as one line,
+// so a newline in an interpolated value is never content — unlike a `reason`,
+// which is prose and is why `clipReason` keeps them.
+//
+// Lifted out of `checkBinding` when `loadLedger` grew a refusal naming the
+// ledger path, which arrives from argv and is a string this module did not
+// choose either.
+function oneLine(v) {
+  return clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
+}
+
+// What a value is, for a refusal that has to say why it is not the shape asked
+// for. `JSON.stringify` renders `null`, a number and a string faithfully and an
+// array as its whole contents, which is the one case worth naming by shape.
+function shapeOf(value) {
+  return Array.isArray(value) ? 'an array' : oneLine(JSON.stringify(value));
+}
+
 export function loadLedger(file) {
   if (!file || !existsSync(file)) return emptyLedger();
   const raw = JSON.parse(readFileSync(file, 'utf-8'));
+  // The class `decisionsIn` closed one file over, reached from the other side.
+  // A ledger holding the literal `null` came back as `Cannot read properties of
+  // null (reading 'version')` — the right exit code attached to a sentence that
+  // names neither the file nor what is wrong with it — and a ledger holding
+  // `5`, `"hello"` or `[]` got the version-mismatch message, which is a true
+  // sentence about the wrong problem: nothing about `5` is a version its writer
+  // could correct.
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`ledger ${oneLine(file)} holds ${shapeOf(raw)}, not a ledger object; `
+      + 'refusing to guess at its shape');
+  }
   if (raw.version !== LEDGER_VERSION) {
     throw new Error(`ledger version ${raw.version} is not ${LEDGER_VERSION}; refusing to guess at its shape`);
   }
   raw.entries ??= [];
   raw.iterations ??= [];
   return raw;
+}
+
+// One answer per distinct ref for the life of one call, negatives included.
+//
+// The injected resolver is whatever the caller passed, and this module is the
+// wrong place to assume anything about it: src/trace.mjs's `resolveRef` does
+// memoize failures now, but a test passes a counting stub and a future caller
+// may pass something that shells out. Entry count is attacker-chosen, so N
+// entries sharing one bogus commit would otherwise cost N calls before the
+// ledger can be refused — measured at 26.1 s for 2000 entries against a real
+// `git rev-parse`. A memo that lives for one call cannot go stale.
+//
+// Shared by `checkBinding` and `closureOf`, which had a byte-identical copy of
+// it each.
+function memoizeResolve(resolve) {
+  const seen = new Map();
+  return (ref) => {
+    if (!seen.has(ref)) seen.set(ref, resolve(ref));
+    return seen.get(ref);
+  };
 }
 
 // Refuse a ledger that does not belong to this repository.
@@ -149,14 +223,6 @@ export function loadLedger(file) {
 export function checkBinding(ledger, resolve) {
   const problems = [];
 
-  // Resolve each distinct ref once, negatives included.
-  //
-  // `resolveRef` deliberately does not cache negatives — a ref that does not
-  // exist yet must stay resolvable later. That is right for the process and
-  // wrong for this loop: entry count is attacker-chosen, so N entries sharing
-  // one bogus commit cost N `git rev-parse` spawns before the ledger can be
-  // refused. Measured at 26.1 s for 2000 entries, ~1100x per entry. This cache
-  // lives for one call, so it cannot go stale.
   const entryCount = (ledger.entries ?? []).length;
   if (entryCount > MAX_LEDGER_ENTRIES) {
     return [`ledger holds ${entryCount} entries, more than the ${MAX_LEDGER_ENTRIES} `
@@ -164,14 +230,10 @@ export function checkBinding(ledger, resolve) {
       + 'resolving that many commits'];
   }
 
-  const seen = new Map();
-  const resolveOnce = (ref) => {
-    if (!seen.has(ref)) seen.set(ref, resolve(ref));
-    return seen.get(ref);
-  };
+  const resolveOnce = memoizeResolve(resolve);
 
   if (ledger.base && !resolveOnce(ledger.base)) {
-    problems.push(`base ${ledger.base} is not a commit in this repository`);
+    problems.push(`base ${oneLine(ledger.base)} is not a commit in this repository`);
   }
   for (const e of ledger.entries ?? []) {
     // The caller refuses the ledger on the first problem, so listing every one
@@ -185,11 +247,11 @@ export function checkBinding(ledger, resolve) {
     // and it passed clean. `recordDecisions` always writes one, so an entry
     // without it did not come from this tool.
     if (!e.atCommit) {
-      problems.push(`entry ${JSON.stringify(e.title)} carries no atCommit; every recorded decision has one`);
+      problems.push(`entry ${JSON.stringify(oneLine(e.title))} carries no atCommit; every recorded decision has one`);
       continue;
     }
     if (!resolveOnce(e.atCommit)) {
-      problems.push(`entry ${JSON.stringify(e.title)} is anchored at ${e.atCommit}, which is not a commit in this repository`);
+      problems.push(`entry ${JSON.stringify(oneLine(e.title))} is anchored at ${oneLine(e.atCommit)}, which is not a commit in this repository`);
     }
     // Validity when present, not presence. `atCommit` above is required
     // because every entry carries one; `fixCommit` is null on every
@@ -200,10 +262,14 @@ export function checkBinding(ledger, resolve) {
     // silence: the ledger would answer "this commit closed nothing", which is
     // the derived form of `--closed-by-none`.
     if (e.fixCommit && !resolveOnce(e.fixCommit)) {
-      problems.push(`entry ${JSON.stringify(e.title)} names fix commit ${e.fixCommit}, which is not a commit in this repository`);
+      problems.push(`entry ${JSON.stringify(oneLine(e.title))} names fix commit ${oneLine(e.fixCommit)}, which is not a commit in this repository`);
     }
     if (e.disposition !== undefined && !DISPOSITIONS.includes(e.disposition)) {
-      problems.push(`entry ${JSON.stringify(e.title)} has disposition ${JSON.stringify(e.disposition)}, which is not one of ${DISPOSITIONS.join(', ')}`);
+      // Stringified first and bounded second, unlike the title beside it: a
+      // disposition that is not a string at all is exactly what this branch
+      // reports, and `String(…)` would render every such value as the same
+      // `[object Object]`.
+      problems.push(`entry ${JSON.stringify(oneLine(e.title))} has disposition ${oneLine(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
   }
   return problems;
@@ -627,6 +693,48 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
   });
 }
 
+// The report's findings, or a refusal naming what the file actually is.
+// Shared by every reader of a report so that "I could not find the findings"
+// cannot come to be spelled one way in one of them. Exported for
+// src/decisions.mjs, which reads a report for the same reason and had grown a
+// third hand-typed copy of this sentence.
+export function requireFindings(report) {
+  if (!Array.isArray(report?.findings)) {
+    throw new Error('report has no findings array; this is not a synthesis report');
+  }
+  return report.findings;
+}
+
+// One entry of a decisions document, or a refusal naming which entry it is.
+//
+// Every reader here walks the same array and each of them assumed an object.
+// `[null]` — the document one element short of the shape `decisionsIn` refuses
+// — reached three of them and got three different answers: `uncoveredDecisions`
+// and `recordDecisions` died on `Cannot read properties of null (reading
+// 'disposition')`, naming neither the file nor which entry, and
+// `unsupportedFixes` skipped it in silence through an optional chain, so a
+// `fixed` claim inside a malformed batch went unexamined. One guard at the
+// three call sites, so they cannot answer differently again, and it says
+// `decisions[i]` because the bridge that prints it does not always have the
+// decisions file in hand to name.
+function requireDecision(d, i) {
+  if (d === null || typeof d !== 'object' || Array.isArray(d)) {
+    throw new Error(`decisions[${i}] is ${shapeOf(d)}; every entry in a decisions document is `
+      + 'an object carrying a disposition and a reason');
+  }
+  return d;
+}
+
+// The report findings a decision matches strongly enough to settle.
+//
+// Lifted out of `reportersOf`, which computed exactly this list and then kept
+// only the lanes off it. Both callers need the same bar for the same reason
+// spelled out below: under SETTLING_SCORE a match knows kind, file and that two
+// lines are close, and does not know the two findings are one.
+function settlingMatches(decision, findings) {
+  return findings.filter((f) => (scoreMatch(decision, f)?.score ?? 0) >= SETTLING_SCORE);
+}
+
 // The review lanes that reported the finding a decision answers, read off the
 // report that decision was recorded against.
 //
@@ -653,12 +761,312 @@ export function annotate(findings, ledger, traceFor = () => null, { reportDigest
 // reporter lists belong.
 function reportersOf(decision, findings) {
   const lanes = new Set();
-  for (const finding of findings) {
-    const m = scoreMatch(decision, finding);
-    if (!m || m.score < SETTLING_SCORE) continue;
+  for (const finding of settlingMatches(decision, findings)) {
     for (const lane of finding.reporters ?? []) lanes.add(lane);
   }
   return [...lanes].sort();
+}
+
+// Which of `scoreMatch`'s identity guards a title-equal pair fails.
+//
+// `counterpart` is named only for a `contract` decision, because that is the
+// only kind whose match depends on it — reporting it for a `defect` would send
+// an operator to edit a field that changes nothing.
+function identityGap(decision, finding) {
+  const pair = (a, b) => `(${a ?? 'none'} here, ${b ?? 'none'} in the report)`;
+  if ((decision.kind ?? null) !== (finding.kind ?? null)) {
+    return `the kinds differ ${pair(decision.kind, finding.kind)}`;
+  }
+  if ((decision.file ?? null) !== (finding.file ?? null)) {
+    return `the files differ ${pair(decision.file, finding.file)}`;
+  }
+  if (decision.kind === 'contract'
+      && (decision.counterpart ?? null) !== (finding.counterpart ?? null)) {
+    return `the counterparts differ ${pair(decision.counterpart, finding.counterpart)}`;
+  }
+  return 'they differ in a field this check does not compare';
+}
+
+// Why a decision matched nothing, in the terms its author has to act in.
+//
+// A bare "matched nothing" is not actionable, and the two bugs this check
+// exists to catch both produce a decision whose title IS in the report and
+// whose identity fields are one field off: `toNamedNotFixed` hardcoding
+// `counterpart: null` against `scoreMatch`'s contract guard, and that guard
+// testing counterpart presence rather than equality. Naming the field is the
+// difference between a refusal fixed in one edit and one that reads as the
+// tool being broken.
+// The title is asked FIRST, and the near-miss second. Both orders were written;
+// this one is right because a title-equal finding IS the finding the decision
+// was taken on — `upsert` merges on a normalized title, so a report carries at
+// most one — while a score-1 near-miss is only the closest thing in the file.
+// With the near-miss first, one unrelated contract finding elsewhere in the
+// same file (score 1, "no line on one side") shadowed the counterpart
+// diagnostic for the finding actually decided, and sent the operator to fix a
+// line number on a finding they never touched.
+function whyUncovered(decision, findings) {
+  const norm = normalizeTitle(decision.title);
+  const sameTitle = norm && findings.find((f) => normalizeTitle(f.title) === norm);
+  if (sameTitle) return `the report carries this title, but ${identityGap(decision, sameTitle)}`;
+
+  let best = null;
+  for (const finding of findings) {
+    const m = scoreMatch(decision, finding);
+    if (m && (!best || m.score > best.score)) best = m;
+  }
+  if (best) {
+    return `matched at score ${best.score} (${best.why}), which annotates but does not settle`;
+  }
+  return 'no finding in the report carries this title';
+}
+
+// The ledger entries that could be what this decision is answering.
+//
+// The one exemption `uncoveredDecisions` grants comes from here, and it is
+// narrow on purpose. Keyed on ANY prior settling entry, it exempted a
+// mis-anchored decision with its own first recording: iteration 1 named it, the
+// finding it meant to answer never settled and so came back, the identical
+// decision was recorded again, and from iteration 2 the run went quiet all the
+// way to the cap. Measured. That is exactly the holds-open-with-no-symptom
+// failure this check exists to catch, arriving one iteration late — and a loop
+// iterates by definition, so the second recording is the likely one.
+//
+// UNREPORTED_DISPOSITION is the one disposition minted for an item no report
+// has seen, which is what makes it the one that can vouch for another. Every
+// other entry is itself an answer to a finding, and an answer nothing matched
+// has no standing to excuse the next one.
+function notesMatching(ledger, decision) {
+  return (ledger.entries ?? []).filter((entry) =>
+    entry.disposition === UNREPORTED_DISPOSITION
+    && (scoreMatch(entry, decision)?.score ?? 0) >= SETTLING_SCORE);
+}
+
+// A `noted` entry whose identity the fold checked against a report and no lane
+// had filed. The fix batch chose every field on it, and nothing corrected them.
+const isSelfIdentified = (entry) => entry.reconciled === false;
+
+// What the check says about a decision whose only cover is such an entry. Its
+// own sentence rather than `whyUncovered`'s, because the remedy is different:
+// there is no field to correct off report.json here, and the operator is being
+// told which entry stopped covering it and why.
+const MINTED_NOTE_WHY = 'the only thing on record carrying this identity is a `noted` entry the '
+  + 'fold checked against a report and no lane had filed, so a batch would be excusing its own '
+  + 'decision with its own footnote';
+
+// Decisions that will settle nothing, because nothing they could be answering
+// matches them at SETTLING_SCORE (kfox/adverse#58, item 1).
+//
+// A decision whose identity fields are subtly wrong is recorded, matches
+// nothing, and settles nothing — so the finding it honestly decided is either
+// re-raised from scratch next iteration or holds the loop open until the cap.
+// Both failures are SILENT at the moment they are caused: the decision is in
+// the ledger, the summary counts it, and only the finding's stubborn
+// reappearance, iterations later, ever hints at it. This names it while its
+// author is still holding the report it was written against.
+//
+// REPORTED, never refused, and the batch is recorded either way. Two documented
+// paths produce a decision that legitimately matches no report finding — a
+// `noted` item decided in a later iteration, and any decision recorded against
+// a report this run was not given — and a check that stopped the write would
+// freeze the iteration counter on both. `iterations` grows only under
+// `--record`, so a branch that does not record makes the cap unreachable and
+// the loop non-terminating; see references/convergence-loop.md. A decision
+// matching nothing never settles the WRONG finding, which is the failure worth
+// a refusal — it only fails to settle the right one.
+//
+// The ledger is consulted beside the report because a decision may be
+// answering something already on record rather than something the panel just
+// filed. That is the ordinary shape of deciding a `noted` item, which the loop
+// reference says still needs a decision and which is in no report by
+// construction. Only a `noted` entry vouches, for the reason `notesMatching`
+// gives: any-prior-match let a mistake exempt itself one iteration later.
+//
+// And only a `noted` entry the fold did not invent. `ac8f729` refused the
+// same-batch form of a self-issued exemption — one payload that both asserts a
+// decision and names the same identity as not-fixed — and left the
+// cross-iteration form open: mint the token in iteration 1, spend it in
+// iteration 2, and a `fixed` claim answering nothing in the report recorded
+// clean. Reproduced before this changed, as the asymmetric pair: with the
+// ledger `[]`, without it the row.
+//
+// `reconciled === false` is the fact that closes it, and it is the only one
+// that does. It is the fold's own statement that it looked this identity up in
+// the report and no lane had filed it, derived by the tool from report.json
+// rather than declared by the batch — which is what `reporters` is usually
+// good for, and `reporters` cannot serve here: it is `[]` for the laundered
+// entry AND for the legitimate one, since a note the report never carried names
+// no lane either way. Measured — gating on it turned exactly the two tests that
+// pin the legitimate path red. The gate is not on the disposition being
+// excused, because a laundered `declined` is the same channel one word over.
+//
+// What still vouches: a note bound to a report finding (`true` — the report
+// chose its fields), and a note no fold ever checked (`null`, so a hand-written
+// decisions.json, which is the operator's own writing rather than the payload's
+// under review). The residue is a fold run without `--report`, which records
+// `null` and vouches; that invocation is the degraded mode both bridges already
+// warn about at length, and it is the orchestrator's to make, not the batch's.
+//
+// The whole report, never its `findings` array, for the reason `recordDecisions`
+// spells out: a caller doing the extraction itself spells "this is not a
+// report" as "I was given no report".
+export function uncoveredDecisions(decisions, report, { ledger = emptyLedger() } = {}) {
+  const findings = requireFindings(report);
+  const uncovered = [];
+  for (const [i, d] of decisions.entries()) {
+    requireDecision(d, i);
+    // A disposition this vocabulary does not have is `recordDecisions`' refusal
+    // to make, and it makes it in one line naming the field. Reporting such a
+    // decision here instead would answer a question nobody asked — whether it
+    // matched a finding — about an entry that is not a decision yet.
+    if (!DISPOSITIONS.includes(d.disposition)) continue;
+    if (d.disposition === UNREPORTED_DISPOSITION) continue;
+    if (settlingMatches(d, findings).length) continue;
+
+    const notes = notesMatching(ledger, d);
+    if (notes.some((entry) => !isSelfIdentified(entry))) continue;
+    uncovered.push({
+      title: clipReason(d.title ?? ''),
+      disposition: d.disposition ?? null,
+      why: clipReason(notes.length ? MINTED_NOTE_WHY : whyUncovered(d, findings)),
+    });
+  }
+  return uncovered;
+}
+
+// The commit a decision says closed the finding, under either of its names.
+//
+// Two spellings, because two writers. `decisions.json` — the file
+// references/convergence-loop.md teaches you to write by hand — carries
+// `commit`, and src/decisions.mjs renames it to `fixCommit` on the way through
+// so a ledger entry and a fix payload do not read as the same shape. Everything
+// here had been written against the entry's spelling alone, so a hand-written
+// decision following the documented schema was recorded with `fixCommit: null`:
+// its commit dropped in silence, invisible to `closureOf`, and the `commit`-on-
+// a-decline refusal that the same documented paragraph promises never fired.
+// Measured on all three. Read through one function so the two cannot come apart
+// again — two corrected copies is how they drifted.
+export function fixCommitOf(decision) {
+  return decision?.fixCommit ?? decision?.commit ?? null;
+}
+
+// `fixed` decisions whose own commit does not support the claim
+// (kfox/adverse#58, item 2).
+//
+// A `fixed` disposition asserts a code change. Nothing checked that one was
+// made, and the failure is not hypothetical: a fix agent that believed it had
+// edited a file, or an orchestrator assembling decisions.json from a report it
+// read rather than a tree it inspected, records `fixed` against a commit that
+// does not contain the fix. The finding comes back next iteration as REGRESSED
+// — the loudest signal this system has — pointing at a fix that was never
+// made, which sends whoever reads it looking for a fix that broke rather than
+// a fix that is missing.
+//
+// The issue asks for `git log -S` over the recorded range. Per-decision
+// `fixCommit` (kfox/adverse#86) makes a sharper question available: not "did
+// anything in the range touch this file" but "did the commit THIS decision
+// names touch it". Four answers, and only the first is silent:
+//
+//   touches the cited file        supported. Nothing to say.
+//   touches only other files      reported. A root-cause fix in another file
+//                                 is legitimate and common, so this is not an
+//                                 accusation — but it is the shape a fictional
+//                                 fix also has, and the reason should say
+//                                 which one it is.
+//   changes no file at all        reported, loudest. An empty commit closes
+//                                 nothing, whatever it says in its message.
+//   cannot be read                reported. A merge, or a git that would not
+//                                 run. Never silent: `filesChangedIn` keeps
+//                                 these distinguishable from an empty list
+//                                 precisely so that not knowing cannot pass
+//                                 for knowing the fix is absent.
+//
+// A decision citing no file is supported by any commit — there is no claim
+// about a location to check — so it is silent rather than reported. And this
+// REPORTS; it does not refuse, for the reason `uncoveredDecisions` gives at
+// length: only `--record` advances the iteration counter, and a branch that
+// does not record makes the cap unreachable. `UNRESOLVED` is the exception its
+// own branch explains, and converge.mjs acts on it by name.
+
+// Which of the branches below a report came from, carried beside the sentence.
+//
+// The branch is what a caller has to act on — `UNRESOLVED` alone makes the
+// whole ledger unreadable, so converge.mjs treats it differently from the rest
+// — and the alternative is matching the prose of `why`, which is output text
+// and free to be reworded by anyone improving a message.
+export const FIX_SUPPORT = Object.freeze({
+  NO_COMMIT: 'no-commit',
+  UNRESOLVED: 'unresolved',
+  UNREADABLE: 'unreadable',
+  EMPTY: 'empty',
+  ELSEWHERE: 'elsewhere',
+});
+
+export function unsupportedFixes(decisions, filesChanged) {
+  const unsupported = [];
+  // `commit` is clipped like every other string this returns. It comes off the
+  // same decisions.json as `title`, and it reaches an operator's terminal from
+  // two readers: this function's own block, and `checkBinding`'s problems once
+  // the value has been recorded as an entry's `fixCommit`. Clipping at the one
+  // producer covers both rather than leaving each reader to remember.
+  const name = (d, { commit = null, status, why }) => ({
+    title: clipReason(d.title ?? ''),
+    commit: commit === null ? null : clipReason(commit),
+    status,
+    why,
+  });
+
+  for (const [i, d] of decisions.entries()) {
+    requireDecision(d, i);
+    if (d.disposition !== 'fixed') continue;
+
+    const commit = fixCommitOf(d);
+    // No evidence offered, which is not the same accusation as evidence that
+    // contradicts the claim, and says so. `validateFix` requires a commit on
+    // every `fixed` entry, so a folded batch cannot reach this — it is the
+    // hand-written decisions.json, which `recordDecisions` accepts without one.
+    // `closureOf` already skips such an entry when asked what a commit closed,
+    // so today a fix recorded this way is invisible to the machinery that
+    // picks a disinterested reviewer, silently.
+    if (!commit) {
+      unsupported.push(name(d, { status: FIX_SUPPORT.NO_COMMIT,
+        why: 'it names no commit at all, so nothing records what change it made' }));
+      continue;
+    }
+
+    const changed = filesChanged(commit);
+    // Its own branch, and the loudest, because it is the only one that is not
+    // about this decision alone. `checkBinding` refuses a whole ledger carrying
+    // an entry whose fix commit resolves nowhere, and the ledger is append-only
+    // — so recording this makes every later `converge.mjs` run, status and
+    // record both, exit 2 on a file that cannot be repaired. The remedies the
+    // block offers for the other branches do not apply to it, and converge.mjs
+    // refuses the write outright on `FIX_SUPPORT.UNRESOLVED` rather than
+    // printing one.
+    if (changed.status === 'unresolved') {
+      unsupported.push(name(d, { commit, status: FIX_SUPPORT.UNRESOLVED,
+        why: `${clipReason(changed.why ?? 'that commit does not resolve here')}. Recording this `
+          + 'makes the ledger unreadable from the next run on — fix the commit before you record' }));
+      continue;
+    }
+    if (changed.status !== 'ok') {
+      unsupported.push(name(d, { commit, status: FIX_SUPPORT.UNREADABLE,
+        why: `what it changed cannot be read: ${clipReason(changed.why ?? 'no reason given')}` }));
+      continue;
+    }
+    if (!changed.files.length) {
+      unsupported.push(name(d, { commit, status: FIX_SUPPORT.EMPTY,
+        why: 'that commit changes no file at all' }));
+      continue;
+    }
+    if (!d.file) continue;
+    if (changed.files.includes(d.file)) continue;
+
+    unsupported.push(name(d, { commit, status: FIX_SUPPORT.ELSEWHERE,
+      why: `that commit does not touch ${clipReason(d.file)}; it touches `
+        + `${changed.files.slice(0, MAX_NAMED_FILES).map((f) => clipReason(f)).join(', ')}`
+        + `${changed.files.length > MAX_NAMED_FILES ? ', …' : ''}` }));
+  }
+  return unsupported;
 }
 
 // Add this iteration's decisions. Entries are appended, never rewritten: the
@@ -681,12 +1089,11 @@ export function recordDecisions(ledger, decisions, {
   // briefing — would derive no lane for anything and record a whole iteration
   // whose fix commits can never say who must not review them. A genuinely
   // finding-less report writes `findings: []` and passes.
-  if (report !== null && !Array.isArray(report.findings)) {
-    throw new Error('report has no findings array; this is not a synthesis report');
-  }
+  if (report !== null) requireFindings(report);
 
   const next = { ...ledger, entries: [...(ledger.entries ?? [])] };
-  for (const d of decisions) {
+  for (const [i, d] of decisions.entries()) {
+    requireDecision(d, i);
     if (!DISPOSITIONS.includes(d.disposition)) {
       throw new Error(`unknown disposition ${JSON.stringify(d.disposition)}; expected one of ${DISPOSITIONS.join(', ')}`);
     }
@@ -711,9 +1118,15 @@ export function recordDecisions(ledger, decisions, {
     // payload entry for the same reason; this is the guard for a caller that
     // skipped the validator, which is the whole reason src/decisions.mjs keeps
     // its own.
-    if (d.fixCommit && d.disposition !== 'fixed') {
+    //
+    // Read through `fixCommitOf`, so a decline spelling it `commit` — which is
+    // the spelling the documented schema uses — is refused rather than waved
+    // through. It was waved through: measured, a `declined` carrying `commit`
+    // recorded at exit 0, past the refusal this comment describes.
+    const declaredCommit = fixCommitOf(d);
+    if (declaredCommit && d.disposition !== 'fixed') {
       throw new Error(`decision for ${JSON.stringify(d.title)} is ${d.disposition} and names `
-        + `fix commit ${JSON.stringify(d.fixCommit)}; only a fixed decision closes a finding `
+        + `fix commit ${JSON.stringify(declaredCommit)}; only a fixed decision closes a finding `
         + 'with a commit');
     }
     next.entries.push({
@@ -730,13 +1143,23 @@ export function recordDecisions(ledger, decisions, {
       // and they were one field: `reporters` held the fix batch's label, so
       // the ledger said a fix agent had reported the finding it fixed.
       reporters: report ? reportersOf(d, report.findings) : [],
+      // What the fold could bind this identity to, kept rather than dropped.
+      // The whitelist used to end one field short of it, so nothing downstream
+      // of the ledger could tell a `noted` identity the report CARRIED from one
+      // a fix payload made up — which is the difference `uncoveredDecisions`
+      // decides its one exemption on. Three values, and every one is the fold's
+      // reading of report.json rather than the batch's claim: `true` bound to a
+      // finding, `false` checked and no finding carries it, `null` no report
+      // reached the fold. A decision that never went through the fold has no
+      // statement to keep and records `null` — see `isSelfIdentified`.
+      reconciled: d.reconciled ?? null,
       agent: d.agent ?? null,
       // Which commit closed THIS finding, where `atCommit` below is the commit
       // the line numbers are valid at — the tree the panel READ. One batch
       // commit for every decision could not answer "what did this commit
       // close", so a regression pass's exclusion list had to be typed by the
       // party whose commit was under review (kfox/adverse#58, item 6).
-      fixCommit: d.fixCommit ?? null,
+      fixCommit: declaredCommit,
       disposition: d.disposition,
       reason: String(d.reason).trim(),
       // The root cause this decision was taken on, when it was taken on one:
@@ -753,6 +1176,108 @@ export function recordDecisions(ledger, decisions, {
   next.iterations = [...(ledger.iterations ?? []),
     { n: iteration, atCommit, reportDigest, decided: decisions.length }];
   return next;
+}
+
+// Which iteration a ledger is currently on, read off its own record of them.
+//
+// NOT the highest number any ENTRY carries. An iteration that recorded no
+// entries is a documented, instructed state — `converge.mjs` tells the operator
+// to record an iteration whose lanes all failed with "the decisions you have —
+// an empty list is valid", because only `--record` advances the counter toward
+// the cap. Derived from the entries, such an iteration answers with the
+// PREVIOUS one, putting commits that were already passed or declared back on
+// the list, one iteration late and every iteration after. `recordDecisions`
+// writes `{ n: iteration }` as it writes those entries, so the row is the
+// number they carry rather than a re-derivation of it.
+//
+// The entries are the fallback for a ledger with no iteration rows at all —
+// answering 0 there would make this silent on a malformed ledger, which is the
+// direction this check exists to fail away from.
+//
+// The HIGHEST `n` on record, not the last row written. `recordDecisions`
+// appends in order, so today no bridge can produce a ledger where those differ
+// and no test can reach the difference either — it is a hand-edited or
+// hand-merged ledger that gets there. Reading the last row said "whatever was
+// appended most recently is the state of the loop", which is a claim about
+// write order rather than about the counter, and the counter is what the cap
+// and this file's scoping are read off.
+function latestIteration(ledger) {
+  const recorded = (ledger.iterations ?? []).map((r) => r?.n).filter(Number.isInteger);
+  if (recorded.length) return Math.max(...recorded);
+  return Math.max(0, ...(ledger.entries ?? []).map((e) => e.iteration ?? 0));
+}
+
+// The commit the panel READ, for the iteration a ledger is on.
+//
+// One review round is one tree reviewed, and `atCommit` is the field that
+// records it — required on every entry (`checkBinding` refuses one without it)
+// and written onto every `iterations` row. The row is asked first because an
+// iteration recorded with an empty decision list has a row and no entries,
+// which is a state `converge.mjs` instructs by name.
+function reviewedTreeOf(ledger, n) {
+  const row = (ledger.iterations ?? []).find((r) => r?.n === n);
+  if (row) return row.atCommit ?? null;
+  return (ledger.entries ?? []).find((e) => (e.iteration ?? 0) === n)?.atCommit ?? null;
+}
+
+// The fix commits one review round produced, and what each closed
+// (kfox/adverse#58, item 3).
+//
+// `closureOf` answers "what did THIS commit close" for a commit the caller
+// already has. This is the other direction — "which commits are there to ask
+// about" — and nothing could answer it, which is why nothing could check that
+// a regression pass was offered per fix commit. Phase 9 runs one pass per fix
+// commit, so the pass needs the list before it can say which of them it read.
+//
+// Scoped, because a ledger accumulates every round's commits forever and the
+// whole-ledger list would accuse round 3 of skipping passes on round 1's
+// commits — which were either passed or declared at the time, and are in
+// neither case this round's work.
+//
+// Scoped to the ROUND, not to the iteration counter, and the difference is the
+// defect. Every `--record` appends an `iterations` row, including the second
+// one the loop reference tells an operator to make when a decision needs
+// correcting — "a hand-written decision has to be corrected by hand and
+// re-recorded as a second entry". So the counter moved and the FIRST batch's
+// fix commits fell off the list: measured, `[aaa1111, bbb2222, ccc3333]`
+// became `[aaa1111]`, and a documented empty second batch emptied it outright.
+// An empty list here is not a quiet edge case: it is what the pass-coverage
+// check reads, and that check exists so a skipped regression pass cannot look
+// like a clean one. Reaching the same silence from underneath is worse than an
+// off-by-one, because nothing prints.
+//
+// A round is one tree reviewed, so `atCommit` — the commit the panel READ — is
+// what identifies it, and every batch of one round records the same one. It is
+// on every entry and every row, unlike `reportDigest`, which is null whenever
+// `--record` ran without `--report` and would then group unrelated degraded
+// rounds together. The residual is a re-record that passes a different `--at`
+// than the batch it corrects; converge.mjs already refuses to be quiet about a
+// missing `--at`, and over-listing a commit costs one extra pass or one extra
+// declaration, while under-listing costs the check.
+//
+// An explicit `iteration` is still exactly that iteration — a caller naming a
+// number is asking about the counter, not about a round.
+//
+// Distinct by the spelling recorded, which means two decisions naming one
+// commit two ways arrive as two rows. Resolving here would need a repository
+// and this module stays pure — the caller already has one, because it has to
+// resolve a pass's commit too (a pass names whatever the fix agent typed), so
+// it is where the merge belongs.
+export function fixCommitsIn(ledger, { iteration = null } = {}) {
+  const entries = (ledger.entries ?? []).filter((e) => e.disposition === 'fixed' && e.fixCommit);
+  const n = iteration ?? latestIteration(ledger);
+  const tree = iteration === null ? reviewedTreeOf(ledger, n) : null;
+  // No tree on record is a ledger this scoping cannot read, and the iteration
+  // number is what it read before. Answering "no commits" instead would be the
+  // silence this whole function is scoped to avoid.
+  const inRound = (e) => (tree === null ? (e.iteration ?? 0) === n : (e.atCommit ?? null) === tree);
+
+  const byCommit = new Map();
+  for (const e of entries) {
+    if (!inRound(e)) continue;
+    byCommit.set(e.fixCommit, (byCommit.get(e.fixCommit) ?? 0) + 1);
+  }
+  return [...byCommit].map(([commit, closes]) => ({ commit, closes }));
 }
 
 // What a fix commit closed, according to the ledger.
@@ -790,11 +1315,7 @@ export function recordDecisions(ledger, decisions, {
 // `checkBinding` refuses such a ledger outright, and every bridge that reads
 // one runs it first.
 export function closureOf(ledger, commit, resolve) {
-  const seen = new Map();
-  const resolveOnce = (ref) => {
-    if (!seen.has(ref)) seen.set(ref, resolve(ref));
-    return seen.get(ref);
-  };
+  const resolveOnce = memoizeResolve(resolve);
 
   const target = resolveOnce(commit);
   // Thrown, not answered. Every honest return value from here says something

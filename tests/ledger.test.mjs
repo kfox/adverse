@@ -8,14 +8,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import {
-  DISPOSITIONS, SETTLING_SCORE, annotate, checkBinding, closureOf, convergenceStatus,
-  emptyLedger, isSettled, loadLedger, matchFinding, normalizeTitle, recordDecisions,
-  saveLedger, scoreMatch, summarizeDispositions,
+  DISPOSITIONS, FIX_SUPPORT, SETTLING_SCORE, annotate, checkBinding, closureOf,
+  convergenceStatus, emptyLedger, fixCommitsIn, isSettled, loadLedger, matchFinding,
+  normalizeTitle, recordDecisions, saveLedger, scoreMatch, summarizeDispositions,
+  uncoveredDecisions, unsupportedFixes,
 } from '../src/ledger.mjs';
 
 const finding = (over = {}) => ({
@@ -314,6 +315,55 @@ test('a ledger from a future version is refused, not guessed at', () => {
   }
 });
 
+test('a ledger file that is not an object is refused by shape, not by version', () => {
+  // `null` came back as `Cannot read properties of null (reading 'version')`,
+  // which names neither the file nor what is wrong with it, and the three
+  // scalars below got the version-mismatch message — a true sentence about a
+  // problem nobody has. Same class as the decisions document one file over.
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-ledger-'));
+  try {
+    const cases = [['null', 'null'], ['5', '5'], ['"hello"', '"hello"'], ['[]', 'an array']];
+    for (const [json, shown] of cases) {
+      const file = path.join(dir, 'l.json');
+      writeFileSync(file, json, 'utf-8');
+      assert.throws(() => loadLedger(file), (e) => {
+        assert.match(e.message, /not a ledger object/);
+        assert.ok(e.message.includes(shown), `${json} is named as ${shown}: ${e.message}`);
+        assert.ok(e.message.includes(file), 'and the file is named');
+        return true;
+      }, `a ledger holding ${json}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a decisions array holding null names the entry rather than dying on it', () => {
+  // The document one element short of the shape `decisionsIn` refuses. Three
+  // readers walked it and answered three ways: two died on `Cannot read
+  // properties of null (reading 'disposition')`, naming neither the file nor
+  // which entry, and `unsupportedFixes` skipped it in silence — so a `fixed`
+  // claim inside a malformed batch went unexamined.
+  const good = { title: 'a', disposition: 'declined', reason: 'r' };
+  for (const bad of [null, 5, 'hello', []]) {
+    const batch = [good, bad];
+    assert.throws(() => recordDecisions(emptyLedger(), batch, { atCommit: 'x' }),
+      /decisions\[1\] is /, `recordDecisions on ${JSON.stringify(bad)}`);
+    assert.throws(() => uncoveredDecisions(batch, { findings: [] }),
+      /decisions\[1\] is /, `uncoveredDecisions on ${JSON.stringify(bad)}`);
+    assert.throws(() => unsupportedFixes(batch, () => ({ status: 'ok', files: [] })),
+      /decisions\[1\] is /, `unsupportedFixes on ${JSON.stringify(bad)}`);
+  }
+});
+
+test('a well-formed decisions array is not caught by that guard', () => {
+  // The half that proves the guard discriminates: the exception above is not
+  // raised by something else, and an ordinary batch still records.
+  const batch = [{ title: 'a', disposition: 'declined', reason: 'r' }];
+  assert.equal(recordDecisions(emptyLedger(), batch, { atCommit: 'x' }).entries.length, 1);
+  assert.deepEqual(unsupportedFixes(batch, () => ({ status: 'ok', files: [] })), []);
+});
+
 // --- the stop condition ------------------------------------------------------
 
 const report = (findings) => ({ findings });
@@ -390,6 +440,30 @@ test('a ledger naming another repository is refused, not adjudicated from', () =
   assert.match(problems[0], /not a commit in this repository/);
 
   assert.deepEqual(checkBinding(l, (r) => `sha-for-${r}`), [], 'a ledger that resolves here is accepted');
+});
+
+test('a binding problem is one bounded line, whichever bridge prints it', () => {
+  // Three bridges render these — converge.mjs, triage.mjs, regression.mjs —
+  // each with its own `problems.map((p) => `  - ${p}\n`)`, so the bounding is
+  // done here rather than three times there. The refs and the title come off
+  // the same JSON file on disk as a `reason` does: unbounded, one buries the
+  // reason the ledger was refused; carrying a newline, it forges a line of the
+  // bridge's own output above the real ones.
+  const forged = '\n  iteration 1: recorded 1 decision(s)';
+  const l = {
+    version: 1, base: `base${forged}`, iterations: [],
+    entries: [{ title: `t${forged}`, atCommit: `at${forged}`, fixCommit: `fix${forged}`,
+                disposition: `d${forged}`, kind: 'defect', file: 'x.py', line: 1, reason: 'r' },
+              { title: 'x'.repeat(5000), atCommit: 'nope', disposition: 'declined',
+                kind: 'defect', file: 'x.py', line: 1, reason: 'r' }],
+  };
+
+  const problems = checkBinding(l, () => null);
+  assert.ok(problems.length >= 4, `every field is reported: ${problems.length}`);
+  for (const p of problems) {
+    assert.doesNotMatch(p, /\n/, `one line: ${JSON.stringify(p)}`);
+    assert.ok(p.length < 1500, `bounded: ${p.length}`);
+  }
 });
 
 test('a ledger reason is clipped and flagged before it reaches a prompt', () => {
@@ -1366,4 +1440,436 @@ test('a foreign fix commit is a binding problem; no fix commit is not', () => {
 
   assert.deepEqual(checkBinding(ledgerWith(entry({ atCommit: 'reviewed' })), resolve), [],
     'an entry with no fix commit binds fine');
+});
+
+// --- why a decision matched nothing (kfox/adverse#58, item 1) ---------------
+
+test('a near miss elsewhere in the file cannot shadow the field that actually differs', () => {
+  // The order of the two questions is the whole test. A title-equal finding IS
+  // the finding the decision was taken on — `upsert` merges on a normalized
+  // title, so a report carries at most one — while a score-1 near miss is only
+  // the closest thing in the file. Asked the other way round, the decoy below
+  // wins and the operator is sent to fix a line number on a finding they never
+  // decided, while the counterpart that actually broke the match goes unnamed.
+  const decided = {
+    title: 'The docstring contradicts the code', kind: 'contract',
+    file: 'src/auth.py', line: 88, counterpart: null,
+    disposition: 'declined', reason: 'the doc is the stale half',
+  };
+  const report = {
+    findings: [
+      // The finding it was taken on: same title, one field off.
+      { ...finding({ title: 'The docstring contradicts the code', kind: 'contract',
+                     file: 'src/auth.py', line: 88, counterpart: 'README.md' }) },
+      // The decoy: a different contract finding in the same file, no line, so
+      // `scoreMatch` gives it score 1 rather than refusing it outright.
+      { ...finding({ title: 'A different contract claim', kind: 'contract',
+                     file: 'src/auth.py', line: null, counterpart: null }) },
+    ],
+  };
+
+  const [uncovered] = uncoveredDecisions([decided], report);
+  assert.match(uncovered.why, /the counterparts differ \(none here, README\.md in the report\)/);
+  assert.doesNotMatch(uncovered.why, /score 1/);
+});
+
+test('with no title in the report at all, the near miss is still what gets reported', () => {
+  // The fallback the reorder must not have removed: when nothing shares the
+  // title, the closest match is the only thing there is to say.
+  const decided = {
+    title: 'A title the report does not carry', kind: 'defect',
+    file: 'app.py', line: 20, severity: 'warning',
+    disposition: 'declined', reason: 'bounded upstream',
+  };
+  const [uncovered] = uncoveredDecisions([decided], { findings: [finding()] });
+  assert.match(uncovered.why, /matched at score 1 .*which annotates but does not settle/);
+});
+
+test('uncoveredDecisions refuses a file that is not a synthesis report', () => {
+  // Same rule as `recordDecisions`: "I could not find the findings" must not be
+  // spelled the way "there were none" is.
+  assert.throws(() => uncoveredDecisions([], { version: 1, entries: [] }),
+    /not a synthesis report/);
+  assert.deepEqual(uncoveredDecisions([], { findings: [] }), []);
+});
+
+test('a mis-anchored decision cannot exempt itself by having been recorded once', () => {
+  // The check names a decision, the finding it meant to answer never settles
+  // and so comes back, and the identical decision is recorded again. Keyed on
+  // ANY prior settling entry, the second recording was exempted BY THE FIRST —
+  // so the run went quiet from iteration 2 to the cap, which is the
+  // holds-open-with-no-symptom failure this check exists to catch, one
+  // iteration late. Only a `noted` entry vouches, because it is the one
+  // disposition minted for an item no report has seen.
+  const report = {
+    findings: [{
+      title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+      file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor'],
+    }],
+  };
+  const misAnchored = {
+    title: 'the guard is unreachable', kind: 'design', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null,
+    disposition: 'declined', reason: 'working as intended',
+  };
+
+  assert.equal(uncoveredDecisions([misAnchored], report).length, 1);
+  const ledger = recordDecisions(emptyLedger(), [misAnchored],
+    { atCommit: 'deadbee', report });
+  assert.equal(uncoveredDecisions([misAnchored], report, { ledger }).length, 1,
+    'recording a mistake does not make it right the second time');
+});
+
+// --- a `noted` entry the fold invented cannot vouch (#58, the cross-iteration
+// half of the self-issued exemption ac8f729 left open) --------------------------
+
+const unreportedReport = {
+  findings: [{
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor'],
+  }],
+};
+const mintedItem = {
+  title: 'the session cache is unbounded', kind: 'defect', severity: null,
+  file: 'src/session.py', line: 12, counterpart: null,
+};
+const notedLedger = (reconciled) => recordDecisions(emptyLedger(),
+  [{ ...mintedItem, disposition: 'noted', reason: 'out of scope for this batch', reconciled }],
+  { atCommit: 'deadbee', report: unreportedReport });
+
+test('a noted identity the report did not carry cannot excuse a later decision', () => {
+  // The cross-iteration form of a self-issued exemption. `ac8f729` refused a
+  // payload that both asserts a decision and names the same identity as
+  // not-fixed; minting the token in one iteration and spending it in the next
+  // reached the same place, and the `fixed` claim recorded clean. Reproduced
+  // before the fix: with the ledger the answer was `[]`.
+  const later = [{ ...mintedItem, disposition: 'fixed', reason: 'bounded it',
+                   fixCommit: 'bbb2222' }];
+  const [uncovered] = uncoveredDecisions(later, unreportedReport,
+    { ledger: notedLedger(false) });
+
+  assert.equal(uncovered.disposition, 'fixed');
+  assert.match(uncovered.why, /a batch would be excusing its own decision with its own footnote/);
+});
+
+test('a declined decision cannot be excused by an invented note either', () => {
+  // The near miss, one word varied. Keying the gate on the disposition being
+  // excused would have made this the same channel spelled `declined`, and a
+  // decline that settles nothing is exactly what the coverage check names.
+  const later = [{ ...mintedItem, disposition: 'declined', reason: 'unreachable after all' }];
+
+  assert.equal(uncoveredDecisions(later, unreportedReport, { ledger: notedLedger(false) }).length,
+    1);
+});
+
+test('a noted identity the report did carry still excuses the decision answering it', () => {
+  // The discriminating half. `fix.txt` routes an ASSIGNED finding into
+  // `named_not_fixed` whenever a batch leaves one for later, so the report
+  // frequently does carry the item — and then the report chose its fields, not
+  // the batch.
+  const carried = {
+    title: 'the guard is unreachable', kind: 'defect', severity: null,
+    file: 'src/auth.py', line: 88, counterpart: null,
+  };
+  const ledger = recordDecisions(emptyLedger(),
+    [{ ...carried, disposition: 'noted', reason: 'left for later', reconciled: true }],
+    { atCommit: 'deadbee', report: unreportedReport });
+  const later = [{ ...carried, disposition: 'fixed', reason: 'bounded it', fixCommit: 'bbb2222' }];
+
+  assert.deepEqual(uncoveredDecisions(later, { findings: [] }, { ledger }), []);
+});
+
+test('a note no fold ever checked still vouches, and records that nothing checked it', () => {
+  // The legitimate path this gate must not close: an item noted off a report
+  // that never carried it and decided an iteration later. A hand-written
+  // decisions.json makes no reconciliation claim at all, and the ledger keeps
+  // that as `null` rather than reading it as "checked and absent".
+  const ledger = notedLedger(undefined);
+  const later = [{ ...mintedItem, disposition: 'declined', reason: 'budgeted upstream after all' }];
+
+  assert.equal(ledger.entries[0].reconciled, null);
+  assert.deepEqual(uncoveredDecisions(later, unreportedReport, { ledger }), []);
+});
+
+// --- the documented spelling of a decision's fix commit ---------------------
+
+test('a hand-written decision spelling its commit `commit` records it', () => {
+  // references/convergence-loop.md documents `decisions.json` entries as
+  // carrying `commit`; src/decisions.mjs renames it to `fixCommit` on the way
+  // through, and everything here read only the renamed one. So the file the
+  // docs teach you to write recorded `fixCommit: null` — the commit dropped in
+  // silence, and `closureOf` unable to attribute the fix to anything.
+  const documented = {
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null,
+    disposition: 'fixed', reason: 'restored the guard', commit: 'abc1234',
+  };
+  const led = recordDecisions(emptyLedger(), [documented], { atCommit: 'deadbee' });
+  assert.equal(led.entries[0].fixCommit, 'abc1234');
+});
+
+test('a decline spelling its commit `commit` is refused, not waved through', () => {
+  // The other half of the same drift, and the one with teeth: `closureOf`
+  // reads `fixCommit` to decide which lanes a regression pass must exclude, so
+  // a decline asserting a commit excuses a lane from reviewing a commit that
+  // closed nothing it reported. The documented refusal existed and did not fire.
+  const declined = {
+    title: 'the retry loop is unbounded', kind: 'defect', severity: 'critical',
+    file: 'src/net.py', line: 12, counterpart: null,
+    disposition: 'declined', reason: 'the caller already caps it', commit: 'abc1234',
+  };
+  assert.throws(() => recordDecisions(emptyLedger(), [declined], { atCommit: 'deadbee' }),
+    /only a fixed decision closes a finding with a commit/);
+});
+
+test('unsupportedFixes reads the documented spelling too', () => {
+  // Or the check accuses a decision that named its commit exactly as the docs
+  // say of naming no commit at all — a false accusation produced by this
+  // check's own arrival.
+  const documented = {
+    title: 'the guard is unreachable', file: 'src/auth.py',
+    disposition: 'fixed', reason: 'restored the guard', commit: 'abc1234',
+  };
+  const touched = () => ({ status: 'ok', files: ['src/auth.py'] });
+  assert.deepEqual(unsupportedFixes([documented], touched), []);
+});
+
+test('a fix commit that resolves nowhere gets its own loudest branch', () => {
+  // Not a merge and not a git hiccup. `checkBinding` refuses a whole ledger
+  // carrying one of these, and the ledger is append-only — so recording it
+  // makes every later run exit 2 on a file that cannot be repaired. The
+  // remedies offered for the softer branches do not apply.
+  const d = {
+    title: 'the guard is unreachable', file: 'src/auth.py',
+    disposition: 'fixed', reason: 'restored the guard', fixCommit: 'nosuchref',
+  };
+  const gone = () => ({ status: 'unresolved', why: 'nosuchref names no commit in this repository' });
+  const [named] = unsupportedFixes([d], gone);
+  assert.match(named.why, /names no commit in this repository/);
+  assert.match(named.why, /makes the ledger unreadable from the next run on/);
+  // And it must not be worded as the soft "cannot be read" case beside it.
+  assert.doesNotMatch(named.why, /what it changed cannot be read/);
+});
+
+test('unsupportedFixes names the branch it took, not only the sentence', () => {
+  // converge.mjs acts on ONE of these branches — an unresolved fix commit is
+  // the only one that makes the whole ledger unreadable, so it refuses the
+  // write rather than printing a block. Selecting it by matching the prose of
+  // `why` would break the moment anyone reworded a message, so the branch is
+  // returned beside it.
+  const fix = (over) => ({
+    title: 'the guard is unreachable', file: 'src/auth.py',
+    disposition: 'fixed', reason: 'restored the guard', fixCommit: 'abc1234', ...over,
+  });
+  const branchOf = (decision, changed) => unsupportedFixes([decision], () => changed)[0]?.status;
+
+  assert.equal(branchOf(fix({ fixCommit: null }), null), FIX_SUPPORT.NO_COMMIT);
+  assert.equal(branchOf(fix(), { status: 'unresolved', why: 'no such ref' }), FIX_SUPPORT.UNRESOLVED);
+  assert.equal(branchOf(fix(), { status: 'merge', why: 'a merge commit' }), FIX_SUPPORT.UNREADABLE);
+  assert.equal(branchOf(fix(), { status: 'ok', files: [] }), FIX_SUPPORT.EMPTY);
+  assert.equal(branchOf(fix(), { status: 'ok', files: ['src/net.py'] }), FIX_SUPPORT.ELSEWHERE);
+  // The silent branch has no status because it has no report at all.
+  assert.equal(branchOf(fix(), { status: 'ok', files: ['src/auth.py'] }), undefined);
+});
+
+test('a fix claiming no file at all is passed over, not accused of missing it', () => {
+  // The other silent branch, and the one that had no test: `if (!d.file)`.
+  // Reached by every disposition on a finding that carries no file — a `design`
+  // advisory has none by construction, and `scoreMatch` treats a null file as a
+  // field to compare rather than a malformed decision, so these are ordinary.
+  //
+  // Passing over is right: this check asks whether the commit touched the file
+  // the finding cites, and there is no such file to ask about. What makes it
+  // worth pinning is that the branch BELOW it is the accusing one. Were the
+  // order ever reversed, or the guard dropped, a fix with no cited file would
+  // fall into `ELSEWHERE` and be told it "does not touch null" — a fictional-fix
+  // accusation against a decision whose shape is documented and correct, from
+  // the check whose whole purpose is catching fictional fixes.
+  const fileless = {
+    title: 'ledger.mjs is three modules wearing one filename', file: null,
+    disposition: 'fixed', reason: 'split the policy half out', fixCommit: 'abc1234',
+  };
+  const touchedSomething = () => ({ status: 'ok', files: ['src/ledger.mjs'] });
+
+  assert.deepEqual(unsupportedFixes([fileless], touchedSomething), []);
+});
+
+test('unsupportedFixes clips the commit it reports, like every other string it returns', () => {
+  // `title` and `why` were clipped and `commit` was returned verbatim, out of
+  // the same decisions.json. It reaches an operator's terminal from two
+  // readers — this block, and `checkBinding`'s problems once the value has been
+  // recorded as an entry's `fixCommit` — so it is bounded at the one producer.
+  const long = 'a'.repeat(5000);
+  const d = {
+    title: 'the guard is unreachable', file: 'src/auth.py',
+    disposition: 'fixed', reason: 'restored the guard', fixCommit: long,
+  };
+  const [named] = unsupportedFixes([d], () => ({ status: 'unresolved', why: 'no such ref' }));
+
+  assert.ok(named.commit.length < long.length, 'the commit is bounded, not passed through');
+  assert.match(named.commit, /\[clipped\]$/);
+});
+
+// --- fixCommitsIn -------------------------------------------------------------
+
+test('fixCommitsIn counts what each of an iteration\'s fix commits closed', () => {
+  const l = ledgerWith(
+    entry({ title: 'one', disposition: 'fixed', fixCommit: 'fix1', iteration: 2 }),
+    entry({ title: 'two', disposition: 'fixed', fixCommit: 'fix1', iteration: 2 }),
+    entry({ title: 'three', disposition: 'fixed', fixCommit: 'fix2', iteration: 2 }));
+
+  assert.deepEqual(fixCommitsIn(l), [{ commit: 'fix1', closes: 2 }, { commit: 'fix2', closes: 1 }]);
+});
+
+test('fixCommitsIn does not re-accuse an earlier round\'s commits', () => {
+  // The whole point of scoping. Round 1's commits were passed on or declared
+  // when they landed, and a list that carried them forward would demand the
+  // same declaration again every round for the life of the run.
+  //
+  // A later round is a later TREE — round 2 reviews what round 1's fixes
+  // produced — so the fixture says so. It used to say only `iteration: 2`,
+  // which a second batch of round 1 also says, and that is the collision the
+  // scoping was corrected for.
+  const l = ledgerWith(
+    entry({ title: 'old', disposition: 'fixed', fixCommit: 'fix1', iteration: 1,
+            atCommit: 'reviewed1' }),
+    entry({ title: 'new', disposition: 'fixed', fixCommit: 'fix2', iteration: 2,
+            atCommit: 'reviewed2' }));
+
+  assert.deepEqual(fixCommitsIn(l), [{ commit: 'fix2', closes: 1 }]);
+});
+
+test('a second batch of the same round keeps the first batch\'s fix commits', () => {
+  // The defect. The loop reference tells an operator to correct a decision by
+  // hand and re-record it as a second entry, and every `--record` appends an
+  // `iterations` row — so the counter moved while the round did not, and the
+  // commits recorded in the first batch dropped off the list a regression pass
+  // is held to. Same reviewed tree, so it is one round.
+  const l = ledgerWith(
+    entry({ title: 'one', disposition: 'fixed', fixCommit: 'aaa1111', iteration: 1,
+            atCommit: 'reviewed1' }),
+    entry({ title: 'two', disposition: 'fixed', fixCommit: 'bbb2222', iteration: 1,
+            atCommit: 'reviewed1' }),
+    entry({ title: 'three', disposition: 'fixed', fixCommit: 'ccc3333', iteration: 1,
+            atCommit: 'reviewed1' }),
+    entry({ title: 'one, corrected', disposition: 'fixed', fixCommit: 'aaa1111', iteration: 2,
+            atCommit: 'reviewed1' }));
+
+  assert.deepEqual(fixCommitsIn(l), [
+    { commit: 'aaa1111', closes: 2 }, { commit: 'bbb2222', closes: 1 },
+    { commit: 'ccc3333', closes: 1 },
+  ]);
+});
+
+test('an empty second batch does not empty the list the pass check reads', () => {
+  // The worse half of the same defect: a batch recorded with no decisions moved
+  // the counter and left the round's fix commits accounted for by nothing at
+  // all. An empty list is what silences the pass-coverage check, and that check
+  // exists so a skipped regression pass cannot read like a clean one.
+  const l = {
+    ...ledgerWith(entry({ disposition: 'fixed', fixCommit: 'fix1', iteration: 1,
+                          atCommit: 'reviewed1' })),
+    iterations: [{ n: 1, atCommit: 'reviewed1', decided: 1 },
+                 { n: 2, atCommit: 'reviewed1', decided: 0 }],
+  };
+
+  assert.deepEqual(fixCommitsIn(l), [{ commit: 'fix1', closes: 1 }]);
+});
+
+test('a round that fixed nothing has no fix commits, not the previous one\'s', () => {
+  // Read off the FIX entries alone, the latest round would be the last one that
+  // wrote an entry carrying a commit — and round 2's regression pass would be
+  // told to account for commits that were accounted for a round ago, and every
+  // round after that.
+  const l = ledgerWith(
+    entry({ title: 'old', disposition: 'fixed', fixCommit: 'fix1', iteration: 1,
+            atCommit: 'reviewed1' }),
+    entry({ title: 'declined here', disposition: 'declined', iteration: 2,
+            atCommit: 'reviewed2' }));
+
+  assert.deepEqual(fixCommitsIn(l), []);
+});
+
+test('fixCommitsIn ignores dispositions that assert no code change', () => {
+  // `fixed` is the only one that asserts a commit exists, so it is the only one
+  // there could be a pass to run on. A `deferred` entry carrying a stray commit
+  // must not summon a demand for a pass on it.
+  const l = ledgerWith(
+    entry({ title: 'declined', disposition: 'declined', fixCommit: 'fix1', iteration: 1 }),
+    entry({ title: 'deferred', disposition: 'deferred', fixCommit: 'fix1', iteration: 1 }),
+    entry({ title: 'noted', disposition: 'noted', fixCommit: 'fix1', iteration: 1 }));
+
+  assert.deepEqual(fixCommitsIn(l), []);
+});
+
+test('a ledger predating per-decision fix commits yields no commits to ask about', () => {
+  // #86 is what put `fixCommit` on an entry. Before it, `fixed` recorded no
+  // commit at all — so there is nothing to name, and naming `null` would put a
+  // demand for a pass on a commit that was never written down.
+  const l = ledgerWith(entry({ title: 'old fix', disposition: 'fixed', iteration: 1 }));
+
+  assert.deepEqual(fixCommitsIn(l), []);
+});
+
+test('a new round recorded with an empty decision list has no fix commits', () => {
+  // `converge.mjs` instructs this state by name: when every lane fails, record
+  // the iteration anyway — "the decisions you have — an empty list is valid" —
+  // because only --record advances the counter toward the cap. No entry then
+  // carries round 2, so reading the entries answers round 1, and round 2's fold
+  // demands a pass or a declaration for a commit round 1 already accounted for.
+  // The `iterations` row is what records that the round happened, and the tree
+  // it names is what makes it a different round from the one above it.
+  const l = {
+    ...ledgerWith(entry({ disposition: 'fixed', fixCommit: 'fix1', iteration: 1,
+                          atCommit: 'reviewed1' })),
+    iterations: [{ n: 1, atCommit: 'reviewed1', decided: 1 },
+                 { n: 2, atCommit: 'reviewed2', decided: 0 }],
+  };
+
+  assert.deepEqual(fixCommitsIn(l), []);
+});
+
+test('a ledger whose rows record no reviewed tree still scopes by its counter', () => {
+  // The fallback, and it fails toward saying something. `checkBinding` requires
+  // an `atCommit` on every entry, so a ledger reaching here without one was
+  // hand-assembled — and answering "no commits at all" would hand the
+  // pass-coverage check the empty list that silences it.
+  const l = {
+    ...ledgerWith(entry({ disposition: 'fixed', fixCommit: 'fix1', iteration: 2,
+                          atCommit: undefined })),
+    iterations: [{ n: 1, decided: 0 }, { n: 2, decided: 1 }],
+  };
+
+  assert.deepEqual(fixCommitsIn(l), [{ commit: 'fix1', closes: 1 }]);
+});
+
+test('a ledger that has recorded nothing yet names no fix commits', () => {
+  assert.deepEqual(fixCommitsIn(emptyLedger('base0')), []);
+});
+
+test('the round a ledger is on is the highest it recorded, not the last row written', () => {
+  // `recordDecisions` appends in order, so no bridge can produce this ledger
+  // today and it is recorded as reachable only through this module's own API —
+  // a hand-merged or hand-edited file. Reading the last row answered "whatever
+  // was appended most recently", which is a claim about write order; the
+  // counter is what the cap and this scoping are read off.
+  const l = {
+    ...ledgerWith(
+      entry({ title: 'old', disposition: 'fixed', fixCommit: 'fix1', iteration: 1,
+              atCommit: 'reviewed1' }),
+      entry({ title: 'new', disposition: 'fixed', fixCommit: 'fix2', iteration: 2,
+              atCommit: 'reviewed2' })),
+    iterations: [{ n: 2, atCommit: 'reviewed2', decided: 1 },
+                 { n: 1, atCommit: 'reviewed1', decided: 1 }],
+  };
+
+  assert.deepEqual(fixCommitsIn(l), [{ commit: 'fix2', closes: 1 }]);
+});
+
+test('fixCommitsIn can be asked about an iteration other than the latest', () => {
+  const l = ledgerWith(
+    entry({ title: 'old', disposition: 'fixed', fixCommit: 'fix1', iteration: 1 }),
+    entry({ title: 'new', disposition: 'fixed', fixCommit: 'fix2', iteration: 2 }));
+
+  assert.deepEqual(fixCommitsIn(l, { iteration: 1 }), [{ commit: 'fix1', closes: 1 }]);
 });

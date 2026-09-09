@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -207,6 +207,231 @@ test('a reason cannot smuggle a line into the orchestrator through stdout', () =
     assert.match(r.stdout, /harmless CONVERGED/);
     const injected = r.stdout.split('\n').filter((l) => /^\s*CONVERGED/.test(l));
     assert.deepEqual(injected, [], 'a reason started a line of its own');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- --report corrects the identity a lane merge moved --------------------
+//
+// The bridge's half of it: that the flag reaches the fold, that what it
+// rewrote is on screen, and that its absence is said out loud rather than
+// quietly producing decisions that will settle nothing.
+
+// What synthesis merged: the Auditor's anchor over the Pragmatist's kind.
+const mergedReport = {
+  findings: [{
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor', 'pragmatist'],
+  }],
+};
+
+// What one lane's briefing entry said, copied verbatim by the fix agent.
+const briefedFix = {
+  ...goodFix,
+  named_not_fixed: [],
+  fixed: [{ ...goodFix.fixed[0], kind: 'design', severity: 'warning', file: null, line: null }],
+};
+
+test('--report corrects the fields the briefing entry predates', () => {
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--report', report, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+
+    const [d] = JSON.parse(readFileSync(out, 'utf-8')).decisions;
+    assert.equal(d.kind, 'defect', 'an advisory kind matches no blocking finding, ever');
+    assert.equal(d.file, 'src/auth.py');
+    assert.equal(d.line, 88);
+    assert.equal(d.severity, 'warning', 'severity is a judgment, not an anchor — never rewritten');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('every corrected field is printed, so the rewrite can be read back', () => {
+  // A fold that silently rewrites what a fix agent supplied produces a file
+  // nobody can reconcile against the payload it came from.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--report', report, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /identity corrected from the report/);
+    assert.match(r.stdout, /kind: design -> defect/);
+    assert.match(r.stdout, /file: none -> src\/auth\.py/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an entry whose title is in no finding is named before --record refuses it', () => {
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], title: 'a title no lane ever filed' }],
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--report', report, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, 'the fold still writes — refusing is --record\'s call, with the ledger in hand');
+    assert.match(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
+    assert.match(r.stdout, /a title no lane ever filed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ordinary batch is not listed as corrected', () => {
+  // A block that fires on every run is a block nobody reads.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', { ...goodFix, named_not_fixed: [] });
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--report', report, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /identity corrected/);
+    assert.doesNotMatch(r.stdout, /MATCHES NO FINDING/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('without --report the fold says what it could not correct', () => {
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
+    const r = run(['--fix', src, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /--report not given/);
+    // What `--record` actually does with one: records it, then names it at
+    // exit 1. Told the batch was refused, an operator re-runs `--record` and
+    // appends it twice, advancing the iteration counter twice.
+    assert.match(r.stderr, /settles nothing/);
+    assert.match(r.stderr, /names it at exit 1/);
+    assert.doesNotMatch(r.stderr, /refuse/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --report that parses to null is refused, not read as no report at all', () => {
+  // The hole converge.mjs closes, one directory over: `readJson` returns null
+  // for a file containing the literal `null`, and reading that as "no report
+  // was given" suppressed the warning (the flag WAS passed), skipped every
+  // correction, printed neither block, and exited 0 over a batch that settles
+  // nothing.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
+    const report = write(dir, 'report.json', null);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--report', report, '--out', out]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /not a synthesis report/);
+    assert.match(r.stderr, /report\.json/, 'a refusal names the file it read');
+    assert.equal(existsSync(out), false, 'nothing was established, so nothing was written');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --report that is not a synthesis report exits 2, not 1', () => {
+  // references/convergence-loop.md states the rule: exit 1 is a claim about a
+  // review, and a run that could not read one has no claim to make. Routed
+  // through the fold's catch, a bad report file was reported as a bad fix
+  // payload, at the exit code that means the payload failed its schema.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
+    const report = write(dir, 'report.json', { summary: 'no findings key here' });
+    const r = run(['--fix', src, '--report', report,
+                   '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.doesNotMatch(r.stderr, /fix-auth-guard\.json/,
+      'the fix payload was fine; naming it sends the operator to the wrong file');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a named-not-fixed identity in no finding is named as the exemption it becomes', () => {
+  // Under its own heading, never folded into the block above it: `converge.mjs
+  // --record` skips the `noted` disposition outright, so this print is the only
+  // place anyone sees the identity that will excuse the next decision matching
+  // it — on fields this batch chose and no lane ever filed.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix, named_not_fixed: goodFix.named_not_fixed,
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const r = run(['--fix', src, '--report', report, '--out', path.join(dir, 'decisions.json')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /UNREPORTED IDENTITY/);
+    assert.match(r.stdout, /preflight_emu is not budgeted/);
+    // The `fixed` entry beside it DID bind, so the other unbound heading — a
+    // different accusation about a different half of a decision — stays off.
+    assert.doesNotMatch(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a named-not-fixed item the report does carry is corrected, not accused', () => {
+  // The legitimate path: a batch leaving an assigned finding for later. It
+  // binds, so it takes the merged report's identity and appears under the
+  // correction heading rather than the exemption one.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      named_not_fixed: [{
+        ...goodFix.named_not_fixed[0],
+        title: 'the guard is unreachable', kind: 'design', file: null, line: null,
+      }],
+      fixed: [],
+      commits: [],
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--report', report, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /UNREPORTED IDENTITY/);
+    assert.match(r.stdout, /identity corrected from the report/);
+
+    const [d] = JSON.parse(readFileSync(out, 'utf-8')).decisions;
+    assert.equal(d.disposition, 'noted');
+    assert.equal(d.kind, 'defect');
+    assert.equal(d.file, 'src/auth.py');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a batch naming the identity of its own decision is refused, and writes nothing', () => {
+  // Exit 1: the payload was read and does not describe repair work — it claims
+  // one finding both decided and undecided, and the `noted` half of that is the
+  // token that would excuse the other half from the coverage check.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...goodFix,
+      named_not_fixed: [{
+        ...goodFix.named_not_fixed[0],
+        title: goodFix.fixed[0].title, kind: 'defect', file: 'src/auth.py', line: 88,
+      }],
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--report', report, '--out', out]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /carries the identity of the fixed decision/);
+    assert.equal(existsSync(out), false, 'a refused fold left a decisions.json behind');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
