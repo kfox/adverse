@@ -305,13 +305,6 @@ const NOT_A_MEMBER = '(?<![\\w$])(?<!(?<!\\.)\\.\\s*)';
 // matters, so no fixture distinguishes a `memberOf` that spells `?.` from one
 // that does not. Said here rather than left as a mutation nobody could make
 // red.
-//
-// Dots only, and not the brackets beside them: a bracketed read is reported
-// through the WHOLESALE check on its owner — `state[ key ]` names no property
-// this file can see, because `withoutStrings` empties the key — so `state`
-// alone carries it, however the brackets are spaced. Whitespace inside a
-// bracket is normalized where the name is BOUND instead, which is the half a
-// fixture can tell apart.
 const optionalDots = (pattern) => pattern.replace(/\\\./g, '\\s*\\??\\.\\s*');
 const spelled = (name) => optionalDots(quoted(name));
 const boundary = (name) => new RegExp(`${NOT_A_MEMBER}${spelled(name)}(?![\\w$])`);
@@ -767,18 +760,22 @@ function splitArgs(text) {
 // on the shape an 80-column line produces, and a comment between the two is
 // the same again, because comments blank to spaces.
 const ASSIGNMENT = new RegExp('(?:(?:const|let|var)\\s+)?'
-  + '([A-Za-z_$][\\w$]*(?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*|\\s*\\[[^\\]\\n]*\\])*)'
+  + '([A-Za-z_$][\\w$]*(?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]\\n]*\\])*)'
   + '\\s*(?:\\|\\||&&|\\?\\?|\\*\\*|<<|>>>?|[-+*/%&|^])?=(?![=>])', 'g');
 
-// One spelling of a path, for names this file compiles literally. Around a
-// dot, this removes exactly the whitespace `optionalDots` puts back, so a name
-// bound from one spelling is found in every other. Around a bracket there is
-// nothing to put back — a bracketed read is found through its owner — so this
-// is the only place the two spellings are reconciled.
-const canonicalPath = (target) => target
-  .replace(/\s*\??\.\s*/g, '.')
-  .replace(/\s*\??\.?\s*\[\s*/g, '[')
-  .replace(/\s*\]/g, ']');
+// One spelling of a path, for names this file compiles literally: this removes
+// exactly the whitespace `optionalDots` puts back, so a name bound from one
+// spelling is found in every other.
+//
+// Dots only, and not the brackets beside them. A space BEFORE a bracket cannot
+// be tolerated in the pattern above at all: `(?:const|let|var)\s+` is optional
+// there, so `const [a, b] = values.out.split(':')` matched with the keyword
+// itself as the name, `ownersOf` handed the bare `const` to the wholesale
+// check, and every statement in the file that declares anything became a read
+// of a caller-supplied path — a report on correct code, on the shape every
+// bridge is written in. A space INSIDE one is left alone with it, since the
+// two halves of that spelling are only useful together. #120.
+const canonicalPath = (target) => target.replace(/\s*\??\.\s*/g, '.');
 
 // An object literal binds its PROPERTIES, and not the name that holds it.
 // Bounding a value at its statement makes the whole literal one value, so
@@ -1128,11 +1125,6 @@ for (const [label, src, dest] of [
   ['a destination assigned onto a property behind a comment',
     'state /* the run */ .out = values.out;\n'
     + 'writeFileSync(state.out, body);', 'state.out'],
-  // A bracketed property, bound with spaces and written without them. The
-  // target pattern stopped at the space, so nothing was bound at all and the
-  // object never became a name the write could be traced to.
-  ['a destination assigned onto a spaced-out bracketed property',
-    'state [ key ] = values.out;\nwriteFileSync(state[key], body);', 'state[key]'],
   // A wrapped right-hand side inside a loop BODY, which is the hole that
   // bounding the right-hand side at a newline opened: every pattern missed it
   // at once. Both halves are shapes in the scanned directory.
@@ -1260,6 +1252,15 @@ for (const [label, src] of [
   // is a rule nobody can keep green.
   ['a destination off some other object, spaced, that has a `values`',
     'const notOurs = other . values.out;\nwriteFileSync(notOurs, body);'],
+  // An array destructure beside a declaration, which regression.mjs spells
+  // verbatim. Letting the assignment target span a space before its bracket
+  // made the optional `const` prefix readable as the NAME, so `const [a, b]`
+  // was tracked, `ownersOf` handed the bare keyword to the wholesale check,
+  // and every later name declared with one was a caller-supplied path.
+  ['a name declared beside an array destructure',
+    'const [d] = [values.out];\n'
+    + 'const make = () => { const p = tmpdir(); return p; };\n'
+    + 'const o = make();\nwriteFileSync(o, body);'],
   // The other direction of the regex finding: a false positive, from the same
   // desynchronization, on the same fixture as the control two above.
   ['the same comment, after a regex holding a quote',
