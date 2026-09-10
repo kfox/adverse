@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ADVISORY_KINDS, CONFIDENCES, KINDS, ROOT_CAUSE_STATUSES, SEVERITIES,
-         SEVERITY_RANK, assertCoversConfidences } from '../src/taxonomy.mjs';
+         SEVERITY_RANK, assertCoversConfidences, claimedLanes } from '../src/taxonomy.mjs';
 
 test('every advisory kind is a real kind', () => {
   for (const k of ADVISORY_KINDS) assert.ok(KINDS.includes(k), `${k} is not in KINDS`);
@@ -68,4 +68,29 @@ test('a map inventing a confidence is refused too', () => {
 test('an array of labels is checked the same way a map is', () => {
   assert.deepEqual(assertCoversConfidences([...CONFIDENCES], 'somewhere'), [...CONFIDENCES]);
   assert.throws(() => assertCoversConfidences(['solo'], 'somewhere'), /missing/);
+});
+
+// What a citation claims, read one way for every reader of one. `null` is the
+// answer that means "not lane names", and every caller refuses on it — so the
+// table below is also the list of shapes that stop a report being built.
+for (const [label, citation, expected] of [
+  ['a resolved citation, by the list synthesis put on it',
+    { reporters: ['auditor', 'steward'], reporter: 'adversary' }, ['auditor', 'steward']],
+  ['an unresolved citation, by the reporter it claimed',
+    { reporters: null, reporter: 'adversary' }, ['adversary']],
+  // The absence this exists to distinguish from a claim: it used to contribute
+  // an `undefined` that serialized as `null`, counted as a reviewer in the PR
+  // comment and rendered as the word "null" in the dashboard.
+  ['a citation claiming nobody', { reporters: null }, []],
+  ['a citation whose only claim is null', { reporter: null }, []],
+  // And the values that are claims this tool cannot read. A bare string is the
+  // one the whole vocabulary exists for: `"auditor"` is iterable, so a reader
+  // that wrapped it in a list would call it one reviewer and a reader that
+  // spread it would call it seven.
+  ['a reporters that is a string', { reporters: 'auditor' }, null],
+  ['a reporters that is an object', { reporters: { lane: 'auditor' } }, null],
+  ['a reporter that is a number', { reporter: 42 }, null],
+  ['a reporters holding something that is not a lane name', { reporters: ['auditor', 7] }, null],
+]) test(`claimedLanes reads ${label}`, () => {
+  assert.deepEqual(claimedLanes(citation), expected);
 });

@@ -93,6 +93,30 @@ export const PROVENANCE = Object.freeze({ review: 'review', regression: 'regress
 export const isLaneList = (value) => Array.isArray(value)
   && value.every((lane) => typeof lane === 'string');
 
+// Which lanes a citation claims, or `null` for a claim that is not lane names
+// at all — one reading, for the two readers that would otherwise each have
+// their own.
+//
+// A group citation arrives out of briefing.json, so both fields are whatever
+// that file says: `reporters` where synthesis resolved the citation against a
+// finding, the singular `reporter` it claimed otherwise. An absent one claims
+// NOBODY rather than one reviewer named `undefined` — that value serialized as
+// `null`, counted in the PR comment's reviewer tally and rendered as the word
+// "null" in the dashboard, which is vouching spelled by an absence.
+//
+// Absence ONLY. A reporter that is present and not a lane name is a malformed
+// file rather than an empty claim, and dropping it would put "0 reviewers" in
+// a permanent PR comment with nothing said about why. It comes back `null`, so
+// each caller refuses it in its own register — and never as one reviewer,
+// which is what wrapping a bare `"auditor"` in a list would have made of the
+// string this vocabulary exists to catch.
+export const claimedLanes = (citation) => {
+  const claimed = citation?.reporters ?? [citation?.reporter];
+  if (!Array.isArray(claimed)) return null;
+  const lanes = claimed.filter((lane) => lane !== undefined && lane !== null);
+  return isLaneList(lanes) ? lanes : null;
+};
+
 // Null prototype, because `severity` is reviewer-supplied and callers test
 // membership with `severity in SEVERITY_RANK` and `SEVERITY_RANK[s]`. A plain
 // object answers `constructor`, `toString`, `valueOf` and nine more with
