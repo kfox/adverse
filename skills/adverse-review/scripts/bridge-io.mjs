@@ -80,6 +80,19 @@ export function requireKnownPersona(persona, { prefix, file, personas }) {
   return persona;
 }
 
+// A destination this run has claimed: create it, truncate what is there, and
+// never follow a symlink. Every run directory in this flow is writable by every
+// agent in the run, so a symlink can be planted at any output path after any
+// pre-write check has looked at it; O_NOFOLLOW fails the open itself (ELOOP)
+// instead of narrowing that window to something smaller than a scheduler tick.
+//
+// Exported because two bridges write output outside the queue below, and the
+// flag set is the whole of what makes such a write safe. Stated once: a second
+// copy of it is a copy that can be one flag short, which is what this
+// repository keeps finding wherever a rule was restated instead of shared.
+export const CLAIMED_PATH_FLAGS = constants.O_WRONLY | constants.O_CREAT
+  | constants.O_TRUNC | constants.O_NOFOLLOW;
+
 // Refuses to write a destination this process has already written. Two
 // payloads naming one persona is a stale file or a spoof, never a legitimate
 // state — but only WITHIN a run: Phase 9 loops back through the same outdir on
@@ -137,14 +150,7 @@ export function makeWriteQueue(prefix) {
       const done = [];
       for (const { dest, src, body } of queued) {
         try {
-          // The run directory is writable by every agent in the run, so a
-          // symlink can be planted after any pre-write check. O_NOFOLLOW fails
-          // the open itself (ELOOP) instead of narrowing that window.
-          writeFileSync(dest, body, {
-            encoding: 'utf-8',
-            flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC
-              | constants.O_NOFOLLOW,
-          });
+          writeFileSync(dest, body, { encoding: 'utf-8', flag: CLAIMED_PATH_FLAGS });
         } catch (e) {
           process.stderr.write(`${prefix}: ${dest}: cannot be written (${e.message.trim()})\n`
             + (done.length

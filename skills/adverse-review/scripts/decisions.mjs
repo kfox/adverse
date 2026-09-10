@@ -30,7 +30,7 @@
 
 import { rmSync, statSync, writeFileSync } from 'node:fs';
 
-import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
+import { CLAIMED_PATH_FLAGS, parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
@@ -103,11 +103,9 @@ if (!values.fix.length || !values.out) {
 // it could not have written either, and the alternative is a run that reports a
 // fold nobody can read back.
 //
-// The removal is announced HERE, where it happens, and not from `refuse` —
-// which is the same mistake one layer in. Three of the exits this claim exists
-// to cover are `readJson`'s, in bridge-io.mjs, and they never reach anything in
-// this file: told only from `refuse`, the notice would be missing from exactly
-// the refusals that made the claim necessary.
+// The removal is announced on the way out rather than here — see the notice
+// below, which says why the moment of removal is the one place it cannot be
+// said from.
 //
 // And it refuses an `--out` that IS one of this run's own inputs before
 // removing anything. Unconditionally clearing a caller-supplied path makes the
@@ -122,17 +120,33 @@ if (!values.fix.length || !values.out) {
 // symlinked directory, and `/tmp` against `/private/tmp` — which is not exotic,
 // it is where the loop's own run directory lives on macOS. Two names for one
 // file is the whole question here, and `dev`/`ino` is what answers it.
-function sameFile(a, b) {
+//
+// `bigint: true` because Node documents the Number form of `ino` as inaccurate
+// above 2^53, and a filesystem that issues inode numbers that large would make
+// two distinct files compare equal — refusing a legitimate fold, which stalls
+// the loop rather than losing a file, but for no reason a flag does not remove.
+function identity(file) {
   try {
-    const x = statSync(a);
-    const y = statSync(b);
-    return x.dev === y.dev && x.ino === y.ino;
-  } catch {
-    // Either path may not exist — `--out` usually does not on the first fold —
-    // and a destination that is not there is a destination with nothing to
-    // destroy.
-    return false;
+    const s = statSync(file, { bigint: true });
+    return `${s.dev}:${s.ino}`;
+  } catch (e) {
+    // A path that is not there has no identity to share — `--out` usually does
+    // not exist on the first fold, and an input that is missing is `readJson`'s
+    // refusal a moment later, with a better sentence than this one.
+    if (e.code === 'ENOENT') return null;
+    // Anything else is "cannot tell", which is not the same answer as "a
+    // different file" and must not be spelled the same way: the next thing this
+    // bridge does is delete `--out`, and it would be deleting it having failed
+    // to check the one thing this function is for.
+    refuse(2, `decisions: ${oneLine(file)}: cannot be identified (${oneLine(e.code)}), so this`
+      + ' run cannot tell whether it is the file `--out` names — which it is about to remove\n');
   }
+  return null;
+}
+
+function sameFile(a, b) {
+  const x = identity(a);
+  return x !== null && x === identity(b);
 }
 
 function claimOut(inputs) {
@@ -157,6 +171,22 @@ function claimOut(inputs) {
 
 const clearedOut = claimOut([...values.fix, values.report, values.briefing].filter(Boolean));
 
+let wrote = false;
+let announced = false;
+
+// Gated on whether the fold WROTE, not on the exit code. The two are not the
+// same question and reading the second one inverts the notice: every exit after
+// the write is nonzero for its own reasons — an EPIPE on stdout when the caller
+// closed the pipe is enough — and at that point a complete batch is on disk and
+// the operator is being told nothing was recorded. That is the exact claim this
+// notice exists to prevent, printed by the notice.
+function announceUnrecorded() {
+  if (announced || !clearedOut || wrote) return;
+  announced = true;
+  process.stderr.write(`decisions: a file already at ${oneLine(values.out)} was removed when`
+    + ' this run started, and this run wrote nothing: nothing it refused has been recorded\n');
+}
+
 // Said on the way out, and only when this run is leaving without writing.
 //
 // The notice belongs to the REFUSAL, not to the removal: every fold after the
@@ -165,18 +195,23 @@ const clearedOut = claimOut([...values.fix, values.report, values.briefing].filt
 // successful run's own report of the batch it had just written — on the channel
 // the Skill tells the orchestrating agent to read and act on. But it cannot be
 // printed from `refuse` either: three of the exits it exists to cover are
-// `readJson`'s, in bridge-io.mjs, which never reach anything in this file. An
-// exit hook is the one place that is both.
+// `readJson`'s, in bridge-io.mjs, which never reach anything in this file.
 //
 // It says a FILE was removed rather than a batch, because that is all this
 // bridge checked. `--out` pointed at something else entirely is the operator's
 // own mistake and gets the truth about it, not a sentence inventing a previous
 // fold.
-process.on('exit', (code) => {
-  if (!code || !clearedOut) return;
-  process.stderr.write(`decisions: a file already at ${oneLine(values.out)} was removed when`
-    + ' this run started, and this run wrote nothing: nothing it refused has been recorded\n');
-});
+// A signal gets no notice, and deliberately not: Node runs no `exit` handler
+// for one, and a `SIGTERM` listener added to say this cannot run either — every
+// blocking moment of this bridge is a synchronous `readFileSync`, and libuv
+// delivers a signal to JS on an event loop turn that a blocking read is not
+// taking. Measured: a run blocked reading a FIFO ignores SIGTERM with such a
+// listener installed and needs SIGKILL (137), where the same run without one
+// dies on the signal (143). The listener does not add the notice; it takes away
+// the operator's ability to stop the bridge, and this loop's ordinary killers
+// are timeouts. #119 is the version of this that leaves the previous batch
+// itself behind instead of a sentence about it.
+process.on('exit', announceUnrecorded);
 
 function refuse(code, message) {
   process.stderr.write(message);
@@ -320,7 +355,22 @@ if (transposed.length) {
   refuse(1, 'decisions: a payload contradicts its own identity claims; refusing to fold it\n');
 }
 
-writeFileSync(values.out, JSON.stringify({ decisions }, null, 2), 'utf-8');
+// The same flags the write queue in bridge-io.mjs uses, for the same reason:
+// this bridge claimed `--out` before reading anything, and a symlink planted at
+// it in the meantime would otherwise be followed — the class this run's own
+// claim is about, one step further along the same path. Exit 2 and a sentence,
+// not a stack trace: a fold that could not write its output made no decisions,
+// and `wrote` stays false so the notice above still tells the truth.
+try {
+  writeFileSync(values.out, JSON.stringify({ decisions }, null, 2), {
+    encoding: 'utf-8',
+    flag: CLAIMED_PATH_FLAGS,
+  });
+} catch (e) {
+  refuse(2, `decisions: ${oneLine(values.out)}: cannot be written`
+    + ` (${oneLine(e.message)})\n`);
+}
+wrote = true;
 
 const where = (d) => (d.file
   ? ` (${oneLine(d.file)}${d.line === null || d.line === undefined ? '' : `:${oneLine(d.line)}`})`

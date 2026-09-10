@@ -8,9 +8,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync,
+  symlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -25,6 +26,22 @@ function run(args) {
 
 function freshTmp() {
   return mkdtempSync(path.join(tmpdir(), 'adverse-decisions-'));
+}
+
+// The same fold, spawned rather than run to completion, for the two tests whose
+// subject is what happens to the bridge partway through: one needs the reader of
+// its stdout gone before it prints, the other needs a file planted at `--out`
+// after the bridge has claimed it. `spawnSync` can express neither.
+function spawnFold(args) {
+  const child = spawn(process.execPath, [DECISIONS, ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const seen = { stderr: '' };
+  child.stderr.setEncoding('utf-8');
+  child.stderr.on('data', (chunk) => { seen.stderr += chunk; });
+  seen.status = new Promise((resolve) => child.on('exit', resolve));
+  seen.child = child;
+  return seen;
 }
 
 const goodFix = {
@@ -384,7 +401,7 @@ test('a refusal clears the decisions.json a previous fold left at --out', () => 
     const r2 = run(['--fix', path.join(dir, 'fix-truncated.json'), '--out', out]);
     assert.equal(r2.status, 2, r2.stdout);
     assert.equal(existsSync(out), false, 'an unreadable payload leaves no earlier batch either');
-    // Announced from the claim, not from this bridge's own refusals: told only
+    // Announced on the way out, not from this bridge's own refusals: told only
     // from those, the notice would be missing from the three exits in
     // bridge-io.mjs that the claim exists to cover.
     assert.match(r2.stderr, /a file already at .*decisions\.json was removed/);
@@ -980,6 +997,95 @@ test('a batch naming the identity of its own decision is refused, and writes not
     assert.match(r.stderr, /carries the identity of the fixed decision/);
     assert.equal(existsSync(out), false, 'a refused fold left a decisions.json behind');
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The notice above is about a run that WROTE NOTHING, and the exit code is not
+// that question. Every exit after the write is nonzero for its own reasons, and
+// the cheapest of them is an operator or a wrapper closing the pipe this bridge
+// prints its success line to: the batch is complete and on disk, the write of
+// the line fails, and a notice reading the exit code tells the orchestrating
+// agent nothing was recorded. That is the claim the notice exists to prevent,
+// printed by the notice.
+test('a failure after the fold has written does not claim nothing was recorded', async () => {
+  const dir = freshTmp();
+  try {
+    const out = path.join(dir, 'decisions.json');
+    const good = write(dir, 'fix-auth-guard.json', goodFix);
+    // The first fold puts a file at `--out`, so the second one has something to
+    // claim — without that the notice is not armed and this proves nothing.
+    assert.equal(run(['--fix', good, '--out', out]).status, 0);
+
+    const fold = spawnFold(['--fix', good, '--out', out]);
+    fold.child.stdout.destroy();
+    const status = await fold.status;
+
+    assert.notEqual(status, 0, 'this needs the run to fail AFTER writing');
+    assert.equal(JSON.parse(readFileSync(out, 'utf-8')).decisions.length, 2,
+      'the batch reached disk, which is the whole premise');
+    assert.doesNotMatch(fold.stderr, /wrote nothing/);
+    assert.doesNotMatch(fold.stderr, /was removed when this run started/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The claim removes what is at `--out` before reading anything, which unlinks a
+// symlink that was already there. A symlink planted in the window between that
+// and the write is a different matter, and the run directory is writable by
+// every agent in the run — so the write uses the same flags as every other
+// output in this flow (CLAIMED_PATH_FLAGS, bridge-io.mjs) and fails the open
+// rather than following the link.
+//
+// The FIFO is the synchronization, not a flourish: opening one for writing
+// returns only once the reader has opened it, and the reader here is this
+// bridge's own `readJson`, which runs after the claim. So the symlink is planted
+// at a moment the test knows is inside the window.
+test('a symlink planted at --out after the claim is not written through', async () => {
+  const dir = freshTmp();
+  try {
+    const out = path.join(dir, 'decisions.json');
+    const decoy = path.join(dir, 'the-operators-file.json');
+    writeFileSync(decoy, 'not this bridge\'s to write\n');
+    const fifo = path.join(dir, 'fix-auth-guard.json');
+    execFileSync('mkfifo', [fifo]);
+
+    const fold = spawnFold(['--fix', fifo, '--out', out]);
+    const fd = openSync(fifo, 'w');
+    symlinkSync(decoy, out);
+    writeSync(fd, JSON.stringify(goodFix));
+    closeSync(fd);
+    const status = await fold.status;
+
+    assert.equal(status, 2, fold.stderr);
+    assert.match(fold.stderr, /decisions\.json: cannot be written/);
+    assert.equal(readFileSync(decoy, 'utf-8'), 'not this bridge\'s to write\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// "Cannot tell" is not "a different file". Every other path this run was given
+// is compared against `--out` by identity, and the next thing the bridge does is
+// delete `--out` — so a path it cannot stat is a check it did not perform, and
+// saying so is the only answer that is not a guess about the operator's tree.
+test('an input this run cannot stat is refused, not assumed to be another file', () => {
+  const dir = freshTmp();
+  try {
+    const walled = path.join(dir, 'walled');
+    mkdirSync(walled, { mode: 0o000 });
+    const out = path.join(dir, 'decisions.json');
+    writeFileSync(out, '{"decisions":[]}');
+    const r = run(['--fix', path.join(walled, 'fix-auth-guard.json'), '--out', out]);
+
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /cannot be identified \(EACCES\)/);
+    assert.match(r.stderr, /about to remove/);
+    assert.equal(existsSync(out), true, 'and it refused before removing anything');
+  } finally {
+    // Readable again, or the cleanup below cannot descend into it.
+    chmodSync(path.join(dir, 'walled'), 0o700);
     rmSync(dir, { recursive: true, force: true });
   }
 });
