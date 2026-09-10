@@ -370,7 +370,7 @@ test('a refusal clears the decisions.json a previous fold left at --out', () => 
     assert.match(r.stdout, /nothing written to/);
     assert.equal(existsSync(out), false, 'the refusal leaves no earlier batch at --out');
     assert.match(r.stderr, /held a batch from an earlier fold and was removed/);
-    assert.match(r.stderr, /nothing in this batch has been recorded/);
+    assert.match(r.stderr, /nothing this run refuses has been recorded/);
 
     // The same class through `readJson`, which is in bridge-io.mjs and exits 2
     // on its own before any of this bridge's code runs. A truncated payload is
@@ -382,6 +382,10 @@ test('a refusal clears the decisions.json a previous fold left at --out', () => 
     const r2 = run(['--fix', path.join(dir, 'fix-truncated.json'), '--out', out]);
     assert.equal(r2.status, 2, r2.stdout);
     assert.equal(existsSync(out), false, 'an unreadable payload leaves no earlier batch either');
+    // Announced from the claim, not from this bridge's own refusals: told only
+    // from those, the notice would be missing from the three exits in
+    // bridge-io.mjs that the claim exists to cover.
+    assert.match(r2.stderr, /held a batch from an earlier fold and was removed/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -510,7 +514,7 @@ test('a stale id whose title binds nothing says so, and does not claim it bound'
     const r = run(['--fix', src, '--briefing', briefing, '--report', report, '--out', out]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /ID NAMES NO BRIEFING ENTRY/);
-    assert.match(r.stdout, /states id F9, and the title bound nothing either/);
+    assert.match(r.stdout, /states id F9, and the title matched no finding either/);
     assert.doesNotMatch(r.stdout, /bound by title\n/);
     // The title block is the one carrying the remedy, and it still prints.
     assert.match(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
@@ -546,6 +550,52 @@ test('a stale id on a fold given no report says no report was read', () => {
 
     const [d] = JSON.parse(readFileSync(out, 'utf-8')).decisions;
     assert.equal(d.reconciled, null, 'no report reached the fold, which is not a refusal to bind');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an --out naming an input is refused before anything is removed', () => {
+  // The claim is the first filesystem effect of the process, so it is a delete
+  // on a caller-supplied path that nothing has validated. `--report r.json
+  // --out r.json` destroyed the report and then failed to read it: an operator
+  // left with neither a fold nor their input, from a typo that used to
+  // complete.
+  const dir = freshTmp();
+  try {
+    const report = write(dir, 'report.json', mergedReport);
+    const src = write(dir, 'fix-auth-guard.json', goodFix);
+    const r = run(['--fix', src, '--report', report, '--out', report]);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /--out .*report\.json names an input of this run/);
+    assert.equal(existsSync(report), true, 'the input this run reads from is still there');
+    assert.equal(existsSync(src), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a stale id whose anchor disagrees is not told the title matched nothing', () => {
+  // `bindingFor` keeps `staleId` on the anchor branch, so one entry lands in
+  // both blocks: keyed on boundness the stale-id line said "the title bound
+  // nothing either" while the block two lines down said "the title matches a
+  // finding" and "The title is already right". Same contradiction the sibling
+  // test above was written for, one cause over.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], id: 'F9', file: 'src/authz.py' }],
+    });
+    const briefing = write(dir, 'briefing.json', briefingDoc);
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--briefing', briefing, '--report', report, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /states id F9, and the title matched a finding whose anchor/);
+    assert.match(r.stdout, /ANCHOR DISAGREES WITH THE REPORT/);
+    assert.doesNotMatch(r.stdout, /matched no finding either/);
+    assert.doesNotMatch(r.stdout, /no report was given/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

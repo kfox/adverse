@@ -29,6 +29,7 @@
 // time a disposition was added.
 
 import { rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 
 import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
@@ -102,27 +103,44 @@ if (!values.fix.length || !values.out) {
 // writes that path on every run that finishes, so a path it cannot clear is one
 // it could not have written either, and the alternative is a run that reports a
 // fold nobody can read back.
-function claimOut() {
+//
+// The removal is announced HERE, where it happens, and not from `refuse` —
+// which is the same mistake one layer in. Three of the exits this claim exists
+// to cover are `readJson`'s, in bridge-io.mjs, and they never reach anything in
+// this file: told only from `refuse`, the notice would be missing from exactly
+// the refusals that made the claim necessary.
+//
+// And it refuses an `--out` that names one of this run's own inputs before
+// removing anything. Unconditionally clearing a caller-supplied path makes the
+// first effect of the process a delete, so `--report r.json --out r.json`
+// destroyed the report and then failed to read it: an operator left with
+// neither a fold nor their input, from a typo that used to complete.
+function claimOut(inputs) {
+  const dest = path.resolve(values.out);
+  const alias = inputs.find((f) => path.resolve(f) === dest);
+  if (alias) {
+    process.stderr.write(`decisions: --out ${oneLine(values.out)} names an input of this run`
+      + ` (${oneLine(alias)}). This bridge claims --out before reading anything, so folding`
+      + ' there would destroy the file it is folding from\n');
+    process.exit(2);
+  }
   try {
-    rmSync(values.out);
+    rmSync(dest);
   } catch (e) {
-    if (e.code === 'ENOENT') return false;
+    if (e.code === 'ENOENT') return;
     process.stderr.write(`decisions: ${oneLine(values.out)}: cannot be claimed for this run`
       + ` (${oneLine(e.code)}). A batch a previous fold left there would still be on disk`
       + ' after a refusal, and `converge.mjs --record` would append it a second time\n');
     process.exit(2);
   }
-  return true;
+  process.stderr.write(`decisions: ${oneLine(values.out)} held a batch from an earlier fold and`
+    + ' was removed when this run started; nothing this run refuses has been recorded\n');
 }
 
-const clearedStaleOut = claimOut();
+claimOut([...values.fix, values.report, values.briefing].filter(Boolean));
 
 function refuse(code, message) {
   process.stderr.write(message);
-  if (clearedStaleOut) {
-    process.stderr.write(`decisions: ${oneLine(values.out)} held a batch from an earlier fold`
-      + ' and was removed when this run started; nothing in this batch has been recorded\n');
-  }
   process.exit(code);
 }
 
@@ -307,16 +325,27 @@ const misanchored = changes.filter((c) => !c.bound && c.cause === 'anchor');
 // case an operator most needs it — an id from an earlier iteration whose title
 // still binds cleanly — and silence there reads as an id that resolved.
 const staleIds = changes.filter((c) => c.staleId !== null && c.staleId !== undefined);
-// Three answers, not two. Keyed on boundness alone this said "the title bound
-// nothing either" over a `--briefing`-only fold, where nothing was looked up at
-// all: `changes` is computed whenever EITHER document is given, so with no
-// report every entry arrives unbound carrying `cause: 'unchecked'` — the same
-// boundness-vs-cause confusion the report blocks below were split by cause to
-// fix, one heading up.
+// One answer per CAUSE, because `bindingFor` has four and boundness has two.
+// Keyed on boundness this said "the title bound nothing either" for both of the
+// unbound report causes: over a `--briefing`-only fold, where nothing was
+// looked up at all, and over an anchor disagreement, where the title DID match
+// a finding and the block below says so two lines later. Same
+// boundness-vs-cause confusion the report blocks were split by cause to fix,
+// one heading up and then again inside one line of it.
+//
+// The default is a sentence rather than a fall-through to one of the four: a
+// cause added later reads as its own oddity here instead of borrowing the
+// wording of whichever answer happened to be last.
+const STALE_ID_OUTCOME = {
+  unchecked: 'and no report was given to bind the title against',
+  title: 'and the title matched no finding either',
+  anchor: 'and the title matched a finding whose anchor it contradicts',
+};
+
 function staleIdOutcome(c) {
   if (c.bound) return 'bound by title';
-  if (c.cause === 'unchecked') return 'and no report was given to bind the title against';
-  return 'and the title bound nothing either';
+  return STALE_ID_OUTCOME[c.cause]
+    ?? `unbound, for a reason this block has no wording for (${oneLine(c.cause)})`;
 }
 // Gated on the CAUSE its prose describes, not on boundness. `changes` is
 // computed whenever either document was given, so on a `--briefing`-only fold
@@ -363,7 +392,7 @@ if (staleIds.length) {
        + '    Briefing ids are re-minted every triage run, so one copied from an\n'
        + '    earlier iteration names nothing in this briefing. Check the id against\n'
        + '    briefing.json — the title may well be right, and the title is what binds\n'
-       + '    a decision here. Each line above says whether it did.\n';
+       + '    a decision here. Each line above says what the title did.\n';
 }
 if (misanchored.length) {
 
