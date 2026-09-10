@@ -38,7 +38,8 @@ import { fenced, flatten, quoted, verbatim, verbatimCell } from './markdown.mjs'
 import { isLaneAgent } from './personas.mjs';
 import { indexProbes, probeDeclaration, probeKey, probeState } from './probe.mjs';
 import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
-         assertCoversConfidences, assertCoversStatuses, claimedLanes } from './taxonomy.mjs';
+         assertCoversConfidences, assertCoversStatuses, citesLaneNames,
+         claimedLanes } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -582,12 +583,11 @@ function buildRootCauses(groups, round2, findByTitle) {
     // that carries one, naming the file and the citation; this is the same
     // refusal for a caller that did not come through it.
     const reporters = [...new Set(citations.flatMap((c) => {
-      const lanes = claimedLanes(c);
-      if (lanes === null) {
+      if (!citesLaneNames(c)) {
         throw new TypeError(`root cause ${JSON.stringify(g.id ?? g.title)} cites`
           + ` ${JSON.stringify(c.id)}, which claims a reporter that is not a lane name`);
       }
-      return lanes;
+      return claimedLanes(c);
     }))];
 
     // A ruling from the reviewer that is the only reporter of every citation is

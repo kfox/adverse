@@ -18,7 +18,7 @@ import {
 import { AgentRunner, runParallel } from './runner.mjs';
 import { agentNames, parsePlan, runLanes } from './scaling.mjs';
 import { renderMarkdown, synthesize, toJsonReport } from './synthesis.mjs';
-import { claimedLanes, isLaneList } from './taxonomy.mjs';
+import { citesLaneNames } from './taxonomy.mjs';
 import {
   appendRunRecord, buildRunRecord, repoIdentity, telemetryDisabled, telemetryPath,
 } from './telemetry.mjs';
@@ -372,7 +372,7 @@ async function cmdSynthesize(rest) {
   }
   for (const [i, group] of (briefing?.groups ?? []).entries()) {
     for (const [j, c] of (Array.isArray(group?.citations) ? group.citations : []).entries()) {
-      if (claimedLanes(c) !== null) continue;
+      if (citesLaneNames(c)) continue;
       die(`synthesize: ${values.briefing}: \`groups[${i}].citations[${j}]\` claims a reporter`
         + ' that is not a lane name; triage writes that field and this value is not one it'
         + ' writes, so correct or remove that citation');

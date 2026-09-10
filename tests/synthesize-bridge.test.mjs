@@ -329,6 +329,12 @@ for (const [label, citation] of [
   ['a reporters that is a string', { id: 'F1', title: 't', reporters: 'auditor' }],
   ['a reporters holding something that is not a lane name',
     { id: 'F1', title: 't', reporters: ['auditor', 7] }],
+  // The list is what decides which lanes a group reports, and the singular is
+  // what both renderers print beside the citation id — so a good one of each
+  // is not enough. This shape passed a check that read only the list, and
+  // published `[object Object]` into all three artifacts.
+  ['a good reporters list beside a junk reporter',
+    { id: 'F1', title: 't', reporters: ['auditor'], reporter: { lane: 'auditor' } }],
 ]) test(`a briefing citation with ${label} is refused, naming the file`, () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'adverse-cite-'));
   const briefing = path.join(dir, 'briefing.json');

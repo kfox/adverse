@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ADVISORY_KINDS, CONFIDENCES, KINDS, ROOT_CAUSE_STATUSES, SEVERITIES,
-         SEVERITY_RANK, assertCoversConfidences, claimedLanes } from '../src/taxonomy.mjs';
+         SEVERITY_RANK, assertCoversConfidences, citesLaneNames,
+         claimedLanes } from '../src/taxonomy.mjs';
 
 test('every advisory kind is a real kind', () => {
   for (const k of ADVISORY_KINDS) assert.ok(KINDS.includes(k), `${k} is not in KINDS`);
@@ -93,4 +94,23 @@ for (const [label, citation, expected] of [
   ['a reporters holding something that is not a lane name', { reporters: ['auditor', 7] }, null],
 ]) test(`claimedLanes reads ${label}`, () => {
   assert.deepEqual(claimedLanes(citation), expected);
+});
+
+// And whether those fields are lane names at all, which is a different
+// question from which lanes they name: the reading above prefers `reporters`,
+// and both renderers print the singular `reporter` verbatim. A check made of
+// only the first passed a citation carrying a good list beside a junk
+// singular, which then reached three artifacts as `[object Object]`.
+for (const [label, citation, expected] of [
+  ['a citation naming lanes in both fields',
+    { reporters: ['auditor'], reporter: 'auditor' }, true],
+  ['a citation naming nobody at all', {}, true],
+  ['a citation whose fields are both null', { reporters: null, reporter: null }, true],
+  ['a citation whose singular reporter is junk', { reporter: 42 }, false],
+  ['a citation whose list is junk', { reporters: ['auditor', 7] }, false],
+  // The one the reading above cannot see, because it stops at `reporters`.
+  ['a citation with a good list beside a junk singular',
+    { reporters: ['auditor'], reporter: { lane: 'auditor' } }, false],
+]) test(`citesLaneNames judges ${label}`, () => {
+  assert.equal(citesLaneNames(citation), expected);
 });

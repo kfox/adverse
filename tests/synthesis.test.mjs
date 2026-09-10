@@ -1060,6 +1060,20 @@ test('a citation whose reporter is not a lane name stops the report', () => {
     /root cause "G1" cites "F9", which claims a reporter that is not a lane name/);
 });
 
+test('a resolved citation is refused for the reporter the renderers print', () => {
+  // A RESOLVED citation gets its `reporters` from the finding synthesis built,
+  // so the list is always well formed and a check made of it saw nothing. The
+  // singular claim rides along untouched, and both renderers print it beside
+  // the citation id.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const withJunk = [{ ...g,
+    citations: [{ ...g.citations[0], reporter: { lane: 'auditor' } }, ...g.citations.slice(1)] }];
+
+  assert.throws(() => synthesize(round1, rulings('one'), { rootCauseGroups: withJunk }),
+    /which claims a reporter that is not a lane name/);
+});
+
 test('a report from a run that never grouped still has the keys, empty', () => {
   const json = toJsonReport(synthesize({ auditor: review('auditor', [f('x')]) }, {}));
   assert.deepEqual(json.root_causes, []);
