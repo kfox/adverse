@@ -261,6 +261,16 @@ export function makeWriteQueue(prefix) {
 
   return {
     queue(dest, src, body) {
+      // After `flush` there is nothing left that will write this, and the
+      // payload would be dropped in silence. `flush` chose the noisy direction
+      // for its own second call and left this one silent, which is worse: a
+      // late `queue` followed by a late `flush` is refused with "outputs are
+      // already written", a sentence that is false about this entry.
+      if (flushed) {
+        process.stderr.write(`${prefix}: ${oneLine(src)}: queued after flush()`
+          + ` — ${oneLine(dest)} would never be written\n`);
+        process.exit(2);
+      }
       queued.push({ dest: claim(dest, src), src, body });
     },
     // A write that fails is exit 2 and a sentence, not a stack trace under exit

@@ -278,6 +278,7 @@ const memberOf = (name) => new RegExp(`(?<![\\w$.])${quoted(name)}\\s*[.[]`);
 // `patch` is a tainted name, so the literal tainted `patchFile` and `patchFile`
 // then flagged probe.mjs's own mkdtemp write. `values['files-out']` survives
 // this, because the bracket is what the check reads and not the key.
+//
 // A template literal keeps its INTERPOLATIONS, which are code and not text.
 // Emptying one wholesale was the same silent pass in the other direction, on
 // the spelling the bridges actually use: repair.mjs, verify.mjs and
@@ -305,9 +306,21 @@ function withoutStrings(text) {
         // `values['files-out']` has to survive with its bracket.
         const start = i + 2;
         let depth = 0;
+        // Quoted text skipped here too, for the same reason `callArgs` skips
+        // it: a brace inside a string is not a brace. Counting them raw,
+        // `` `${x['}'] + values.out}` `` closed the interpolation at the quoted
+        // `}` and truncated the expression to a constant — which is the silent
+        // pass this whole function exists to remove.
+        let inner = null;
         for (i += 1; i < text.length; i += 1) {
-          if (text[i] === '{') depth += 1;
-          else if (text[i] === '}') {
+          if (inner) {
+            if (text[i] === '\\') i += 1;
+            else if (text[i] === inner) inner = null;
+          } else if (text[i] === '\'' || text[i] === '"' || text[i] === '`') {
+            inner = text[i];
+          } else if (text[i] === '{') {
+            depth += 1;
+          } else if (text[i] === '}') {
             depth -= 1;
             if (!depth) break;
           }
@@ -315,6 +328,63 @@ function withoutStrings(text) {
         out += ` ${text.slice(start, i)} `;
       }
     }
+  }
+  return out;
+}
+
+// The same source with every comment turned to spaces — same length, same line
+// breaks, so an offender's line number is still its line number.
+//
+// Every scan below reads the source as text, and a comment is text that looks
+// exactly like code. Two silent passes came out of that in one commit: a
+// comment quoting `dest = values.out` above an innocent temporary tainted the
+// name (the assignment scan does not go through `withoutStrings`, and could
+// not reach a comment while it was anchored at a line start), and a comma
+// inside a comment in an argument list shifted the destination index, so
+// `copyFileSync(tmp, /* to, atomically */ values.out)` reported nothing while
+// the same call without the comment was flagged.
+//
+// A regex literal holding `//` would defeat this, as one holding a bracket
+// already defeats `callArgs`. Nothing in the scanned directory writes one, and
+// the failure it would cause is the noisy kind: an argument list this rule
+// cannot read is reported as an offender.
+function blankComments(src) {
+  let out = '';
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === '\'' || c === '"' || c === '`') {
+      out += c;
+      for (i += 1; i < src.length; i += 1) {
+        out += src[i];
+        if (src[i] === '\\') {
+          out += src[i + 1] ?? '';
+          i += 1;
+        } else if (src[i] === c) {
+          break;
+        }
+      }
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '/') {
+      while (i < src.length && src[i] !== '\n') {
+        out += ' ';
+        i += 1;
+      }
+      out += src[i] ?? '';
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      for (; i < src.length; i += 1) {
+        out += src[i] === '\n' ? '\n' : ' ';
+        if (src[i] === '*' && src[i + 1] === '/') {
+          out += ' ';
+          i += 1;
+          break;
+        }
+      }
+      continue;
+    }
+    out += c;
   }
   return out;
 }
@@ -399,19 +469,44 @@ function splitArgs(text) {
 // cannot match, since the character before the `=` must end an identifier.
 // Bare destructuring assignment (`({ out } = values)`) is the same claim
 // without a keyword, so the keyword is optional.
+// A name being given a value, in any of the spellings this repo writes.
+//
+//   const dest = values.out;          a declaration
+//   dest = values.out;                anywhere, not only at a line start
+//   dest ||= values.out;              a compound assignment
+//   state.out = values.out;           a property target
+//   outs[0] = values.out;             a computed-member target
+//   const dest = path.join(           a right-hand side that wraps, which
+//     values.outdir, name);           `[^;\n]*` stopped at the newline, and
+//                                     this repo wraps at 80-120 columns
+//
+// `(?![=>])` keeps `==`, `===` and an arrow out. `!=`, `<=` and `>=` cannot
+// match either way, since the character before the `=` has to end a name or be
+// one of the compound operators. The right-hand side runs to the next `;`
+// rather than to the end of the line, which needs the semicolons this repo's
+// lint already requires; `const a = 1, b = values.out;` taints `a` as well,
+// and over-tainting is the direction to fail in.
+const ASSIGNMENT = new RegExp(
+  '(?:(?:const|let|var)\\s+)?'
+  + '([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*|\\[[^\\]\\n]*\\])*)'
+  + '\\s*(?:\\|\\||&&|\\?\\?|\\*\\*|<<|>>>?|[-+*/%&|^])?=(?![=>])'
+  + '([^;]*)',
+  'g');
+
 function destNames(src) {
   const names = new Set();
   const objects = new Set(['values']);
   for (const m of src.matchAll(/(?:const|let|var)?\s*\{([^}]*)\}\s*=\s*values\b/g)) {
     for (const part of m[1].split(',')) {
-      const bound = /([A-Za-z_$][\w$]*)\s*$/.exec(part.split(':').pop() ?? '');
+      // The default goes before the rename does: `const { out = 'x' } = values`
+      // ends in a string literal, so reading the trailing identifier bound
+      // nothing at all and a bridge spelling its own default got a free pass.
+      const named = part.split('=')[0].split(':').pop() ?? '';
+      const bound = /([A-Za-z_$][\w$]*)\s*$/.exec(named);
       if (bound) names.add(bound[1]);
     }
   }
-  const bindings = [
-    ...src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=([^;\n]*)/g),
-    ...src.matchAll(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*=(?![=>])([^;\n]*)/g),
-  ].map((m) => [m[1], m[2]]);
+  const bindings = [...src.matchAll(ASSIGNMENT)].map((m) => [m[1], m[2]]);
   for (const [name, init] of bindings) {
     if (init.trim() === 'values') objects.add(name);
   }
@@ -431,7 +526,9 @@ function destNames(src) {
   return { names: [...names], handed };
 }
 
-function selfWrittenDestinations(src) {
+function selfWrittenDestinations(source) {
+  // Every scan below reads this, not `source`: see `blankComments`.
+  const src = blankComments(source);
   const { handed } = destNames(src);
   const found = [];
   for (const m of src.matchAll(CALLS)) {
@@ -502,6 +599,24 @@ for (const [label, src, dest] of [
     'let out;\n({ out } = values);\nwriteFileSync(out, body);', 'out'],
   ['a call whose destination argument is not there at all',
     'renameSync(tmp);', 'no destination argument'],
+  // Comments are text that looks exactly like code, and every scan here reads
+  // text. A comma inside one shifted which argument the rule called the
+  // destination; the same call without the comment was flagged.
+  ['a destination behind a comment holding a comma',
+    'copyFileSync(tmp, /* to, atomically */ values.out);', 'values.out'],
+  ['a destination behind a line comment holding a comma',
+    'copyFileSync(tmp, // to, atomically\n  values.out);', 'values.out'],
+  // A brace inside a string is not a brace, in an interpolation as anywhere
+  // else: counting them raw closed the expression at the quoted `}`.
+  ['a destination in an interpolation beside a quoted brace',
+    'writeFileSync(`${x[\'}\'] + values.out}`, body);', 'values.out'],
+  ['a right-hand side that wraps onto the next line',
+    'const dest = path.join(\n  values.outdir, name);\nwriteFileSync(dest, body);', 'dest'],
+  ['a compound assignment', 'dest ||= values.out;\nwriteFileSync(dest, body);', 'dest'],
+  ['a computed-member target',
+    'outs[0] = values.out;\nwriteFileSync(outs[0], body);', 'outs[0]'],
+  ['a destructured name with a default of its own',
+    'const { out = \'x\' } = values;\nwriteFileSync(out, body);', 'out'],
 ]) {
   test(`the rule reads ${label}`, () => {
     const calls = selfWrittenDestinations(src).map((o) => o.call);
@@ -527,6 +642,15 @@ for (const [label, src] of [
     'const notOurs = other.values.out;\nwriteFileSync(notOurs, body);'],
   ['a comparison that is not an assignment',
     'const dest = tmp;\nif (dest === values.out) return;\nwriteFileSync(dest, body);'],
+  // The other direction of the same finding: a comment is not code, so an
+  // assignment quoted in one taints nothing. Unanchoring the assignment scan
+  // is what first let it reach inside a comment at all.
+  ['a temporary whose comment quotes the shape this rule refuses',
+    '// The shape this replaced: dest = values.out, written unguarded.\n'
+    + 'const dest = path.join(tmpdir(), \'x\');\nwriteFileSync(dest, body);'],
+  ['a block comment quoting the same shape',
+    '/* was: state.out = values.out */\n'
+    + 'state.out = path.join(tmpdir(), \'x\');\nwriteFileSync(state.out, body);'],
 ]) {
   test(`the rule passes ${label}`, () => {
     assert.deepEqual(selfWrittenDestinations(src), [],
@@ -638,6 +762,29 @@ test('the queue will not flush a second time', () => {
     assert.match(seen.said, /flush\(\) twice/, seen.said);
     assert.equal(readFileSync(dest, 'utf-8'), '{"written":true}',
       'and the file the first flush wrote is untouched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the queue refuses a payload handed to it after the flush', () => {
+  // `flush` chose the noisy direction for its own second call and left this
+  // one silent, which is the worse half: the entry is dropped, and a later
+  // `flush` refuses with "outputs are already written" — false about exactly
+  // the file nobody wrote.
+  const dir = freshTmp();
+  try {
+    const queue = makeWriteQueue('probe');
+    queue.queue(path.join(dir, 'first.json'), 'payload.json', '{}');
+    queue.flush('wrote');
+
+    const late = path.join(dir, 'late.json');
+    const seen = catchExit(() => queue.queue(late, 'late.json', '{}'));
+
+    assert.equal(seen.code, 2, seen.said);
+    assert.match(seen.said, /queued after flush\(\)/, seen.said);
+    assert.match(seen.said, /would never be written/, seen.said);
+    assert.equal(existsSync(late), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
