@@ -332,24 +332,36 @@ function withoutStrings(text) {
   return out;
 }
 
-// The same source with every comment turned to spaces — same length, same line
-// breaks, so an offender's line number is still its line number.
+// The same source with every comment and every regex literal turned to spaces
+// — same length, same line breaks, so an offender's line number is still its
+// line number.
 //
-// Every scan below reads the source as text, and a comment is text that looks
-// exactly like code. Two silent passes came out of that in one commit: a
-// comment quoting `dest = values.out` above an innocent temporary tainted the
-// name (the assignment scan does not go through `withoutStrings`, and could
-// not reach a comment while it was anchored at a line start), and a comma
-// inside a comment in an argument list shifted the destination index, so
+// Every scan below reads the source as text, and three things in a .mjs file
+// look exactly like code without being it. Comments cost two silent passes in
+// one commit: one quoting `dest = values.out` above an innocent temporary
+// tainted the name, and a comma inside one shifted the destination index, so
 // `copyFileSync(tmp, /* to, atomically */ values.out)` reported nothing while
 // the same call without the comment was flagged.
 //
-// A regex literal holding `//` would defeat this, as one holding a bracket
-// already defeats `callArgs`. Nothing in the scanned directory writes one, and
-// the failure it would cause is the noisy kind: an argument list this rule
-// cannot read is reported as an offender.
-function blankComments(src) {
+// A regex literal cost a worse one, because it desynchronizes the scan rather
+// than misreading one call. `plan.mjs:85` writes `` `'${s.replace(/'/g,
+// "'\\''")}'` ``, and the `'` inside `/'/g` read as a string opener: from that
+// line to the end of the file nothing was blanked at all — 39 comment lines in
+// that one file — and both directions above went live again after it. So a
+// regex is recognized here rather than being written off as an unlikely
+// spelling, which is what the first version of this comment did.
+//
+// Recognized by what precedes it, which is the whole of the ambiguity: `/` is
+// division after a value — an identifier, a number, a `)`, a `]`, a string —
+// and starts a regex everywhere else. A character class is tracked, so `/[/]/`
+// does not end at its own bracketed slash, and the flags go with the literal.
+// Nothing downstream needs to know regexes exist, which is also what closes
+// `callArgs`' bracket-in-a-regex case.
+const AFTER_A_VALUE = /[\w$)\]]/;
+
+function blankNonCode(src) {
   let out = '';
+  let prev = '';
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\'' || c === '"' || c === '`') {
@@ -363,6 +375,7 @@ function blankComments(src) {
           break;
         }
       }
+      prev = ')';
       continue;
     }
     if (c === '/' && src[i + 1] === '/') {
@@ -384,7 +397,31 @@ function blankComments(src) {
       }
       continue;
     }
+    if (c === '/' && !AFTER_A_VALUE.test(prev)) {
+      out += ' ';
+      let inClass = false;
+      for (i += 1; i < src.length; i += 1) {
+        out += ' ';
+        if (src[i] === '\\') {
+          out += ' ';
+          i += 1;
+        } else if (src[i] === '[') {
+          inClass = true;
+        } else if (src[i] === ']') {
+          inClass = false;
+        } else if (src[i] === '/' && !inClass) {
+          break;
+        }
+      }
+      while (/[a-z]/.test(src[i + 1] ?? '')) {
+        out += ' ';
+        i += 1;
+      }
+      prev = ')';
+      continue;
+    }
     out += c;
+    if (!/\s/.test(c)) prev = c;
   }
   return out;
 }
@@ -395,9 +432,10 @@ function blankComments(src) {
 // body)` never returns to depth 0 otherwise.
 //
 // Returns null when it cannot find the close, and the caller reports that as an
-// offender rather than skipping it. A regex literal still defeats this (`\(` in
-// `body.replace(/\(/g, '')`), and where one failure mode is silent and the other
-// noisy the answer is not "skip the call this rule exists to read".
+// offender rather than skipping it — where one failure mode is silent and the
+// other noisy, the answer is not "skip the call this rule exists to read". The
+// shape that used to reach it, a regex holding a bracket (`body.replace(/\(/g,
+// '')`), is blanked before this ever sees it.
 function callArgs(src, open) {
   const depths = [];
   let quote = null;
@@ -479,19 +517,39 @@ function splitArgs(text) {
 //   const dest = path.join(           a right-hand side that wraps, which
 //     values.outdir, name);           `[^;\n]*` stopped at the newline, and
 //                                     this repo wraps at 80-120 columns
+//   const a = 1, dest = values.out;   the second declarator of a list
 //
-// `(?![=>])` keeps `==`, `===` and an arrow out. `!=`, `<=` and `>=` cannot
-// match either way, since the character before the `=` has to end a name or be
-// one of the compound operators. The right-hand side runs to the next `;`
-// rather than to the end of the line, which needs the semicolons this repo's
-// lint already requires; `const a = 1, b = values.out;` taints `a` as well,
-// and over-tainting is the direction to fail in.
-const ASSIGNMENT = new RegExp(
-  '(?:(?:const|let|var)\\s+)?'
+// THREE patterns, differing only in where the right-hand side ends, and each
+// is blind exactly where another sees. That is the design and not an accident:
+// one pattern with an unbounded right-hand side swallowed the statement after
+// any `=` that is not terminated by a `;` — every `for` header's third clause,
+// every `while ((m = re.exec(s)) !== null)` — so the binding on the next line
+// went untracked, and `triage.mjs` measurably lost two names to a `for` header
+// that way. The version before it had two independent passes that covered each
+// other here, and collapsing them into one is what removed the cover.
+//
+//   TO_LINE      stops at a newline, so a swallowed header recovers on the
+//                next line, which is where the binding after it lives.
+//   TO_STATEMENT stops at the `;`, which is the only one that reads a
+//                right-hand side wrapped over two lines.
+//   TO_CLAUSE    stops at a comma as well, which is the only one that reaches
+//                the second declarator of `const a = 1, dest = values.out;`.
+//                The other two match `a`, whose right-hand side then runs
+//                through `dest`'s — and it is the TAINTED name that went
+//                untracked there, so the failure was a silent pass and not the
+//                over-tainting an earlier version of this comment claimed.
+//
+// `(?![=>])` keeps `==`, `===` and an arrow out. Nothing else needs excluding:
+// a `!=`, `<=` or `>=` cannot match, because what precedes the `=` must end a
+// name or be one of the compound operators listed.
+const ASSIGNMENT_TARGET = '(?:(?:const|let|var)\\s+)?'
   + '([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*|\\[[^\\]\\n]*\\])*)'
-  + '\\s*(?:\\|\\||&&|\\?\\?|\\*\\*|<<|>>>?|[-+*/%&|^])?=(?![=>])'
-  + '([^;]*)',
-  'g');
+  + '\\s*(?:\\|\\||&&|\\?\\?|\\*\\*|<<|>>>?|[-+*/%&|^])?=(?![=>])';
+const ASSIGNMENTS = [
+  new RegExp(`${ASSIGNMENT_TARGET}([^;\n]*)`, 'g'),
+  new RegExp(`${ASSIGNMENT_TARGET}([^;]*)`, 'g'),
+  new RegExp(`${ASSIGNMENT_TARGET}([^;,\n]*)`, 'g'),
+];
 
 function destNames(src) {
   const names = new Set();
@@ -506,7 +564,9 @@ function destNames(src) {
       if (bound) names.add(bound[1]);
     }
   }
-  const bindings = [...src.matchAll(ASSIGNMENT)].map((m) => [m[1], m[2]]);
+  const bindings = ASSIGNMENTS
+    .flatMap((pattern) => [...src.matchAll(pattern)])
+    .map((m) => [m[1], m[2]]);
   for (const [name, init] of bindings) {
     if (init.trim() === 'values') objects.add(name);
   }
@@ -527,8 +587,8 @@ function destNames(src) {
 }
 
 function selfWrittenDestinations(source) {
-  // Every scan below reads this, not `source`: see `blankComments`.
-  const src = blankComments(source);
+  // Every scan below reads this, not `source`: see `blankNonCode`.
+  const src = blankNonCode(source);
   const { handed } = destNames(src);
   const found = [];
   for (const m of src.matchAll(CALLS)) {
@@ -617,6 +677,33 @@ for (const [label, src, dest] of [
     'outs[0] = values.out;\nwriteFileSync(outs[0], body);', 'outs[0]'],
   ['a destructured name with a default of its own',
     'const { out = \'x\' } = values;\nwriteFileSync(out, body);', 'out'],
+  // A regex literal is the third thing that looks like code without being it,
+  // and the only one that desynchronizes the whole scan: the quote inside
+  // `/'/g` — which plan.mjs writes — read as a string opener, and from that
+  // line to the end of the file nothing was blanked at all.
+  ['a destination behind a comment, after a regex holding a quote',
+    'const q = s.replace(/\'/g, \'\');\n'
+    + 'copyFileSync(tmp, /* to, atomically */ values.out);', 'values.out'],
+  // And the bracket case, which used to be reported as an argument list this
+  // rule could not read — the noisy direction, but still not the destination.
+  ['a destination beside a regex holding a bracket',
+    'writeFileSync(values.out, body.replace(/\\(/g, \'\'));', 'values.out'],
+  // Every `=` that is not terminated by a `;` — a `for` header's third clause,
+  // a `while ((m = …))` — swallowed the statement after it, so the binding on
+  // the next line went untracked.
+  ['a destination bound after a for header',
+    'for (let i = 0; i < n; i += 1) {\n'
+    + '  const dest = values.out;\n  writeFileSync(dest, body);\n}', 'dest'],
+  ['a destination bound after a while header',
+    'while ((m = re.exec(s)) !== null) {\n'
+    + '  const dest = values.out;\n  writeFileSync(dest, body);\n}', 'dest'],
+  ['the second declarator of a list',
+    'const a = 1, dest = values.out;\nwriteFileSync(dest, body);', 'dest'],
+  // Division, not a regex — and reading it as one blanks to the next slash,
+  // which erases the binding below and every call after it.
+  ['a destination bound after a division',
+    'const half = values.width / 2;\n'
+    + 'const dest = values.out;\nwriteFileSync(dest, half);', 'dest'],
 ]) {
   test(`the rule reads ${label}`, () => {
     const calls = selfWrittenDestinations(src).map((o) => o.call);
@@ -651,6 +738,19 @@ for (const [label, src] of [
   ['a block comment quoting the same shape',
     '/* was: state.out = values.out */\n'
     + 'state.out = path.join(tmpdir(), \'x\');\nwriteFileSync(state.out, body);'],
+  // The other direction of the regex finding: a false positive, from the same
+  // desynchronization, on the same fixture as the control two above.
+  ['the same comment, after a regex holding a quote',
+    'const q = s.replace(/\'/g, \'\');\n'
+    + '// The shape this replaced: dest = values.out, written unguarded.\n'
+    + 'const dest = path.join(tmpdir(), \'x\');\nwriteFileSync(dest, body);'],
+  // A regex whose character class holds a slash. Ending the literal at that
+  // slash leaves `]values.out/g, '')` standing as code, which taints the name
+  // the write below uses — a false positive, and the only direction the class
+  // tracking is observable in.
+  ['a regex whose character class holds a slash',
+    'const cleaned = p.replace(/[/]values.out/g, \'\');\n'
+    + 'writeFileSync(cleaned, body);'],
 ]) {
   test(`the rule passes ${label}`, () => {
     assert.deepEqual(selfWrittenDestinations(src), [],
