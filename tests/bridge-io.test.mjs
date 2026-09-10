@@ -271,6 +271,16 @@ const READ_MODE = /^(['"])r\1$/;
 const quoted = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const boundary = (name) => new RegExp(`(?<![\\w$.])${quoted(name)}(?![\\w$])`);
 const memberOf = (name) => new RegExp(`(?<![\\w$.])${quoted(name)}\\s*[.[]`);
+// An object used without naming one of its properties: aliased wholesale,
+// passed on, or read through a bracket, which is the same thing here because
+// `withoutStrings` empties the key before this sees it. Binding an object
+// literal's PAIRS is what made this necessary — the name itself stops being
+// tracked, so `const c = { out: values.out }` left `c['out']`, `const d = c`
+// and `Object.assign({}, c)` unreported, all three of which the cruder
+// whole-name taint caught. Anything that DOES name a property is left to
+// `boundary`, which is what keeps the precision the pairs bought.
+const wholesale = (name) => new RegExp(
+  `(?<![\\w$.])${quoted(name)}(?!\\s*\\.\\s*[A-Za-z_$])(?![\\w$])`);
 
 // Text with its string literals emptied, for asking whether an expression reads
 // a caller-supplied path. A tainted NAME inside a literal is not a tainted
@@ -301,9 +311,14 @@ function withoutStrings(text) {
       } else if (text[i] === open) {
         break;
       } else if (open === '`' && text[i] === '$' && text[i + 1] === '{') {
-        // The expression, spaced so it cannot glue itself to a neighbor. Not
-        // rescanned: a string inside it is part of the expression, and
-        // `values['files-out']` has to survive with its bracket.
+        // The expression, spaced so it cannot glue itself to a neighbor,
+        // and scanned as what it is: an interpolation holds CODE, and code
+        // holds literals. Splicing it in raw left every literal nested one
+        // level down standing as text, so `` `${fmt('dest = values.out')}` ``
+        // bound a real `dest` two lines below to a sentence about it — the
+        // same report on correct code the flat scan gave, one backtick in.
+        // `values['files-out']` still survives, because what the check reads
+        // is the bracket and not the key.
         const start = i + 2;
         let depth = 0;
         // Quoted text skipped here too, for the same reason `callArgs` skips
@@ -325,7 +340,7 @@ function withoutStrings(text) {
             if (!depth) break;
           }
         }
-        out += ` ${text.slice(start, i)} `;
+        out += ` ${withoutStrings(text.slice(start, i))} `;
       }
     }
   }
@@ -682,18 +697,23 @@ const ASSIGNMENT = new RegExp('(?:(?:const|let|var)\\s+)?'
 // fixture: `const opts = { out: values.out }` binds `opts.out`, which is the
 // name the write actually uses.
 //
-// A pair this cannot read as `key: value` — a shorthand `{ out }`, a spread —
-// gives up on the whole literal and taints the name, which is the noisy
-// direction and the one everything here fails in.
+// A pair this cannot read as `key: value` — a shorthand `{ out }`, a spread,
+// a computed `[k]:`, a QUOTED key — gives up on the whole literal and taints
+// the name, which is the noisy direction and the one everything here fails in.
+// The quoted key belongs on that list because the statement has been through
+// `withoutStrings` before it arrives: `{ 'out': values.out }` reads as
+// `{ '': values.out }` here, so a branch matching the quotes could only ever
+// bind the name `c.`, which nothing spells. `values['files-out']` says a
+// quoted key in a config object is not hypothetical.
 function objectBindings(name, init) {
   const literal = /^\{([\s\S]*)\}$/.exec(init.trim());
   if (!literal) return null;
   const pairs = [];
   for (const part of splitArgs(literal[1])) {
     if (!part) continue;
-    const pair = /^(?:'([^']*)'|"([^"]*)"|([A-Za-z_$][\w$]*))\s*:([\s\S]*)$/.exec(part);
+    const pair = /^([A-Za-z_$][\w$]*)\s*:([\s\S]*)$/.exec(part);
     if (!pair) return null;
-    pairs.push([`${name}.${pair[1] ?? pair[2] ?? pair[3]}`, pair[4]]);
+    pairs.push([`${name}.${pair[1]}`, pair[2]]);
   }
   return pairs;
 }
@@ -736,8 +756,11 @@ function destNames(src, statements) {
 
   const handed = (raw) => {
     const text = withoutStrings(raw);
+    const owners = new Set([...names].filter((n) => n.includes('.'))
+      .map((n) => n.slice(0, n.indexOf('.'))));
     return [...objects].some((o) => memberOf(o).test(text))
-      || [...names].some((n) => boundary(n).test(text));
+      || [...names].some((n) => boundary(n).test(text))
+      || [...owners].some((o) => wholesale(o).test(text));
   };
   for (let pass = 0; pass <= bindings.length; pass += 1) {
     const before = names.size;
@@ -918,6 +941,17 @@ for (const [label, src, dest] of [
     + 'writeFileSync(dest, body);', 'dest'],
   ['a destination bound inside an object literal',
     'const opts = { out: values.out };\nwriteFileSync(opts.out, body);', 'opts.out'],
+  // The three spellings binding the PAIRS instead of the name gave up on. A
+  // bracketed key is the same expression as the dotted one, and `withoutStrings`
+  // has emptied the key by the time anything here looks at it; the other two
+  // reach the property through a name this rule never saw take a value.
+  ['a tainted property read through a bracket rather than a dot',
+    'const c = { out: values.out };\nwriteFileSync(c[\'out\'], body);', 'c['],
+  ['an object literal aliased wholesale under another name',
+    'const c = { out: values.out };\nconst d = c;\n'
+    + 'writeFileSync(d.out, body);', 'd.out'],
+  ['an object literal whose key is quoted',
+    'const c = { \'out\': values.out };\nwriteFileSync(c.out, body);', 'c.out'],
   // And the fallback, on a literal this cannot read pair by pair: a shorthand
   // property has no `:`, so which key holds the caller's path is unknown and
   // the whole name is tainted rather than the one pair it could read.
@@ -1029,6 +1063,12 @@ for (const [label, src] of [
   // The other direction of the same finding: a comment is not code, so an
   // assignment quoted in one taints nothing. Unanchoring the assignment scan
   // is what first let it reach inside a comment at all.
+  // The same prose, one backtick further in: an interpolation holds code, and
+  // that code holds literals of its own. This is the shape of every message
+  // these bridges build.
+  ['a temporary whose message text quotes the shape inside an interpolation',
+    'const said = `${fmt(\'dest = values.out, written unguarded\')}`;\n'
+    + 'const dest = path.join(tmpdir(), \'x\');\nwriteFileSync(dest, said);'],
   ['a temporary whose comment quotes the shape this rule refuses',
     '// The shape this replaced: dest = values.out, written unguarded.\n'
     + 'const dest = path.join(tmpdir(), \'x\');\nwriteFileSync(dest, body);'],
