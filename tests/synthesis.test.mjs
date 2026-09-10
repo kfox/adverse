@@ -1042,6 +1042,27 @@ test('a citation claiming no reporter contributes nobody, not a null reviewer', 
     JSON.stringify(json.root_causes[0].reporters));
 });
 
+test('a citation whose reporter is not a lane name is carried, not dropped', () => {
+  // Absent is the case that filter is for. A reporter that is present and
+  // unusable comes off a briefing file whose reader checks only that it is an
+  // array, and dropping it too would put "0 reviewers" in a permanent PR
+  // comment with nothing said about why — so it goes on to the renderer that
+  // refuses it by name.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const withJunk = [{ ...g,
+    citations: [...g.citations,
+      { id: 'F9', kind: 'defect', severity: 'warning', file: 'a.py', line: 1,
+        title: 'nobody filed this', reporter: 42 }] }];
+
+  const json = toJsonReport(synthesize(round1, rulings('one'),
+    { rootCauseGroups: withJunk }));
+
+  assert.deepEqual(json.root_causes[0].reporters,
+    ['auditor', 'adversary', 'steward', 42],
+    JSON.stringify(json.root_causes[0].reporters));
+});
+
 test('a report from a run that never grouped still has the keys, empty', () => {
   const json = toJsonReport(synthesize({ auditor: review('auditor', [f('x')]) }, {}));
   assert.deepEqual(json.root_causes, []);

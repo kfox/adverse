@@ -176,9 +176,6 @@ function oneLine(v) {
   return clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
 }
 
-// What a value is, for a refusal that has to say why it is not the shape asked
-// for. `JSON.stringify` renders `null`, a number and a string faithfully and an
-// array as its whole contents, which is the one case worth naming by shape.
 // A value a refusal quotes, bounded well below the line's own budget, and the
 // identifier form of the same thing.
 //
@@ -191,10 +188,14 @@ function oneLine(v) {
 //
 // `named` stringifies and THEN bounds, because escaping doubles every
 // character it touches: bounding first spent the budget twice, and a title of
-// 600 quotes came back 243 characters long. `oneLine` runs first anyway so
-// that an entry with no title is still `""` rather than nothing at all —
-// `JSON.stringify(undefined)` is `undefined`, which renders as the empty
-// string and takes the identifier out of the sentence entirely.
+// 600 quotes came back 243 characters long. It stringifies the title ITSELF
+// rather than a flattened copy, for the reason the disposition branch below
+// gives: a title that is not a string at all is a thing these messages exist
+// to make recognizable, and `String(…)` renders every object among them as the
+// same `[object Object]`. The one value `JSON.stringify` does not render is
+// `undefined`, which is an absent title and reads as `""`, rather than as
+// nothing at all — an entry named nothing, on the branch whose whole subject
+// is an entry this tool did not write.
 //
 // A value here is for recognizing a thing in a file the reader has open, which
 // does not take 500 characters. Local to this module rather than in
@@ -205,8 +206,11 @@ const brief = (value) => {
   return flat.length > MAX_PROBLEM_FIELD_CHARS
     ? `${flat.slice(0, MAX_PROBLEM_FIELD_CHARS)}…` : flat;
 };
-const named = (title) => brief(JSON.stringify(oneLine(title)));
+const named = (title) => brief(JSON.stringify(title) ?? '""');
 
+// What a value is, for a refusal that has to say why it is not the shape asked
+// for. `JSON.stringify` renders `null`, a number and a string faithfully and an
+// array as its whole contents, which is the one case worth naming by shape.
 function shapeOf(value) {
   return Array.isArray(value) ? 'an array' : oneLine(JSON.stringify(value));
 }
@@ -1668,8 +1672,8 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
   // and match no bucket. That is why the stop condition does not depend on
   // this being empty: such a finding is counted and blocks either way, and
   // surfaces here instead of disappearing.
-  const named = new Set([...open, ...unexamined, ...disputed]);
-  const other = unsettled.filter((f) => !named.has(f));
+  const bucketed = new Set([...open, ...unexamined, ...disputed]);
+  const other = unsettled.filter((f) => !bucketed.has(f));
 
   // A lane that was TRIED and FAILED reviewed nothing, and "reviewed and found
   // nothing" is the same input to this gate as "never looked": both contribute

@@ -578,8 +578,14 @@ function buildRootCauses(groups, round2, findByTitle) {
     // reviewer in the PR comment and rendered as the word "null" in the HTML,
     // which is the vouching this list is careful not to do, spelled by an
     // absence instead of a name.
+    //
+    // ABSENT, not merely unusable. These groups are read off a briefing file
+    // whose caller checks only that it is an array, so a `reporter` can arrive
+    // as a number or an object — and dropping those too would put the same
+    // "0 reviewers" in a permanent PR comment with nothing said about why.
+    // They go on, to the renderer that refuses them by name.
     const reporters = [...new Set(citations.flatMap((c) => c.reporters ?? [c.reporter])
-      .filter((lane) => typeof lane === 'string'))];
+      .filter((lane) => lane !== undefined && lane !== null))];
 
     // A ruling from the reviewer that is the only reporter of every citation is
     // that reviewer confirming that its own findings are one thing. `validate`

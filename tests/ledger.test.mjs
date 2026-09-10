@@ -534,6 +534,21 @@ for (const [label, over, base, keeps] of [
   assert.match(problem, /[A-Z]{40}/, 'and enough of the long field to recognize it');
 });
 
+test('an entry whose title is not a string is named as what it is', () => {
+  // The identifier is the whole reason these messages quote a title, and this
+  // branch reports entries a fix agent wrote by hand — where a title that is
+  // an object is exactly the kind of thing worth seeing. Flattening it first
+  // rendered every one of them as `[object Object]`, which is what the
+  // disposition branch beside it says not to do.
+  const l = { ...emptyLedger(),
+              entries: [{ kind: 'defect', file: 'x.py', line: 1, title: { a: 1, b: 'x' },
+                          disposition: 'noted', reason: 'r' }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.match(problem, /^entry \{"a":1,"b":"x"\} carries no atCommit/, problem);
+});
+
 test('an entry with no title is still named, rather than named nothing', () => {
   // `JSON.stringify(undefined)` is the value `undefined`, which flattens to
   // the empty string — so the problem read `entry  carries no atCommit`, with
