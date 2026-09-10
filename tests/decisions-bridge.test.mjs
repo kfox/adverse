@@ -368,9 +368,20 @@ test('a refusal clears the decisions.json a previous fold left at --out', () => 
     ]);
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stdout, /nothing written to/);
-    assert.equal(existsSync(out), false, 'the refusal removes the earlier fold\'s file');
-    assert.match(r.stderr, /removed .*decisions\.json, which a previous fold left there/);
+    assert.equal(existsSync(out), false, 'the refusal leaves no earlier batch at --out');
+    assert.match(r.stderr, /held a batch from an earlier fold and was removed/);
     assert.match(r.stderr, /nothing in this batch has been recorded/);
+
+    // The same class through `readJson`, which is in bridge-io.mjs and exits 2
+    // on its own before any of this bridge's code runs. A truncated payload is
+    // a likelier refusal than a transposed pair, and the first fix here wrapped
+    // only the refusals this bridge spells out.
+    const second = run(['--fix', write(dir, 'fix-auth-guard.json', goodFix), '--out', out]);
+    assert.equal(second.status, 0, second.stderr);
+    writeFileSync(path.join(dir, 'fix-truncated.json'), '{"agent":"fix-auth-guard",');
+    const r2 = run(['--fix', path.join(dir, 'fix-truncated.json'), '--out', out]);
+    assert.equal(r2.status, 2, r2.stdout);
+    assert.equal(existsSync(out), false, 'an unreadable payload leaves no earlier batch either');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -512,6 +523,34 @@ test('a stale id whose title binds nothing says so, and does not claim it bound'
   }
 });
 
+test('a stale id on a fold given no report says no report was read', () => {
+  // The third answer. `changes` is computed whenever either document is given,
+  // so with `--briefing` and no `--report` every entry arrives unbound carrying
+  // `cause: 'unchecked'` — and an outcome keyed on boundness alone told the
+  // operator "the title bound nothing either" about a title nothing looked up.
+  // Same boundness-vs-cause confusion the report blocks were split by cause to
+  // fix; here it is in one line of one of them.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], id: 'F9' }],
+    });
+    const briefing = write(dir, 'briefing.json', briefingDoc);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--briefing', briefing, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /states id F9, and no report was given to bind the title against/);
+    assert.doesNotMatch(r.stdout, /bound by title/);
+    assert.doesNotMatch(r.stdout, /the title bound nothing either/);
+
+    const [d] = JSON.parse(readFileSync(out, 'utf-8')).decisions;
+    assert.equal(d.reconciled, null, 'no report reached the fold, which is not a refusal to bind');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a briefing whose findings is not an array is exit 2, naming the file', () => {
   // The `--report` sibling wraps `requireFindings` in try/catch and exits 2
   // with the filename precisely because exit 1 is a claim about a review. This
@@ -646,8 +685,14 @@ test('a noted entry the anchor refused is told it excuses nothing either', () =>
     const r = run(['--fix', src, '--report', report, '--out', out]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /ANCHOR DISAGREES WITH THE REPORT/);
-    assert.match(r.stdout, /records `reconciled: false`/);
-    assert.match(r.stdout, /named at `--record` anyway/);
+    assert.match(r.stdout, /each records\n    `reconciled: false`/);
+    assert.match(r.stdout, /stops it covering anything/);
+    assert.match(r.stdout, /later decision\n    leaning on one of these is named at `--record`/);
+    // NOT "a later noted is named": `uncoveredDecisions` skips every `noted`
+    // entry (src/ledger.mjs), and cover comes only FROM `noted` entries. The
+    // first draft of this clause inverted both halves, and an operator read it
+    // as a warning about an entry that is never the one flagged.
+    assert.doesNotMatch(r.stdout, /later noted/);
     assert.doesNotMatch(r.stdout, /UNREPORTED IDENTITY/);
 
     const [d] = JSON.parse(readFileSync(out, 'utf-8')).decisions;

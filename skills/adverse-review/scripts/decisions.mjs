@@ -80,30 +80,48 @@ if (!values.fix.length || !values.out) {
   usage(USAGE);
 }
 
-// Every refusal in this file exits without writing `--out`, and the loop folds
-// each iteration to ONE fixed path (references/convergence-loop.md), so a
-// refusal that leaves the previous iteration's file sitting there hands
-// `--record` a batch it has already recorded: appended again to an append-only
-// ledger, the iteration counter advanced, its findings re-settled, and this
-// iteration's payloads never recorded at all. Reproduced by folding a good
-// batch and then re-running with a payload this bridge refuses.
+// Every exit in this file below this line leaves `--out` unwritten, and the
+// loop folds each iteration to ONE fixed path
+// (references/convergence-loop.md), so a run that refuses without touching that
+// path leaves the PREVIOUS iteration's complete batch sitting exactly where
+// stdout says nothing was written. `converge.mjs --record` has no dedup against
+// a batch it already recorded, so an operator following the output appends
+// iteration N-1 a second time: the counter the cap terminates on advances, its
+// findings are re-settled, and this iteration's payloads are never recorded.
 //
-// This bridge owns `--out` — every run that gets that far overwrites it — so a
-// refused run clears it. Both outcomes are said out loud, because a stale file
-// left behind is the one an operator has to know about, and "nothing was
-// written" reads exactly like "nothing is there".
-function refuse(code, message) {
-  process.stderr.write(message);
+// Claimed HERE, in one place, rather than in each refusal — the first draft of
+// this fix wrapped the refusals it knew about and left the three `readJson`
+// exits, which are in bridge-io.mjs and exit before any of this file's code
+// runs. A truncated fix payload is a likelier refusal than a transposed pair,
+// so the fix that covers only the paths this file spells out covers the
+// unlikely half. The parse is the last thing that can refuse before `--out` is
+// known, and everything after it is this bridge's, so this is the earliest
+// point where one claim covers every exit — including one added later.
+//
+// Refusing when the file cannot be removed, rather than warning: this bridge
+// writes that path on every run that finishes, so a path it cannot clear is one
+// it could not have written either, and the alternative is a run that reports a
+// fold nobody can read back.
+function claimOut() {
   try {
     rmSync(values.out);
-    process.stderr.write(`decisions: removed ${oneLine(values.out)}, which a previous fold`
-      + ' left there; nothing in this batch has been recorded\n');
   } catch (e) {
-    if (e.code !== 'ENOENT') {
-      process.stderr.write(`decisions: could not remove ${oneLine(values.out)}`
-        + ` (${oneLine(e.code)}). A file a previous fold left there is still on disk, and`
-        + ' `converge.mjs --record` would append that batch a second time\n');
-    }
+    if (e.code === 'ENOENT') return false;
+    process.stderr.write(`decisions: ${oneLine(values.out)}: cannot be claimed for this run`
+      + ` (${oneLine(e.code)}). A batch a previous fold left there would still be on disk`
+      + ' after a refusal, and `converge.mjs --record` would append it a second time\n');
+    process.exit(2);
+  }
+  return true;
+}
+
+const clearedStaleOut = claimOut();
+
+function refuse(code, message) {
+  process.stderr.write(message);
+  if (clearedStaleOut) {
+    process.stderr.write(`decisions: ${oneLine(values.out)} held a batch from an earlier fold`
+      + ' and was removed when this run started; nothing in this batch has been recorded\n');
   }
   process.exit(code);
 }
@@ -289,6 +307,17 @@ const misanchored = changes.filter((c) => !c.bound && c.cause === 'anchor');
 // case an operator most needs it — an id from an earlier iteration whose title
 // still binds cleanly — and silence there reads as an id that resolved.
 const staleIds = changes.filter((c) => c.staleId !== null && c.staleId !== undefined);
+// Three answers, not two. Keyed on boundness alone this said "the title bound
+// nothing either" over a `--briefing`-only fold, where nothing was looked up at
+// all: `changes` is computed whenever EITHER document is given, so with no
+// report every entry arrives unbound carrying `cause: 'unchecked'` — the same
+// boundness-vs-cause confusion the report blocks below were split by cause to
+// fix, one heading up.
+function staleIdOutcome(c) {
+  if (c.bound) return 'bound by title';
+  if (c.cause === 'unchecked') return 'and no report was given to bind the title against';
+  return 'and the title bound nothing either';
+}
 // Gated on the CAUSE its prose describes, not on boundness. `changes` is
 // computed whenever either document was given, so on a `--briefing`-only fold
 // every named entry arrives unbound carrying `cause: 'unchecked'` — and this
@@ -330,8 +359,7 @@ if (staleIds.length) {
   out += `  ID NAMES NO BRIEFING ENTRY — the id/title check could not run on these`
        + ` (${staleIds.length}):\n`
        + staleIds.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}] states id`
-           + ` ${oneLine(c.staleId)}, ${c.bound ? 'bound by title' : 'and the title bound'
-             + ' nothing either'}\n`).join('')
+           + ` ${oneLine(c.staleId)}, ${staleIdOutcome(c)}\n`).join('')
        + '    Briefing ids are re-minted every triage run, so one copied from an\n'
        + '    earlier iteration names nothing in this briefing. Check the id against\n'
        + '    briefing.json — the title may well be right, and the title is what binds\n'
@@ -351,10 +379,11 @@ if (misanchored.length) {
        + '    The title is already right. Either the decision was taken on a different\n'
        + '    finding than the one it names, or the anchor was copied from a stale\n'
        + '    briefing — check which against report.json before recording.\n'
-       + '    The fold looked each of these up and would not bind it, so what reaches the\n'
-       + '    ledger records `reconciled: false` — the same value as an unfiled title. A\n'
-       + `    later ${NAMED_NOT_FIXED_DISPOSITION} whose only cover is one of these is named at`
-       + ' `--record` anyway.\n';
+       + '    The fold looked each of these up and would not bind it, so each records\n'
+       + '    `reconciled: false`, the same value as an unfiled title. For a\n'
+       + `    ${NAMED_NOT_FIXED_DISPOSITION} entry that is what stops it covering anything: a`
+       + ' later decision\n'
+       + '    leaning on one of these is named at `--record` anyway.\n';
 }
 if (unreported.length) {
   // Its own heading, never folded into the blocks above: an unbound `noted`
