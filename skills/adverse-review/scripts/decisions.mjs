@@ -10,7 +10,9 @@
 // simply harder to read back.
 //
 // Exit codes follow the contract every other bridge here uses: 2 means it never
-// read a payload, 1 means it read one that failed the schema.
+// read a payload, 1 means it read one it cannot fold. The schema is one way to
+// earn a 1; a payload whose `id` and `title` name different briefing entries is
+// the other, and that one leaves no output file behind.
 //
 // The named-not-fixed block is echoed to stdout on purpose. Those items are
 // exactly the ones that get skimmed — they arrive at the end of a long report,
@@ -32,7 +34,7 @@ import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
-  NAMED_NOT_FIXED_DISPOSITION, foldFixPayloads, reconciliations,
+  NAMED_NOT_FIXED_DISPOSITION, briefingEntries, foldFixPayloads, reconciliations,
 } = await importFromSrc('decisions.mjs');
 const {
   clipReason, isSettled, requireFindings, summarizeDispositions,
@@ -131,9 +133,21 @@ if (values.report) {
 // was read and it does not describe a briefing, which is the same answer
 // `--report` gives for a file that is not a synthesis report. Skipping quietly
 // would leave the guard off while the command line said it was on.
+//
+// `briefingEntries` is the same list `briefingIndex` binds against, imported
+// rather than spelled again here. Hand-copied, this predicate assumed an array
+// where its `--report` sibling ten lines up does not: a briefing whose
+// `findings` is an OBJECT reached the fold and died on a raw `TypeError` at
+// exit 1 — a claim about a review, made by a run that never read one.
 const briefing = values.briefing ? readJson(values.briefing, 'decisions') : null;
 if (values.briefing) {
-  const entries = (briefing?.findings ?? []).filter((e) => e && typeof e.id === 'string' && e.id);
+  let entries = [];
+  try {
+    entries = briefingEntries(briefing);
+  } catch (e) {
+    process.stderr.write(`decisions: ${oneLine(values.briefing)}: ${e.message}\n`);
+    process.exit(2);
+  }
   if (!entries.length) {
     process.stderr.write(`decisions: ${oneLine(values.briefing)}: no briefing entry carries `
       + 'an `id`, so no decision can be bound to one; this is not a briefing.json\n');
@@ -156,6 +170,57 @@ try {
   // Exit 1 either way: something was read and it does not describe repair work.
   // A bad --report is not among them; it was refused above, with exit 2.
   process.stderr.write(`decisions: ${e.message}\n`);
+  process.exit(1);
+}
+
+// Reconciled BEFORE the output file exists, because one of the answers it
+// returns is that there must not be one.
+//
+// Computed whenever EITHER document was given, not only when a report was. The
+// three report blocks below are empty without one anyway — nothing binds, so
+// nothing is corrected and nothing is accused — but the two briefing blocks do
+// not need a report to have something to say: an `id` and a `title` naming
+// different findings is the payload contradicting itself, which is checkable
+// with the briefing alone. Gated on the report, a `--briefing`-only fold
+// printed no signal at all about a transposed pair, while the command line said
+// the guard was on. That is the same silence the exit-2 branch above refuses
+// for a briefing that parses to nothing.
+const changes = report || briefing ? reconciliations(payloads, report, briefing) : [];
+const isNamed = (c) => c.disposition === NAMED_NOT_FIXED_DISPOSITION;
+// Both briefing causes are read for EVERY disposition, `noted` included —
+// unlike the report causes below, which split `noted` off under its own gentler
+// heading. That heading exists because recording a `noted` entry settles
+// nothing; the reasoning does not reach a payload whose own two identity claims
+// disagree with each other, which is a mis-citation whatever it was recorded as.
+const transposed = changes.filter((c) => c.cause === 'briefing');
+
+// A transposed pair is the one answer this bridge REFUSES on, and the refusal
+// is why the check exists rather than being the check's report of itself.
+//
+// It used to print the block and exit 0 over a written decisions.json, on the
+// grounds that the decision binds to nothing and so settles nothing. That is
+// true of THIS fold and not of the file it leaves behind: `converge.mjs`
+// takes no `--briefing`, so `--record` binds the entry by title — and the
+// title is one of the two fields that is wrong. Measured both directions on
+// `1eb767f`: a `declined` carrying a critical's `id` and an advisory's title
+// settled the advisory, and the same pair the other way round settles the
+// critical with a sentence about structure. Neither is a fold anyone asked
+// for, and there is no third field to break the tie, so there is no correct
+// output here — only an operator who has to find out which finding was
+// actually decided.
+if (transposed.length) {
+  process.stdout.write(`${payloads.length} fix payload(s) NOT folded — nothing written to`
+    + ` ${oneLine(values.out)}\n`
+    + `  ID AND TITLE NAME DIFFERENT FINDINGS — one of the two fields is wrong`
+    + ` (${transposed.length}):\n`
+    + transposed.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`
+        + `        ${oneLine(c.gap)}\n`).join('')
+    + '    A fix payload copies both out of the same briefing entry, so these cannot\n'
+    + '    both be right. Find which finding was actually decided and correct the\n'
+    + '    payload: `converge.mjs --record` takes no --briefing, so it would bind\n'
+    + '    each of these by its title and settle whichever finding that names.\n');
+  process.stderr.write('decisions: a payload contradicts its own identity claims; refusing to'
+    + ' fold it\n');
   process.exit(1);
 }
 
@@ -183,33 +248,35 @@ let out = `${decisions.length} decision(s) from ${payloads.length} fix payload(s
 // it — and, under its own heading, the unbound `noted` entries, which record
 // cleanly and excuse nothing, because the fold looked and no lane had filed
 // them.
-//
-// Computed whenever EITHER document was given, not only when a report was. The
-// three report blocks below are empty without one anyway — nothing binds, so
-// nothing is corrected and nothing is accused — but the two briefing blocks do
-// not need a report to have something to say: an `id` and a `title` naming
-// different findings is the payload contradicting itself, which is checkable
-// with the briefing alone. Gated on the report, a `--briefing`-only fold
-// printed no signal at all about a transposed pair, while the command line said
-// the guard was on. That is the same silence the exit-2 branch above refuses
-// for a briefing that parses to nothing.
-const changes = report || briefing ? reconciliations(payloads, report, briefing) : [];
-const isNamed = (c) => c.disposition === NAMED_NOT_FIXED_DISPOSITION;
-const corrected = changes.filter((c) => c.bound);
+const corrected = changes.filter((c) => c.bound && c.fields.length);
 // Split by CAUSE, not just by boundness. `reconciliations` used to answer
 // "did not bind" for two different reasons and this block printed the title
 // remedy for both, so an operator holding a byte-identical title and a
 // disagreeing `file` was sent to correct the only field that was already right.
 const unbound = changes.filter((c) => !c.bound && !isNamed(c) && c.cause === 'title');
-const misanchored = changes.filter((c) => !c.bound && !isNamed(c) && c.cause === 'anchor');
-// Both briefing causes are listed for EVERY disposition, `noted` included —
-// unlike the three above, which split `noted` off under its own gentler
-// heading. That heading exists because recording a `noted` entry settles
-// nothing; the reasoning does not reach a payload whose own two identity claims
-// disagree with each other, which is a mis-citation whatever it was recorded as.
-const transposed = changes.filter((c) => c.cause === 'briefing');
-const staleIds = changes.filter((c) => c.cause === 'briefing-id');
-const unreported = changes.filter((c) => !c.bound && isNamed(c));
+// `noted` is split off under its own heading for the TITLE cause only, where
+// the two accusations really are different: an unbound `fixed` or `declined`
+// failed to settle a question, and an unbound `noted` was never going to settle
+// one. An anchor disagreement is the same accusation whatever the disposition —
+// the report carries this title and a field the entry states contradicts it —
+// and the remedy printed below is the same one, so a `noted` belongs here
+// rather than under a heading whose prose says no lane filed it.
+const misanchored = changes.filter((c) => !c.bound && c.cause === 'anchor');
+// Not a cause: a stale id no longer stops the fold binding by title, so it
+// travels beside whatever the report path decided and is reported on bound
+// entries too. Keyed on the cause it once was, this block went silent in the
+// case an operator most needs it — an id from an earlier iteration whose title
+// still binds cleanly — and silence there reads as an id that resolved.
+const staleIds = changes.filter((c) => c.staleId !== null && c.staleId !== undefined);
+// Gated on the CAUSE its prose describes, not on boundness. `changes` is
+// computed whenever either document was given, so on a `--briefing`-only fold
+// every named entry arrives unbound carrying `cause: 'unchecked'` — and this
+// block would then tell the operator the fold checked each of these against
+// the report and no lane had filed it, when no report was consulted and the
+// entry records `reconciled: null`, which `uncoveredDecisions` treats as
+// vouching. Its whole stated consequence inverts in that mode: the block would
+// promise an exemption is withheld in the one fold where it is granted.
+const unreported = changes.filter((c) => !c.bound && isNamed(c) && c.cause === 'title');
 if (corrected.length) {
   out += `  identity corrected from the report — the briefing's copy predates a lane`
        + ` merge (${corrected.length}):\n`
@@ -231,30 +298,22 @@ if (unbound.length) {
        + '    A title is how a decision finds the finding it answers, and `fix.txt`\n'
        + '    tells the agent to copy it verbatim. Correct it against report.json.\n';
 }
-if (transposed.length) {
-  // First block and the loudest, because it is the only one of these where the
-  // payload's own two identity fields contradict each other — every other cause
-  // is a disagreement with a document the agent did not write. Measured on
-  // `65bc979`: a transposed pair settled a cross-validated `critical` with a
-  // sentence about structure, and the loop reported `done` with nothing open.
-  out += `  ID AND TITLE NAME DIFFERENT FINDINGS — these settle nothing, and one of`
-       + ` the two fields is wrong (${transposed.length}):\n`
-       + transposed.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`
-           + `        ${oneLine(c.gap)}\n`).join('')
-       + '    A fix payload copies both out of the same briefing entry, so these cannot\n'
-       + '    both be right. Find which finding was actually decided before recording:\n'
-       + '    binding on the title alone would move the decision onto the other one.\n';
-}
 if (staleIds.length) {
-  // Distinct from the block above on purpose. `briefing.mjs` re-mints ids
-  // positionally on every triage run, so an id copied out of an earlier
-  // iteration's briefing names nothing here — a stale citation, not a swapped
-  // pair, and the operator looks in a different place for it.
-  out += `  ID NAMES NO BRIEFING ENTRY — these settle nothing (${staleIds.length}):\n`
-       + staleIds.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]\n`).join('')
+  // Distinct from the transposition refusal above on purpose, and it is not a
+  // refusal: `briefing.mjs` re-mints ids positionally on every triage run, so
+  // an id copied out of an earlier iteration's briefing names nothing here.
+  // The title is what binds, so the fold proceeds exactly as it does with no
+  // briefing at all — what is lost is the transposition check, which has
+  // nothing to compare an unresolvable id against. Said out loud because a
+  // guard that is off for one entry reads like a guard that passed it.
+  out += `  ID NAMES NO BRIEFING ENTRY — bound by title instead, and the id/title check`
+       + ` could not run on these (${staleIds.length}):\n`
+       + staleIds.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]`
+           + ` states id ${oneLine(c.staleId)}\n`).join('')
        + '    Briefing ids are re-minted every triage run, so one copied from an\n'
        + '    earlier iteration names nothing in this briefing. Check the id against\n'
-       + '    briefing.json — the title may well be right.\n';
+       + '    briefing.json — the title may well be right, and it is the title these\n'
+       + '    were bound on.\n';
 }
 if (misanchored.length) {
 
@@ -272,11 +331,15 @@ if (misanchored.length) {
        + '    briefing — check which against report.json before recording.\n';
 }
 if (unreported.length) {
-  // Its own heading, never folded into the block above: an unbound `noted`
+  // Its own heading, never folded into the blocks above: an unbound `noted`
   // entry is not the same accusation. It records fine and settles nothing by
-  // design, and it vouches for nothing either — a `noted` entry vouches only
-  // when the report CARRIED it (`isSelfIdentified`, src/ledger.mjs), and this
-  // block is built from the ones it did not. What reaches the ledger is
+  // design, and it vouches for nothing either — `isSelfIdentified`
+  // (src/ledger.mjs) reads `reconciled === false`, which is the fold saying it
+  // looked this identity up in a report and no lane had filed it, and this
+  // block is built from exactly those. It is NOT the wider claim that only an
+  // identity the report carried can vouch: an entry from a fold given no
+  // report records `null` and still vouches, which is why this block is gated
+  // on a report cause and not on boundness. What reaches the ledger is
   // therefore the batch's own claim about a finding no lane reported, on
   // fields nothing corrected, which is a thing only an operator holding the
   // report can check — which is why it is printed here rather than counted

@@ -402,7 +402,7 @@ test('a mis-copied title cannot move a decision onto the finding it names', () =
   // gap names the field the guard actually read.
   assert.deepEqual(reconciliations([payload({ fixed: [], declined: [transposed] })], report),
     [{ agent: 'fix-auth-guard', title: 'the retry loop never exits', disposition: 'declined',
-       bound: false, cause: 'anchor',
+       bound: false, cause: 'anchor', staleId: null,
        gap: 'the files differ (src/a.c here, src/b.c in the report)', fields: [] }]);
 
   // And it is reported rather than silently settling the wrong finding.
@@ -503,12 +503,20 @@ test('the briefing guard still lets the legitimate merge case bind', () => {
   assert.equal(c.bound, true);
 });
 
-test('an id naming no briefing entry is its own answer, not a transposition', () => {
+test('an id naming no briefing entry is reported, and still binds by its title', () => {
   // `briefing.mjs` mints ids positionally on every triage run, so an id copied
   // out of an earlier iteration's briefing names nothing in this one — a stale
   // citation, where the title may well be right. Reported apart from the
   // disagreeing-title case because the operator looks in a different place: the
   // id against briefing.json, not the title against the report.
+  //
+  // Reported and NOT refused on. The id is not what binds a decision, and an id
+  // that resolves to nothing leaves the transposition check with nothing to
+  // compare, so refusing bought no safety and cost the correction: measured on
+  // a title the report carries with `file: null`, where `--briefing` turned a
+  // decision that settled its finding into one that settled nothing and held
+  // the loop open on it. So `staleId` travels beside the binding rather than
+  // replacing it.
   const report = { findings: [{
     title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
     file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor'],
@@ -519,8 +527,43 @@ test('an id naming no briefing entry is its own answer, not a transposition', ()
   }] };
   const stale = decision({ id: 'F7', title: 'the guard is unreachable' });
   const [c] = reconciliations([payload({ fixed: [], declined: [stale] })], report, briefing);
-  assert.equal(c.cause, 'briefing-id');
+  assert.equal(c.staleId, 'F7', 'the stale citation is reported');
+  assert.equal(c.cause, null, 'and it is not any of the refusal causes');
+  assert.equal(c.bound, true, 'the title bound it, exactly as with no briefing at all');
   assert.equal(c.gap, null);
+});
+
+test('a stale id does not cost a decision the identity the report would have fixed', () => {
+  // The regression the refusing form of the check caused, pinned as itself: a
+  // decision whose `file` and `line` the merged report supplies, citing an id
+  // from an earlier iteration. Refused, it kept the pre-merge nulls, bound to
+  // nothing, and settled nothing — so the finding it answered held the loop
+  // open, with `--briefing` on and `--briefing` is what the loop reference
+  // tells an operator to pass on every fold.
+  const report = { findings: [{
+    title: 'the guard is unreachable', kind: 'defect', severity: 'critical',
+    file: 'src/auth.py', line: 88, counterpart: null, reporters: ['auditor', 'adversary'],
+  }] };
+  const briefing = { findings: [{
+    id: 'F1', title: 'something else entirely', kind: 'defect',
+    file: null, line: null, counterpart: null,
+  }] };
+  const stale = decision({
+    id: 'F7', title: 'the guard is unreachable', kind: 'design', file: null, line: null,
+  });
+  const p = [payload({ fixed: [], declined: [stale] })];
+
+  const [d] = foldFixPayloads(p, { report, briefing });
+  assert.equal(d.file, 'src/auth.py', 'corrected off the report, stale id and all');
+  assert.equal(d.line, 88);
+  assert.equal(d.kind, 'defect');
+  assert.equal(d.reconciled, true);
+  assert.equal(uncoveredDecisions([d], report).length, 0, 'and it settles its finding');
+
+  const [c] = reconciliations(p, report, briefing);
+  assert.equal(c.bound, true);
+  assert.equal(c.staleId, 'F7');
+  assert.deepEqual(c.fields.map((f) => f.field).sort(), ['file', 'kind', 'line']);
 });
 
 test('without a briefing the guard is off and the fold says nothing about it', () => {
@@ -667,7 +710,9 @@ test('a stated file that disagrees still refuses to bind', () => {
 //
 // `uncoveredDecisions` grants its single exemption to any decision a recorded
 // `noted` entry matches at SETTLING_SCORE — and, since the cross-iteration
-// form was closed, only when the report carried that entry. This file is where
+// form was closed, no longer when the fold looked that entry up in a report and
+// no lane had filed it. An entry from a fold that read no report records
+// `reconciled: null` and still vouches. This file is where
 // those entries are minted, out of fields a fix agent supplies, so what the
 // fold will and will not mint is what decides whether the party being checked
 // can write its own exemption.
@@ -785,6 +830,6 @@ test('an unbound named-not-fixed entry is reported as unbound, not as corrected'
   // all, which is the one case the title remedy is right for.
   assert.deepEqual(reconciliations(p, merged), [{
     agent: 'fix-auth-guard', title: 'preflight_emu is not budgeted', disposition: 'noted',
-    bound: false, cause: 'title', gap: null, fields: [],
+    bound: false, cause: 'title', gap: null, staleId: null, fields: [],
   }]);
 });

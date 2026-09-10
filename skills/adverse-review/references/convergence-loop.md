@@ -324,17 +324,28 @@ Measured on `65bc979`: a payload declining a `design` advisory with the correct
 OTHER finding's title, had its identity rewritten onto a cross-validated
 `critical` at `src/auth.py:88` and settled it — `settled: [the critical]`,
 `open: []`, `done: true`, "converged: no blocking finding is unsettled". With
-`--briefing` the same payload keeps its own identity, binds to nothing, and the
-critical lands in `unexamined` with the loop open at "1 never cross-examined".
+`--briefing` **the fold refuses the batch at exit 1 and writes no
+`decisions.json` at all.**
+
+Refusing rather than reporting, because reporting is not enough here: the fold
+binds a transposed pair to nothing, but `converge.mjs` takes no `--briefing`, so
+`--record` binds whatever it is handed by title — and the title is one of the
+two fields that is wrong. Both directions were measured: a critical's `id` with
+an advisory's title settles the advisory, and the same pair reversed settles the
+critical with a sentence about structure. There is no third field to break the
+tie, so there is no correct fold of that payload; find which finding was
+actually decided and correct it.
 
 It is an id/title AGREEMENT check and not a switch to binding on the id: ids are
 re-minted positionally on every triage run, so a stale one names nothing or
-names a different finding, and the title stays the join key. Three answers, each
-with its own block on the bridge's output — the titles disagree, the id names no
-entry, or the pair agrees and binding proceeds. Omit the flag and the bridge
-says on stderr that the check did not run, for the same reason a skipped lane is
-declared: a guard that is silently off reads exactly like a guard that found
-nothing.
+names a different finding, and the title stays the join key. Three answers — the
+titles disagree, which is the refusal above; the id names no entry, which is
+reported under its own block and binds by title anyway, because an id that
+resolves to nothing leaves this check nothing to compare and the correction off
+`report.json` is worth more than a refusal that buys no safety; or the pair
+agrees and binding proceeds. Omit the flag and the bridge says on stderr that
+the check did not run, for the same reason a skipped lane is declared: a guard
+that is silently off reads exactly like a guard that found nothing.
 
 `--report` is what makes those fields the right ones. A fix agent copies its
 briefing entry verbatim, as `fix.txt` tells it to, and **the briefing is

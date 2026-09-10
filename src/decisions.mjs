@@ -68,9 +68,12 @@ const namedItemId = (agent, n) => `NF-${agent}-${n}`;
 // Taken from src/ledger.mjs rather than spelled again, because the ledger has
 // to know the same fact from the other side: `uncoveredDecisions` skips this
 // disposition outright, and lets an entry carrying it excuse the next decision
-// that matches it — provided the report carried the entry, which is what
-// `reconciled` below records. Two spellings of one disposition is how the
-// summary line stopped counting `noted` at all.
+// that matches it — unless the fold checked that identity against a report and
+// no lane had filed it, which is the one thing `reconciled` below withholds the
+// exemption on. A fold given no report records `reconciled: null` and the entry
+// still excuses; that degraded mode is the bridge's warning to make, not this
+// predicate's. Two spellings of one disposition is how the summary line
+// stopped counting `noted` at all.
 export const NAMED_NOT_FIXED_DISPOSITION = UNREPORTED_DISPOSITION;
 
 // Does this entry carry the identity that SETTLES that one?
@@ -203,8 +206,11 @@ function anchorsAgree(d, finding) {
 // too. Its whitelist used to end one field short of this one, so every reader
 // downstream had only the disposition to go on — and `uncoveredDecisions`
 // grants its one exemption on exactly this difference: a `noted` identity the
-// report CARRIED excuses the decision answering it, and one this fold made up
-// out of the payload does not.
+// report CARRIED excuses the decision answering it, and one this fold looked up
+// in a report and did not find does not. `null` — no report reached the fold —
+// is neither of those and still excuses; withholding on it would make a
+// hand-written decisions.json excuse nothing, and choosing to fold without a
+// report is the orchestrator's call, warned about on stderr by both bridges.
 function reconciledAgainst(finding, checked) {
   return checked ? finding !== null : null;
 }
@@ -288,11 +294,22 @@ function toNamedNotFixed(item, { agent, n, finding = null, checked = false }) {
 // rather than refused: `briefing.mjs` mints the ids, so a missing one is this
 // tool's own bug and not a payload's claim. Whether a briefing that yields no
 // usable entries is an error is the caller's call, and the bridge makes it.
+//
+// The refusal is `requireFindings`' sibling and for the same reason: the bridge
+// needs this exact list to decide whether the file it was handed is a briefing
+// at all, and it had grown a hand-typed copy of the predicate. Two copies is
+// how the bridge came to exit 1 with a raw `TypeError` on a `findings` that is
+// an object, where its `--report` sibling ten lines up exits 2 naming the file.
+export function briefingEntries(briefing) {
+  if (!Array.isArray(briefing?.findings)) {
+    throw new Error('briefing has no findings array; this is not a briefing.json');
+  }
+  return briefing.findings.filter((e) => e && typeof e.id === 'string' && e.id);
+}
+
 function briefingIndex(briefing) {
   const byId = new Map();
-  for (const e of briefing?.findings ?? []) {
-    if (e && typeof e.id === 'string' && e.id) byId.set(e.id, e);
-  }
+  for (const e of briefingEntries(briefing)) byId.set(e.id, e);
   return byId;
 }
 
@@ -350,53 +367,59 @@ function bindingFor(report, briefing) {
   }
 
   return (d) => {
-    // A decision that states no `id` makes no id claim, so there is nothing for
-    // the briefing to contradict and the check does not apply to it. Two whole
-    // classes state none: a `named_not_fixed` item, whose payload schema has no
-    // `id` field at all (`fix.txt`) and whose id is minted here afterwards; and
-    // a decision on a round-2 `added` finding, which is in report.json under no
-    // briefing key at all — and report.json carries no ids, so its author has
-    // none to copy. Treating "states none" as "names nothing" refused every one
-    // of them as a stale citation and returned before the report was consulted,
-    // so passing --briefing — which the loop reference now tells an operator to
-    // do on every fold — silently dropped the identity correction this function
-    // exists to make, and printed a remedy ("check the id against
-    // briefing.json") for entries that structurally have no id to check.
-    // STATES an id, which is not the same as one that resolves. A decision
-    // stating none is left to the report path below; a stated id that names
-    // nothing is still the stale citation this guard exists to report, and the
-    // round-2 `added` finding that has no briefing entry has no id to state
-    // either — report.json carries no ids at all, so there is nothing for its
-    // author to copy.
+    // Only a decision that STATES an id makes an id claim, and only one whose
+    // id RESOLVES makes a claim the briefing can contradict. Both near-misses
+    // cost this function the correction it exists to make, and each cost it in
+    // the same way — an early return before the report was ever consulted.
+    //
+    // States none: a `named_not_fixed` item, whose payload schema has no `id`
+    // field at all (`fix.txt`) and whose id is minted here afterwards, and a
+    // decision on a round-2 `added` finding, which is in report.json under no
+    // briefing key and could not copy an id if it wanted one, because
+    // report.json carries none. Reading "states none" as "names nothing"
+    // refused every one of them as a stale citation, and printed a remedy
+    // ("check the id against briefing.json") for entries with no id to check.
+    //
+    // States one that resolves to nothing: `briefing.mjs` re-mints ids
+    // positionally on every triage run, so an id copied out of an earlier
+    // iteration names nothing here. That is worth REPORTING and it is not
+    // worth refusing on, because the id is not what binds — the title is, and
+    // an id that resolves to nothing leaves the transposition check with
+    // nothing to compare, which is exactly the pre-briefing posture. Refusing
+    // instead dropped the correction and settled nothing, so the decision's
+    // own finding held the loop open: measured on a correct title with
+    // `file: null`, where the report supplied `src/auth.py:88` without
+    // `--briefing` and supplied nothing with it, and `--briefing` is what
+    // references/convergence-loop.md tells an operator to pass on every fold.
+    // It travels as `staleId` so binding and reporting can both happen.
+    let staleId = null;
     if (haveBriefing && d.id !== null && d.id !== undefined && d.id !== '') {
       const entry = briefed.get(d.id) ?? null;
-      // An id naming nothing is its own answer, and not the same accusation as
-      // one naming the wrong entry: `briefing.mjs` re-mints ids positionally on
-      // every triage run, so an id copied from an earlier iteration names
-      // nothing here — a stale citation rather than a swapped one.
-      if (!entry) return { finding: null, cause: 'briefing-id', gap: null };
-      if (normalizeTitle(entry.title) !== normalizeTitle(d.title)) {
+      if (!entry) staleId = d.id;
+      else if (normalizeTitle(entry.title) !== normalizeTitle(d.title)) {
         return {
           finding: null,
           cause: 'briefing',
+          staleId: null,
           gap: `the briefing calls ${d.id} ${JSON.stringify(entry.title)}`,
         };
       }
     }
-    if (!haveReport) return { finding: null, cause: 'unchecked', gap: null };
+    if (!haveReport) return { finding: null, cause: 'unchecked', gap: null, staleId };
     const finding = byTitle.get(normalizeTitle(d.title)) ?? null;
-    if (!finding) return { finding: null, cause: 'title', gap: null };
+    if (!finding) return { finding: null, cause: 'title', gap: null, staleId };
     if (!anchorsAgree(d, finding)) {
       return {
         finding: null,
         cause: 'anchor',
+        staleId,
         // The same tolerance `anchorsAgree` applies, handed to the walk with
         // the same field list: a message that can name a field this guard
         // waved through is the defect one field over.
         gap: identityGap(d, finding, ANCHOR_FIELDS, { tolerateNullClaims: true }),
       };
     }
-    return { finding, cause: null, gap: null };
+    return { finding, cause: null, gap: null, staleId };
   };
 }
 
@@ -497,7 +520,12 @@ export function foldFixPayloads(payloads, { report = null, briefing = null } = {
 // `fixed` or `declined` settles nothing and `converge.mjs --record --report`
 // names it, while an unbound `noted` records fine and excuses nothing — the
 // fold's own `reconciled: false` is what `uncoveredDecisions` withholds its
-// exemption on. Only a `noted` identity the report CARRIED excuses anything.
+// exemption on. That is narrower than "only an identity the report carried
+// excuses anything": `isSelfIdentified` reads `reconciled === false`, so an
+// entry from a fold that consulted no report records `null` and still excuses.
+// Withholding on `null` too would make a hand-written decisions.json unable to
+// excuse anything, and that call belongs to the orchestrator that chose to fold
+// without a report — which is why both bridges warn about it on stderr.
 function payloadEntries(payload) {
   const agent = payload?.agent ?? null;
   // Guarded here as well as in the fold, and with the same helper: this reader
@@ -522,16 +550,26 @@ export function reconciliations(payloads, report, briefing = null) {
   for (const payload of payloads) {
     const agent = payload?.agent ?? null;
     for (const { d, disposition } of payloadEntries(payload)) {
-      const { finding, cause, gap } = findingFor(d);
+      const { finding, cause, gap, staleId } = findingFor(d);
       if (!finding) {
-        changes.push({ agent, title: d.title, disposition, bound: false, cause, gap, fields: [] });
+        changes.push({
+          agent, title: d.title, disposition, bound: false, cause, gap, staleId, fields: [],
+        });
         continue;
       }
       const before = identityOf(d, null);
       const after = identityOf(d, finding);
       const fields = Object.keys(after).filter((k) => before[k] !== after[k])
         .map((k) => ({ field: k, from: before[k], to: after[k] }));
-      if (fields.length) changes.push({ agent, title: d.title, disposition, bound: true, fields });
+      // A stale id is reported whether or not anything was corrected. Keyed on
+      // `fields.length` alone it was silent in the one case an operator most
+      // needs it — an id from an earlier iteration whose title still binds
+      // cleanly — and silence there reads as an id that resolved.
+      if (fields.length || staleId !== null) {
+        changes.push({
+          agent, title: d.title, disposition, bound: true, cause, gap, staleId, fields,
+        });
+      }
     }
   }
   return changes;
