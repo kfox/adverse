@@ -399,91 +399,137 @@ function blankNonCode(src) {
     const t = /\s/.test(c) ? (tail.endsWith(' ') ? '' : ' ') : c;
     tail = (tail + t).slice(-24);
   };
-  for (let i = 0; i < src.length; i += 1) {
-    const c = src[i];
-    if (c === '\'' || c === '"' || c === '`') {
-      out += c;
-      for (i += 1; i < src.length; i += 1) {
-        out += src[i];
-        if (src[i] === '\\') {
-          out += src[i + 1] ?? '';
-          i += 1;
-        } else if (src[i] === c) {
-          break;
-        }
-      }
-      remember('\'');
-      continue;
-    }
-    // A shebang is a line comment as far as this is concerned, and its slashes
-    // are neither operators nor regex delimiters. Every bridge opens with one,
-    // so the noisy branch below reported all fifteen of them the moment it
-    // existed — which is the branch doing its job on the one input that is not
-    // JavaScript at all.
-    if ((c === '/' && src[i + 1] === '/') || (i === 0 && c === '#' && src[1] === '!')) {
-      while (i < src.length && src[i] !== '\n') {
-        out += ' ';
+  // A literal, copied verbatim, ending where it actually ends — and a
+  // template's `${}` holds CODE, which is scanned by `scanCode` below rather
+  // than skipped over. plan.mjs:85 writes
+  // `` return `'${String(s).replace(/'/g, `'\\''`)}'`; `` in one line: an
+  // interpolation holding a regex whose content is a quote, holding a nested
+  // template. Scanned as a flat run to the next backtick, the nested one ended
+  // the outer literal and every quote after it flipped code and string around
+  // for the rest of the file — three of plan.mjs's statements began inside a
+  // literal, and 16 of its 20 tracked names were an accident of that.
+  //
+  // So the two functions call each other, and the interpolation gets the whole
+  // treatment: its comments are blanked, its regexes are recognized, its own
+  // literals are copied. That is the only way to be right about this line, and
+  // this line is the one every comment in this file cites.
+  function copyLiteral(start) {
+    const quote = src[start];
+    out += quote;
+    let i = start + 1;
+    for (; i < src.length; i += 1) {
+      const c = src[i];
+      if (c === '\\') {
+        out += c + (src[i + 1] ?? '');
         i += 1;
+        continue;
       }
-      out += src[i] ?? '';
-      continue;
+      if (c === quote) {
+        out += c;
+        return i;
+      }
+      if (quote === '`' && c === '$' && src[i + 1] === '{') {
+        out += '${';
+        i = scanCode(i + 2, true);
+        out += src[i] ?? '';
+        continue;
+      }
+      out += c;
     }
-    if (c === '/' && src[i + 1] === '*') {
-      for (; i < src.length; i += 1) {
-        out += src[i] === '\n' ? '\n' : ' ';
-        if (src[i] === '*' && src[i + 1] === '/') {
-          out += ' ';
-          i += 1;
-          break;
-        }
-      }
-      continue;
-    }
-    if (c === '/'
-      && (KEYWORD_BEFORE_SLASH.test(tail) || !VALUE_BEFORE_SLASH.test(tail))) {
-      const opened = i;
-      let inClass = false;
-      let closed = false;
-      for (; i < src.length && src[i] !== '\n'; i += 1) {
-        out += ' ';
-        if (src[i] === '\\' && i > opened) {
-          out += ' ';
-          i += 1;
-        } else if (src[i] === '[') {
-          inClass = true;
-        } else if (src[i] === ']') {
-          inClass = false;
-        } else if (src[i] === '/' && i > opened && !inClass) {
-          closed = true;
-          break;
-        }
-      }
-      if (closed) {
-        while (/[a-z]/.test(src[i + 1] ?? '')) {
-          out += ' ';
-          i += 1;
-        }
-        remember('\'');
-      } else {
-        // A newline or the end of the file, inside what was read as a regex.
-        // No regex reaches either, so this `/` was something else — and the
-        // line it is on has just been blanked, so whatever it held is gone
-        // from every scan below. Reported, at the line, rather than left to be
-        // a hole nobody can see.
-        unresolved.push(lineAt(opened));
-        i -= 1;
-      }
-      continue;
-    }
-    // A statement boundary, as far as anything here needs one: a `;` that is
-    // code. Recorded here and nowhere else, which is what keeps the `;` inside
-    // a string or a template out — a `;` in a literal is not a boundary, and
-    // reading one as a boundary truncated a template-literal right-hand side
-    // at its own text.
-    if (c === ';') boundaries.push(out.length);
-    out += c;
-    remember(c);
+    return i - 1;
   }
+
+  // The scan itself. `untilBrace` is the interpolation's terminator: it
+  // returns at the `}` that closes it, counting the braces of any block or
+  // object literal in between, and leaves emitting that `}` to the caller.
+  function scanCode(from, untilBrace) {
+    let depth = 0;
+    let i = from;
+    for (; i < src.length; i += 1) {
+      const c = src[i];
+      if (untilBrace && c === '{') depth += 1;
+      if (untilBrace && c === '}') {
+        if (depth === 0) return i;
+        depth -= 1;
+      }
+      if (c === '\'' || c === '"' || c === '`') {
+        i = copyLiteral(i);
+        remember('\'');
+        continue;
+      }
+      // A shebang is a line comment as far as this is concerned, and its
+      // slashes are neither operators nor regex delimiters. Every bridge opens
+      // with one, so the noisy branch below reported all fifteen of them the
+      // moment it existed — which is the branch doing its job on the one input
+      // that is not JavaScript at all.
+      if ((c === '/' && src[i + 1] === '/') || (i === 0 && c === '#' && src[1] === '!')) {
+        while (i < src.length && src[i] !== '\n') {
+          out += ' ';
+          i += 1;
+        }
+        out += src[i] ?? '';
+        continue;
+      }
+      if (c === '/' && src[i + 1] === '*') {
+        for (; i < src.length; i += 1) {
+          out += src[i] === '\n' ? '\n' : ' ';
+          if (src[i] === '*' && src[i + 1] === '/') {
+            out += ' ';
+            i += 1;
+            break;
+          }
+        }
+        continue;
+      }
+      if (c === '/'
+        && (KEYWORD_BEFORE_SLASH.test(tail) || !VALUE_BEFORE_SLASH.test(tail))) {
+        const opened = i;
+        let inClass = false;
+        let closed = false;
+        for (; i < src.length && src[i] !== '\n'; i += 1) {
+          out += ' ';
+          if (src[i] === '\\' && i > opened) {
+            out += ' ';
+            i += 1;
+          } else if (src[i] === '[') {
+            inClass = true;
+          } else if (src[i] === ']') {
+            inClass = false;
+          } else if (src[i] === '/' && i > opened && !inClass) {
+            closed = true;
+            break;
+          }
+        }
+        if (closed) {
+          while (/[a-z]/.test(src[i + 1] ?? '')) {
+            out += ' ';
+            i += 1;
+          }
+          remember('\'');
+        } else {
+          // A newline or the end of the file, inside what was read as a regex.
+          // No regex reaches either, so this `/` was something else — and the
+          // line it is on has just been blanked, so whatever it held is gone
+          // from every scan below. Reported, at the line, rather than left to
+          // be a hole nobody can see.
+          unresolved.push(lineAt(opened));
+          i -= 1;
+        }
+        continue;
+      }
+      // A statement boundary, as far as anything here needs one: a `;` that is
+      // code, at the top level. Recorded here and nowhere else, which is what
+      // keeps a `;` inside a string or an interpolation out — reading one as a
+      // boundary truncated a template-literal right-hand side at its own text.
+      if (!untilBrace && c === ';') boundaries.push(out.length);
+      out += c;
+      remember(c);
+    }
+    return i;
+  }
+
+  scanCode(0, false);
+
   let from = 0;
   const statements = [];
   for (const at of boundaries) {
@@ -628,6 +674,30 @@ const ASSIGNMENT = new RegExp('(?:(?:const|let|var)\\s+)?'
   + '([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*|\\[[^\\]\\n]*\\])*)'
   + '\\s*(?:\\|\\||&&|\\?\\?|\\*\\*|<<|>>>?|[-+*/%&|^])?=(?![=>])', 'g');
 
+// An object literal binds its PROPERTIES, and not the name that holds it.
+// Bounding a value at its statement makes the whole literal one value, so
+// `const config = { out: 'x.json', input: values.in }` tainted `config` and
+// the rule reported `writeFileSync(config.out, …)` — correct code, one line
+// away from a fixture below. Reading the pairs is also more precise on that
+// fixture: `const opts = { out: values.out }` binds `opts.out`, which is the
+// name the write actually uses.
+//
+// A pair this cannot read as `key: value` — a shorthand `{ out }`, a spread —
+// gives up on the whole literal and taints the name, which is the noisy
+// direction and the one everything here fails in.
+function objectBindings(name, init) {
+  const literal = /^\{([\s\S]*)\}$/.exec(init.trim());
+  if (!literal) return null;
+  const pairs = [];
+  for (const part of splitArgs(literal[1])) {
+    if (!part) continue;
+    const pair = /^(?:'([^']*)'|"([^"]*)"|([A-Za-z_$][\w$]*))\s*:([\s\S]*)$/.exec(part);
+    if (!pair) return null;
+    pairs.push([`${name}.${pair[1] ?? pair[2] ?? pair[3]}`, pair[4]]);
+  }
+  return pairs;
+}
+
 function destNames(src, statements) {
   const names = new Set();
   const objects = new Set(['values']);
@@ -641,10 +711,27 @@ function destNames(src, statements) {
       if (bound) names.add(bound[1]);
     }
   }
-  const bindings = statements.flatMap((statement) => [...statement.matchAll(ASSIGNMENT)]
-    .map((m) => [m[1], statement.slice(m.index + m[0].length)]));
+  // Read with the string literals gone, which reading every `=` in a statement
+  // instead of only the first one made necessary: `blankNonCode` preserves
+  // literals on purpose, so prose inside one was scanned as code and
+  // `const h = 'dest = values.out';` bound a real `dest` two lines below to a
+  // sentence about it. The comment twin of that shape has had a test since the
+  // day comments were blanked; the literal twin went live and untested.
+  // Template interpolations survive `withoutStrings`, which is what keeps
+  // `` `${values.outdir}/x.json` `` readable.
+  const bindings = statements.flatMap((raw) => {
+    const statement = withoutStrings(raw);
+    return [...statement.matchAll(ASSIGNMENT)].flatMap((m) => {
+      const init = statement.slice(m.index + m[0].length);
+      return objectBindings(m[1], init) ?? [[m[1], init]];
+    });
+  });
   for (const [name, init] of bindings) {
-    if (init.trim() === 'values') objects.add(name);
+    // The alias, not the whole value: `init` is the rest of the statement now,
+    // so `const v = values, body = 'x';` compared a slice holding both
+    // declarators against `values` and bound nothing at all — a silent pass on
+    // the one shape this line exists for.
+    if (/^values\s*(?:,|$)/.test(init.trim())) objects.add(name);
   }
 
   const handed = (raw) => {
@@ -768,6 +855,15 @@ for (const [label, src, dest] of [
   ['a destination behind a comment, after a regex holding a quote',
     'const q = s.replace(/\'/g, \'\');\n'
     + 'copyFileSync(tmp, /* to, atomically */ values.out);', 'values.out'],
+  // The same desynchronization through the one quote character that can
+  // legally contain another. plan.mjs:85 is
+  // `` return `'${String(s).replace(/'/g, `'\\''`)}'`; `` — an interpolation
+  // holding a regex holding a quote, and a nested template. Read as a flat run
+  // to the next backtick, the outer literal ended at the nested one and every
+  // quote after it flipped code and string around for the rest of the file.
+  ['a destination behind a comment, after a template holding a nested template',
+    'const q = `\'${s.replace(/\'/g, `\'\\\\\'\'`)}\'`;\n'
+    + 'copyFileSync(tmp, /* to, atomically */ values.out);', 'values.out'],
   // And the bracket case, which used to be reported as an argument list this
   // rule could not read — the noisy direction, but still not the destination.
   ['a destination beside a regex holding a bracket',
@@ -822,6 +918,16 @@ for (const [label, src, dest] of [
     + 'writeFileSync(dest, body);', 'dest'],
   ['a destination bound inside an object literal',
     'const opts = { out: values.out };\nwriteFileSync(opts.out, body);', 'opts.out'],
+  // And the fallback, on a literal this cannot read pair by pair: a shorthand
+  // property has no `:`, so which key holds the caller's path is unknown and
+  // the whole name is tainted rather than the one pair it could read.
+  ['an object literal holding a shorthand property beside a path',
+    'const dest = { out, dir: values.outdir };\nwriteFileSync(dest.out, body);', 'dest'],
+  // An alias of `values` itself, declared beside something else. The alias is
+  // recognized by comparing the value against `values`, and a value that runs
+  // to the end of its statement is not that string any more.
+  ['an alias of values that is not the last thing in its statement',
+    'const v = values, body = \'x\';\nwriteFileSync(v.out, body);', 'v.out'],
   // And the same boundary inside a plain string, with the caller's path after
   // it — so truncating at the quoted `;` left a value that mentions nothing.
   ['a destination whose value holds a quoted semicolon before the path',
@@ -907,6 +1013,19 @@ for (const [label, src] of [
   ['a division whose value is on the line above, indented past the window',
     'const half = width\n'
     + '                           / 2;\nwriteFileSync(tmp, body);'],
+  // The string-literal twin of the commented assignment two entries above.
+  // Reading every `=` in a statement rather than only the first one is what
+  // made prose inside a literal reachable, and the message text of any bridge
+  // could spell it.
+  ['a temporary whose message text quotes the shape this rule refuses',
+    'const said = \'dest = values.out, written unguarded\';\n'
+    + 'const dest = path.join(tmpdir(), \'x\');\nwriteFileSync(dest, said);'],
+  // A configuration object holding a fixed path beside a caller-supplied one,
+  // which is one line away from the `{ out: values.out }` fixture above and
+  // the reason an object literal binds its properties instead of its name.
+  ['a fixed destination declared beside a caller-supplied value',
+    'const config = {\n  out: \'x.json\',\n  input: values.in,\n};\n'
+    + 'writeFileSync(config.out, body);'],
   // The other direction of the same finding: a comment is not code, so an
   // assignment quoted in one taints nothing. Unanchoring the assignment scan
   // is what first let it reach inside a comment at all.
