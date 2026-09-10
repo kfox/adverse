@@ -534,6 +534,20 @@ for (const [label, over, base, keeps] of [
   assert.match(problem, /[A-Z]{40}/, 'and enough of the long field to recognize it');
 });
 
+test('an entry with no title is still named, rather than named nothing', () => {
+  // `JSON.stringify(undefined)` is the value `undefined`, which flattens to
+  // the empty string — so the problem read `entry  carries no atCommit`, with
+  // the identifier gone, on the branch whose whole subject is an entry that
+  // did not come from this tool.
+  const l = { ...emptyLedger(),
+              entries: [{ kind: 'defect', file: 'x.py', line: 1,
+                          disposition: 'noted', reason: 'r' }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.match(problem, /^entry "" carries no atCommit/, problem);
+});
+
 test('a title of quote characters is bounded after escaping, not before', () => {
   // The budget is spent on what gets PRINTED, and escaping doubles every
   // character it touches: bounding first and stringifying second let a title
@@ -1587,6 +1601,20 @@ test('the lanes a decision is recorded with are refused the same way', () => {
     () => recordDecisions(emptyLedger(), [{ ...finding(), disposition: 'declined', reason: 'r' }],
       { atCommit: 'reviewed', report }),
     /which is not a list of lane names/);
+});
+
+test('a thrown lane-shape refusal bounds its identifier too', () => {
+  // The same bound-then-escape inversion `named` was fixed for lived at both
+  // `lanesOf` call sites, one layer along: a title `oneLine` had just clipped
+  // to 500 characters was stringified afterwards into roughly a thousand,
+  // ahead of the reason — and converge and regression print this raw.
+  const l = ledgerWith(closed({ title: '"'.repeat(600), reporters: 'R'.repeat(600) }));
+
+  assert.throws(() => closureOf(l, 'fix1', resolve), (e) => {
+    assert.ok(e.message.length <= MAX_REASON_CHARS, `bounded: ${e.message.length}`);
+    assert.match(e.message, /which is not a list of lane names$/);
+    return true;
+  });
 });
 
 test('closureOf throws on a commit that resolves nowhere rather than answering', () => {

@@ -179,6 +179,34 @@ function oneLine(v) {
 // What a value is, for a refusal that has to say why it is not the shape asked
 // for. `JSON.stringify` renders `null`, a number and a string faithfully and an
 // array as its whole contents, which is the one case worth naming by shape.
+// A value a refusal quotes, bounded well below the line's own budget, and the
+// identifier form of the same thing.
+//
+// Every value these messages interpolate comes off the JSON file the message
+// is about, so any of them can be as long as its writer likes — and `oneLine`
+// alone bounds each at the width of the whole line. converge re-clips a
+// finished problem at `MAX_REASON_CHARS`, which cuts the words AFTER the long
+// field: the remedy, or what a ref was wrong about. triage and regression
+// print it raw, where the same field buries the sentence instead.
+//
+// `named` stringifies and THEN bounds, because escaping doubles every
+// character it touches: bounding first spent the budget twice, and a title of
+// 600 quotes came back 243 characters long. `oneLine` runs first anyway so
+// that an entry with no title is still `""` rather than nothing at all —
+// `JSON.stringify(undefined)` is `undefined`, which renders as the empty
+// string and takes the identifier out of the sentence entirely.
+//
+// A value here is for recognizing a thing in a file the reader has open, which
+// does not take 500 characters. Local to this module rather than in
+// src/limits.mjs by that file's own test: nothing outside it has to agree.
+const MAX_PROBLEM_FIELD_CHARS = 120;
+const brief = (value) => {
+  const flat = oneLine(value);
+  return flat.length > MAX_PROBLEM_FIELD_CHARS
+    ? `${flat.slice(0, MAX_PROBLEM_FIELD_CHARS)}…` : flat;
+};
+const named = (title) => brief(JSON.stringify(oneLine(title)));
+
 function shapeOf(value) {
   return Array.isArray(value) ? 'an array' : oneLine(JSON.stringify(value));
 }
@@ -275,32 +303,6 @@ export function checkBinding(ledger, resolve) {
   }
 
   const resolveOnce = memoizeResolve(resolve);
-
-  // Every value a problem below interpolates comes off the same JSON file the
-  // problem is about, so any of them can be 500 characters of the writer's
-  // choosing — and `oneLine` alone bounds each at the width of the whole line.
-  // converge re-clips the finished sentence at `MAX_REASON_CHARS`, so one long
-  // field there cuts the words after it: the remedy, or the "which is not a
-  // commit in this repository" that says what the ref was wrong about. triage
-  // and regression print it raw, where the same field buries the sentence
-  // instead. Bounding the FIELDS is what fixes both, and it is every field
-  // rather than the title alone: `reconciled`, `base`, `atCommit` and
-  // `fixCommit` each reached the cap on their own.
-  //
-  // A value here is for recognizing a thing in a file the reader has open,
-  // which does not take 500 characters. Local rather than in src/limits.mjs by
-  // that file's own test: nothing outside this function has to agree on it.
-  const MAX_PROBLEM_FIELD_CHARS = 120;
-  const brief = (value) => {
-    const flat = oneLine(value);
-    return flat.length > MAX_PROBLEM_FIELD_CHARS
-      ? `${flat.slice(0, MAX_PROBLEM_FIELD_CHARS)}…` : flat;
-  };
-  // Stringified first and bounded second, for the reason the disposition
-  // branch below gives and one more: escaping DOUBLES every character it
-  // touches, so bounding first spent the budget twice — a title of 600 quotes
-  // came back 243 characters long and pushed the remedy off the end again.
-  const named = (title) => brief(JSON.stringify(title));
 
   if (ledger.base && !resolveOnce(ledger.base)) {
     problems.push(`base ${brief(ledger.base)} is not a commit in this repository`);
@@ -832,7 +834,7 @@ function lanesOf(record, where) {
   const lanes = record?.reporters;
   if (lanes === undefined) return [];
   if (!isLaneList(lanes)) {
-    throw new TypeError(`${where} carries a reporters of ${oneLine(JSON.stringify(lanes))},`
+    throw new TypeError(`${where} carries a reporters of ${brief(JSON.stringify(lanes))},`
       + ' which is not a list of lane names');
   }
   return lanes;
@@ -875,7 +877,7 @@ function settlingMatches(decision, findings) {
 function reportersOf(decision, findings) {
   const lanes = new Set();
   for (const finding of settlingMatches(decision, findings)) {
-    for (const lane of lanesOf(finding, `finding ${JSON.stringify(oneLine(finding.title))}`)) {
+    for (const lane of lanesOf(finding, `finding ${named(finding.title)}`)) {
       lanes.add(lane);
     }
   }
@@ -1540,7 +1542,7 @@ export function closureOf(ledger, commit, resolve) {
 
   const fixes = (ledger.entries ?? []).filter((e) => e.disposition === 'fixed' && e.fixCommit);
   const closed = fixes.filter((e) => resolveOnce(e.fixCommit) === target);
-  const lanesFor = (e) => lanesOf(e, `entry ${JSON.stringify(oneLine(e.title))}`);
+  const lanesFor = (e) => lanesOf(e, `entry ${named(e.title)}`);
   const lanes = new Set();
   for (const e of closed) for (const lane of lanesFor(e)) lanes.add(lane);
 

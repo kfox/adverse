@@ -1023,6 +1023,25 @@ test('the JSON report carries the groups and each finding\'s back-reference', ()
   assert.deepEqual(json.findings.map((x) => x.group), ['G1', 'G1', 'G1']);
 });
 
+test('a citation claiming no reporter contributes nobody, not a null reviewer', () => {
+  // `[c.reporter]` on a citation that has none yields `undefined`, which
+  // serializes as `null`: counted as one reviewer in the PR comment, rendered
+  // as the word "null" in the HTML. That is the vouching this list is careful
+  // not to do, spelled by an absence instead of a name.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const withUnresolved = [{ ...g,
+    citations: [...g.citations,
+      { id: 'F9', kind: 'defect', severity: 'warning', file: 'a.py', line: 1,
+        title: 'nobody filed this' }] }];
+
+  const json = toJsonReport(synthesize(round1, rulings('one'),
+    { rootCauseGroups: withUnresolved }));
+
+  assert.deepEqual(json.root_causes[0].reporters, ['auditor', 'adversary', 'steward'],
+    JSON.stringify(json.root_causes[0].reporters));
+});
+
 test('a report from a run that never grouped still has the keys, empty', () => {
   const json = toJsonReport(synthesize({ auditor: review('auditor', [f('x')]) }, {}));
   assert.deepEqual(json.root_causes, []);

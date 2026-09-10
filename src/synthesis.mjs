@@ -572,7 +572,14 @@ function buildRootCauses(groups, round2, findByTitle) {
     // Resolved reporters where synthesis has them, the citation's claim only
     // where it does not — an unresolved citation should not erase a reporter,
     // but it should not silently vouch for one either.
-    const reporters = [...new Set(citations.flatMap((c) => c.reporters ?? [c.reporter]))];
+    //
+    // And a citation that claims no reporter contributes nobody, rather than
+    // an undefined that serializes as `null`: that phantom counted as one
+    // reviewer in the PR comment and rendered as the word "null" in the HTML,
+    // which is the vouching this list is careful not to do, spelled by an
+    // absence instead of a name.
+    const reporters = [...new Set(citations.flatMap((c) => c.reporters ?? [c.reporter])
+      .filter((lane) => typeof lane === 'string'))];
 
     // A ruling from the reviewer that is the only reporter of every citation is
     // that reviewer confirming that its own findings are one thing. `validate`
