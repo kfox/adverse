@@ -431,6 +431,158 @@ test('a refusal clears the decisions.json a previous fold left at --out', () => 
   }
 });
 
+// Two citations and a briefing that disagrees with both, which is what handing
+// this bridge another iteration's briefing.json looks like: `briefing.mjs`
+// re-mints ids positionally on every triage run and the loop writes them to the
+// same path. The refusal is right either way; what it must not do is state the
+// payload diagnosis as the only one, since N payloads each contradicting
+// themselves is the least likely reading of "all of them".
+const twoCitations = {
+  ...briefedFix,
+  fixed: [{ ...briefedFix.fixed[0], id: 'F3', title: 'a title from the other finding' }],
+  declined: [{
+    id: 'F1', title: 'another title from another finding', kind: 'defect',
+    severity: 'warning', confidence: 'solo', file: null, line: null, counterpart: null,
+    reason: 'left for the next iteration',
+  }],
+};
+const twoEntryBriefing = {
+  findings: [
+    briefingDoc.findings[0],
+    { ...briefingDoc.findings[0], id: 'F1', title: 'the budget is not enforced' },
+  ],
+};
+
+test('a briefing that disagrees with every citation is named as a cause', () => {
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', twoCitations);
+    const out = path.join(dir, 'decisions.json');
+
+    const r = run(['--fix', src,
+      '--briefing', write(dir, 'briefing.json', twoEntryBriefing),
+      '--report', write(dir, 'report.json', mergedReport), '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
+    assert.match(r.stdout, /EVERY id in these payloads disagrees/, r.stdout);
+    assert.match(r.stdout, /re-mints ids\n    positionally/, r.stdout);
+    assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('one transposed citation among two is not blamed on the briefing', () => {
+  // The control, and the reason the paragraph above is conditional: one payload
+  // getting one pair wrong is the ordinary case, and sending that operator to
+  // check their briefing is sending them away from the payload that is wrong.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...twoCitations,
+      declined: [{ ...twoCitations.declined[0], title: 'the budget is not enforced' }],
+    });
+    const out = path.join(dir, 'decisions.json');
+
+    const r = run(['--fix', src,
+      '--briefing', write(dir, 'briefing.json', twoEntryBriefing),
+      '--report', write(dir, 'report.json', mergedReport), '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
+    assert.doesNotMatch(r.stdout, /EVERY id in these payloads disagrees/, r.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a fold with no report warns that its noted entries still excuse', () => {
+  // src/decisions.mjs grants the vouching exemption on `reconciled: null` and
+  // says twice that the call belongs to "the orchestrator that chose to fold
+  // without a report — which is why both bridges warn about it on stderr".
+  // Neither did, and the narrowing of the UNREPORTED IDENTITY block to a report
+  // cause had removed the only other signal, so a report-less fold minted a
+  // self-vouching entry with nothing said anywhere.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', goodFix);
+    const out = path.join(dir, 'decisions.json');
+
+    const r = run(['--fix', src, '--out', out]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /--report not given/);
+    assert.match(r.stderr, /still let\w* EXCUSE|EXCUSE the next decision/, r.stderr);
+    const { decisions } = JSON.parse(readFileSync(out, 'utf-8'));
+    assert.equal(decisions.find((d) => d.disposition === 'noted').reconciled, null,
+      'which is the value the warning is about');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a stray id on a named_not_fixed item does not refuse the batch', () => {
+  // `named_not_fixed`'s schema has no `id` — `validateFix` never asks for one —
+  // so an `id` on one of those items is an extra key the validator tolerates,
+  // not an identity claim the payload was asked to make. Read as one, it named
+  // a briefing entry with a different title, reached the transposition refusal,
+  // and took the legitimate `fixed` decision beside it down with the batch.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      named_not_fixed: [{ ...goodFix.named_not_fixed[0], id: 'F3' }],
+    });
+    const briefing = write(dir, 'briefing.json', briefingDoc);
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+
+    const r = run(['--fix', src, '--briefing', briefing, '--report', report, '--out', out]);
+
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/, r.stdout);
+    const { decisions } = JSON.parse(readFileSync(out, 'utf-8'));
+    assert.deepEqual(decisions.map((d) => d.disposition).sort(), ['fixed', 'noted']);
+    assert.equal(decisions.find((d) => d.disposition === 'noted').id, 'NF-fix-auth-guard-1',
+      'and the id it is recorded under is this tool\'s, as it always was');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a briefing entry with no title is skipped, not blamed on the payload', () => {
+  // The id route reads `entry.title`, and `normalizeTitle(undefined)` is `''`,
+  // so every decision naming a title-less entry read as transposed. The batch
+  // was refused with `the briefing calls F3 undefined` — a payload blamed, in a
+  // sentence built to quote a title, for a field the briefing did not have.
+  // `briefing.mjs` copies the titles, so a missing one is this tool's own bug.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
+    // One usable entry beside it, because a briefing with NO usable entry is a
+    // different claim and the bridge refuses that one at exit 2 by name.
+    const briefing = write(dir, 'briefing.json', {
+      findings: [
+        { id: 'F3', kind: 'design', severity: 'warning', file: null, line: null },
+        { ...briefingDoc.findings[0], id: 'F1', title: 'an entry with a title' },
+      ],
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+
+    const r = run(['--fix', src, '--briefing', briefing, '--report', report, '--out', out]);
+
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/, r.stdout);
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /undefined/,
+      'and no message quotes a title the briefing never carried');
+    assert.equal(existsSync(out), true, 'the fold ran');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a briefing without a report still refuses a transposed pair', () => {
   // The transposition check needs the briefing, not the report: an `id` and a
   // `title` naming different findings is the payload contradicting ITSELF, and

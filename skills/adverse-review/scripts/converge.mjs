@@ -170,7 +170,10 @@ if (values.record) {
       + '  report they answered, so the next check cannot tell "not yet verified"\n'
       + '  from "the fix did not take" and will report them REGRESSED. They will\n'
       + '  also name no reporting lane, so a regression pass on these fix commits\n'
-      + '  cannot derive who must not run it.\n');
+      + '  cannot derive who must not run it. And an entry recorded\n'
+      + `  ${UNREPORTED_DISPOSITION} keeps its exemption: this ledger withholds that only\n`
+      + '  where the fold checked the identity against a report and no lane had filed\n'
+      + '  it, so a batch folded without one can excuse its own next decision.\n');
   }
 
   // Computed BEFORE the write, because it is the report these decisions answer

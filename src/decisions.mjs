@@ -41,6 +41,12 @@ refuseDirectRun(import.meta.url);
 // and which batch noticed the item is most of what they want to know.
 const namedItemId = (agent, n) => `NF-${agent}-${n}`;
 
+// `named_not_fixed` is the one list whose schema carries no `id`, and both
+// readers below have to agree about that: `reconciliations` decides whether to
+// refuse the fold on an id claim, and `foldFixPayloads` mints the entry that
+// claim would have bound.
+const NAMES_NO_ID = { statesId: false };
+
 // Every item a fix agent named but did not fix is recorded with this
 // disposition, and the whole point of it is that `isSettled` says no.
 //
@@ -290,10 +296,18 @@ function toNamedNotFixed(item, { agent, n, finding = null, checked = false }) {
 // with that title. An id route does not have that problem and a title route
 // does.
 //
-// An entry with no string `id` cannot be named by a decision and is skipped
-// rather than refused: `briefing.mjs` mints the ids, so a missing one is this
-// tool's own bug and not a payload's claim. Whether a briefing that yields no
-// usable entries is an error is the caller's call, and the bridge makes it.
+// An entry with no string `id` cannot be named by a decision, and one with no
+// string `title` cannot answer the question a decision's id is looked up to
+// ask. Both are skipped rather than refused, for the same reason: `briefing.mjs`
+// mints the ids and copies the titles, so a missing one is this tool's own bug
+// and not a payload's claim. Whether a briefing that yields no usable entries
+// is an error is the caller's call, and the bridge makes it.
+//
+// The title used to go unchecked, and the id route reads `entry.title`:
+// `normalizeTitle(undefined)` is `''`, so every decision naming a title-less
+// entry read as transposed and the whole batch was refused with `the briefing
+// calls F3 undefined` — a payload blamed, in a sentence built to quote a title,
+// for a field the briefing did not have.
 //
 // The refusal is `requireFindings`' sibling and for the same reason: the bridge
 // needs this exact list to decide whether the file it was handed is a briefing
@@ -304,7 +318,9 @@ export function briefingEntries(briefing) {
   if (!Array.isArray(briefing?.findings)) {
     throw new Error('briefing has no findings array; this is not a briefing.json');
   }
-  return briefing.findings.filter((e) => e && typeof e.id === 'string' && e.id);
+  return briefing.findings.filter((e) => e
+    && typeof e.id === 'string' && e.id
+    && typeof e.title === 'string' && e.title);
 }
 
 function briefingIndex(briefing) {
@@ -357,6 +373,16 @@ function briefingIndex(briefing) {
 // claim as no briefing, and neither is a report with no findings — reading
 // either from `.size` is how a file containing the literal `null` came to mean
 // "nothing was given", which the `--report` path already learned once.
+//
+// `statesId` is the caller's answer to whether the entry's schema HAS an `id`,
+// and only the two dispositions that do are asked the id question. A
+// `named_not_fixed` item's schema carries no id (`FIX_INSTRUCTIONS`, and
+// `validateFix` never asks for one), so an `id` on one is an extra key the
+// validator tolerates and not an identity claim the payload was asked to make.
+// Read as one, it put a stray key one keystroke away from refusing a whole
+// batch: a `noted` item whose id happened to name a briefing entry with another
+// title reached `cause: 'briefing'`, and the bridge refuses the fold on that —
+// taking every legitimate `fixed` decision beside it down as well.
 function bindingFor(report, briefing) {
   const haveBriefing = briefing !== null && briefing !== undefined;
   const briefed = haveBriefing ? briefingIndex(briefing) : new Map();
@@ -366,7 +392,7 @@ function bindingFor(report, briefing) {
     for (const f of requireFindings(report)) byTitle.set(normalizeTitle(f.title), f);
   }
 
-  return (d) => {
+  return (d, { statesId = true } = {}) => {
     // Only a decision that STATES an id makes an id claim, and only one whose
     // id RESOLVES makes a claim the briefing can contradict. Both near-misses
     // cost this function the correction it exists to make, and each cost it in
@@ -393,7 +419,7 @@ function bindingFor(report, briefing) {
     // references/convergence-loop.md tells an operator to pass on every fold.
     // It travels as `staleId` so binding and reporting can both happen.
     let staleId = null;
-    if (haveBriefing && d.id !== null && d.id !== undefined && d.id !== '') {
+    if (statesId && haveBriefing && d.id !== null && d.id !== undefined && d.id !== '') {
       const entry = briefed.get(d.id) ?? null;
       if (!entry) staleId = d.id;
       else if (normalizeTitle(entry.title) !== normalizeTitle(d.title)) {
@@ -501,7 +527,7 @@ export function foldFixPayloads(payloads, { report = null, briefing = null } = {
     (payload.named_not_fixed ?? []).forEach((item, i) => {
       requireItem(item, `named_not_fixed[${i}] from ${agent}`);
       decisions.push(toNamedNotFixed(item,
-        { agent, n: i + 1, finding: findingFor(item).finding, checked }));
+        { agent, n: i + 1, finding: findingFor(item, NAMES_NO_ID).finding, checked }));
     });
   }
 
@@ -532,15 +558,16 @@ function payloadEntries(payload) {
   // walks the same three lists and the bridge runs it FIRST, so a `null` in one
   // of them reached `Cannot read properties of null (reading 'title')` from
   // here rather than from the refusal the fold now makes.
-  const list = (name, disposition) => (payload?.[name] ?? []).map((d, i) => {
-    requireItem(d, `${name}[${i}] from ${agent}`);
-    return { d, disposition };
-  });
+  const list = (name, disposition, statesId = true) => (payload?.[name] ?? [])
+    .map((d, i) => {
+      requireItem(d, `${name}[${i}] from ${agent}`);
+      return { d, disposition, statesId };
+    });
 
   return [
     ...list('fixed', 'fixed'),
     ...list('declined', 'declined'),
-    ...list('named_not_fixed', NAMED_NOT_FIXED_DISPOSITION),
+    ...list('named_not_fixed', NAMED_NOT_FIXED_DISPOSITION, false),
   ];
 }
 
@@ -549,8 +576,8 @@ export function reconciliations(payloads, report, briefing = null) {
   const changes = [];
   for (const payload of payloads) {
     const agent = payload?.agent ?? null;
-    for (const { d, disposition } of payloadEntries(payload)) {
-      const { finding, cause, gap, staleId } = findingFor(d);
+    for (const { d, disposition, statesId } of payloadEntries(payload)) {
+      const { finding, cause, gap, staleId } = findingFor(d, { statesId });
       if (!finding) {
         changes.push({
           agent, title: d.title, disposition, bound: false, cause, gap, staleId, fields: [],

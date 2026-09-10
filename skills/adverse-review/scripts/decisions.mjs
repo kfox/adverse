@@ -263,6 +263,11 @@ if (values.report) {
     + '  fix agent copied out of the briefing. Where a lane merge moved one of them,\n'
     + '  the decision matches no finding, settles nothing, and\n'
     + '  `converge.mjs --record --report` records it and names it at exit 1.\n'
+    + `  And every ${NAMED_NOT_FIXED_DISPOSITION} entry this fold mints records\n`
+    + '  `reconciled: null`, which the ledger still lets EXCUSE the next decision that\n'
+    + '  matches it: the exemption is withheld only where the fold checked the identity\n'
+    + '  against a report and no lane had filed it. Folding without one leaves this\n'
+    + '  batch able to excuse its own next decision, and nothing downstream can tell.\n'
     + '  Pass --report <report.json> to correct them here.\n');
 }
 
@@ -292,7 +297,8 @@ if (values.briefing) {
   }
   if (!entries.length) {
     refuse(2, `decisions: ${oneLine(values.briefing)}: no briefing entry carries `
-      + 'an `id`, so no decision can be bound to one; this is not a briefing.json\n');
+      + 'both an `id` and a `title`, so no decision can be bound to one and checked'
+      + ' against it; this is not a briefing.json\n');
   }
 } else {
   process.stderr.write(
@@ -327,12 +333,33 @@ try {
 // for a briefing that parses to nothing.
 const changes = report || briefing ? reconciliations(payloads, report, briefing) : [];
 const isNamed = (c) => c.disposition === NAMED_NOT_FIXED_DISPOSITION;
-// Both briefing causes are read for EVERY disposition, `noted` included —
-// unlike the report causes below, which split `noted` off under its own gentler
-// heading. That heading exists because recording a `noted` entry settles
-// nothing; the reasoning does not reach a payload whose own two identity claims
-// disagree with each other, which is a mis-citation whatever it was recorded as.
+// Both briefing causes are read for every disposition whose schema ASKS for an
+// id — `fixed` and `declined` — unlike the report causes below, which split
+// `noted` off under its own gentler heading. That heading exists because
+// recording a `noted` entry settles nothing; the reasoning does not reach a
+// payload whose own two identity claims disagree with each other, which is a
+// mis-citation whatever it was recorded as.
+//
+// `named_not_fixed` makes only one identity claim, because its schema has no
+// `id` field to make the other with, so it has nothing to contradict itself
+// about. An `id` on one of those items is an extra key `validateFix` tolerates,
+// and reading it as a claim put a stray key one keystroke from refusing a whole
+// batch — see `bindingFor`'s `statesId` (src/decisions.mjs).
 const transposed = changes.filter((c) => c.cause === 'briefing');
+
+// How many citations the briefing check could have contradicted, counted off
+// the payloads rather than off `changes`: a citation that binds cleanly leaves
+// no row there, so `changes` cannot tell "one of four disagreed" from "the only
+// one did".
+//
+// The distinction is the whole of the finding below. `briefing.mjs` re-mints
+// ids positionally on every triage run and the loop writes them to the same
+// path, so handing this bridge an iteration's other briefing makes EVERY
+// citation disagree at once — and the refusal diagnosed that as N payloads
+// contradicting themselves, which is the one thing it cannot be.
+const citations = payloads
+  .flatMap((p) => [...(p?.fixed ?? []), ...(p?.declined ?? [])])
+  .filter((d) => d && d.id !== null && d.id !== undefined && d.id !== '').length;
 
 // A transposed pair is the one answer this bridge REFUSES on, and the refusal
 // is why the check exists rather than being the check's report of itself.
@@ -358,7 +385,15 @@ if (transposed.length) {
     + '    A fix payload copies both out of the same briefing entry, so these cannot\n'
     + '    both be right. Find which finding was actually decided and correct the\n'
     + '    payload: `converge.mjs --record` takes no --briefing, so it would bind\n'
-    + '    each of these by its title and settle whichever finding that names.\n');
+    + '    each of these by its title and settle whichever finding that names.\n'
+    + (transposed.length === citations && citations > 1
+      ? '    EVERY id in these payloads disagrees, which is more likely to be one wrong\n'
+        + '    --briefing than one wrong payload per citation: triage re-mints ids\n'
+        + '    positionally on every run and writes them to the same path, so a briefing\n'
+        + '    from another iteration disagrees with all of them at once. Check that this\n'
+        + '    briefing.json is the one these payloads were authored against before\n'
+        + '    correcting anything in them.\n'
+      : ''));
   refuse(1, 'decisions: a payload contradicts its own identity claims; refusing to fold it\n');
 }
 
