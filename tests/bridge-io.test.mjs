@@ -269,8 +269,14 @@ const READ_MODE = /^(['"])r\1$/;
 // BEFORE the name means it belongs to some other object — `\bvalues[.[]`
 // matched `other.values.out`, which is not a destination this run was handed.
 const quoted = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const boundary = (name) => new RegExp(`(?<![\\w$.])${quoted(name)}(?![\\w$])`);
-const memberOf = (name) => new RegExp(`(?<![\\w$.])${quoted(name)}\\s*[.[]`);
+// Not preceded by a name, and not preceded by a member access — but a spread
+// is three dots and not a member access, so `{ ...values }` has to reach this
+// as the caller's own object rather than as somebody else's property named
+// `values`. A flat `(?<![\w$.])` rejected both alike, which made the shortest
+// spelling of handing an object on invisible.
+const NOT_A_MEMBER = '(?<![\\w$])(?<!(?<!\\.)\\.)';
+const boundary = (name) => new RegExp(`${NOT_A_MEMBER}${quoted(name)}(?![\\w$])`);
+const memberOf = (name) => new RegExp(`${NOT_A_MEMBER}${quoted(name)}\\s*[.[]`);
 // An object used without naming one of its properties: aliased wholesale,
 // passed on, or read through a bracket, which is the same thing here because
 // `withoutStrings` empties the key before this sees it. Binding an object
@@ -278,9 +284,25 @@ const memberOf = (name) => new RegExp(`(?<![\\w$.])${quoted(name)}\\s*[.[]`);
 // tracked, so `const c = { out: values.out }` left `c['out']`, `const d = c`
 // and `Object.assign({}, c)` unreported, all three of which the cruder
 // whole-name taint caught. Anything that DOES name a property is left to
-// `boundary`, which is what keeps the precision the pairs bought.
+// `boundary`, which is what keeps the precision the pairs bought — `?.` and
+// `.` alike, because `config?.out` names `out` exactly as `config.out` does
+// and the scanned bridges spell it that way eighteen times.
 const wholesale = (name) => new RegExp(
-  `(?<![\\w$.])${quoted(name)}(?!\\s*\\.\\s*[A-Za-z_$])(?![\\w$])`);
+  `${NOT_A_MEMBER}${quoted(name)}(?!\\s*\\??\\.\\s*[A-Za-z_$])(?![\\w$])`);
+
+// The object a tracked name reads a property of, or null if the name is not a
+// property path at all. Cutting at the first `.` is wrong twice over: a dot
+// inside a bracket belongs to the KEY, so `combined[payload.persona].out` gave
+// the owner `combined[payload` — a name nothing spells, which is a silent pass
+// on the alias this owner exists to catch, and combine.mjs writes that exact
+// shape. And a bracketed property has no dot to cut at: `withoutStrings`
+// empties the key, so `config['files-out']` is tracked as `config['']` and
+// asking for a dot found no owner at all. The owner is the leading identifier
+// whenever anything follows it.
+const ownerOf = (name) => {
+  const base = /^[A-Za-z_$][\w$]*/.exec(name);
+  return base && base[0].length < name.length ? base[0] : null;
+};
 
 // Text with its string literals emptied, for asking whether an expression reads
 // a caller-supplied path. A tainted NAME inside a literal is not a tainted
@@ -754,11 +776,15 @@ function destNames(src, statements) {
     if (/^values\s*(?:,|$)/.test(init.trim())) objects.add(name);
   }
 
+  // An object is handed on where it is named without a property being read —
+  // `{ ...values }`, `Object.assign({}, opts)`, a bare pass to another name —
+  // and that is as true of `values` as of a literal bound below. `memberOf`
+  // alone needed a `.` or a `[` after the name, so a spread of the caller's
+  // own options object was a silent pass on the shortest spelling there is.
   const handed = (raw) => {
     const text = withoutStrings(raw);
-    const owners = new Set([...names].filter((n) => n.includes('.'))
-      .map((n) => n.slice(0, n.indexOf('.'))));
-    return [...objects].some((o) => memberOf(o).test(text))
+    const owners = new Set([...names].map(ownerOf).filter(Boolean));
+    return [...objects].some((o) => memberOf(o).test(text) || wholesale(o).test(text))
       || [...names].some((n) => boundary(n).test(text))
       || [...owners].some((o) => wholesale(o).test(text));
   };
@@ -952,6 +978,22 @@ for (const [label, src, dest] of [
     + 'writeFileSync(d.out, body);', 'd.out'],
   ['an object literal whose key is quoted',
     'const c = { \'out\': values.out };\nwriteFileSync(c.out, body);', 'c.out'],
+  // combine.mjs's shape: the tracked name is a property of a name that is
+  // itself a bracketed lookup, so the owner is not what stands before the
+  // first dot.
+  ['an alias of an object whose tainted property hangs off a bracket',
+    'combined[payload.persona].out = values.out;\nconst alias = combined;\n'
+    + 'writeFileSync(alias.out, body);', 'alias.out'],
+  // And the same alias where the tainted property was spelled with a bracket
+  // rather than a dot, which leaves the tracked name no dot to be cut at.
+  ['an alias of an object whose tainted property is bracketed',
+    'config[\'files-out\'] = values.out;\nconst alias = config;\n'
+    + 'writeFileSync(alias.out, body);', 'alias.out'],
+  // A spread of the caller's own options object: the shortest spelling of
+  // handing a destination on, and the one a check needing a `.` or a `[`
+  // after the name could not see.
+  ['an object literal spreading the caller\'s options',
+    'const c = { ...values };\nwriteFileSync(c.out, body);', 'c.out'],
   // And the fallback, on a literal this cannot read pair by pair: a shorthand
   // property has no `:`, so which key holds the caller's path is unknown and
   // the whole name is tainted rather than the one pair it could read.
@@ -1054,6 +1096,19 @@ for (const [label, src] of [
   ['a temporary whose message text quotes the shape this rule refuses',
     'const said = \'dest = values.out, written unguarded\';\n'
     + 'const dest = path.join(tmpdir(), \'x\');\nwriteFileSync(dest, said);'],
+  // The same prose, one backtick further in: an interpolation holds code, and
+  // that code holds literals of its own. This is the shape of every message
+  // these bridges build.
+  ['a temporary whose message text quotes the shape inside an interpolation',
+    'const said = `${fmt(\'dest = values.out, written unguarded\')}`;\n'
+    + 'const dest = path.join(tmpdir(), \'x\');\nwriteFileSync(dest, said);'],
+  // A fixed property read off an object one of whose OTHER properties holds
+  // the caller's path, reached the way this directory spells a maybe-absent
+  // one. The wholesale check has to see a `?.` as naming a property or every
+  // one of these is an offender.
+  ['a fixed destination read off an optional chain',
+    'const config = { out: \'x.json\', input: values.in };\n'
+    + 'writeFileSync(config?.out, body);'],
   // A configuration object holding a fixed path beside a caller-supplied one,
   // which is one line away from the `{ out: values.out }` fixture above and
   // the reason an object literal binds its properties instead of its name.
@@ -1063,12 +1118,6 @@ for (const [label, src] of [
   // The other direction of the same finding: a comment is not code, so an
   // assignment quoted in one taints nothing. Unanchoring the assignment scan
   // is what first let it reach inside a comment at all.
-  // The same prose, one backtick further in: an interpolation holds code, and
-  // that code holds literals of its own. This is the shape of every message
-  // these bridges build.
-  ['a temporary whose message text quotes the shape inside an interpolation',
-    'const said = `${fmt(\'dest = values.out, written unguarded\')}`;\n'
-    + 'const dest = path.join(tmpdir(), \'x\');\nwriteFileSync(dest, said);'],
   ['a temporary whose comment quotes the shape this rule refuses',
     '// The shape this replaced: dest = values.out, written unguarded.\n'
     + 'const dest = path.join(tmpdir(), \'x\');\nwriteFileSync(dest, body);'],
