@@ -28,8 +28,7 @@
 // `fixed · declined · deferred` that named none of it and went stale the first
 // time a disposition was added.
 
-import { rmSync, writeFileSync } from 'node:fs';
-import path from 'node:path';
+import { rmSync, statSync, writeFileSync } from 'node:fs';
 
 import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
@@ -110,34 +109,74 @@ if (!values.fix.length || !values.out) {
 // this file: told only from `refuse`, the notice would be missing from exactly
 // the refusals that made the claim necessary.
 //
-// And it refuses an `--out` that names one of this run's own inputs before
+// And it refuses an `--out` that IS one of this run's own inputs before
 // removing anything. Unconditionally clearing a caller-supplied path makes the
 // first effect of the process a delete, so `--report r.json --out r.json`
 // destroyed the report and then failed to read it: an operator left with
 // neither a fold nor their input, from a typo that used to complete.
+//
+// Identity, not spelling. `path.resolve` normalizes `.`, `..` and separators
+// and resolves neither symlinks nor case, so three ordinary shapes of that same
+// typo walked past a string comparison and deleted the input anyway: a
+// case-different `--out` on a case-insensitive filesystem, a path through a
+// symlinked directory, and `/tmp` against `/private/tmp` — which is not exotic,
+// it is where the loop's own run directory lives on macOS. Two names for one
+// file is the whole question here, and `dev`/`ino` is what answers it.
+function sameFile(a, b) {
+  try {
+    const x = statSync(a);
+    const y = statSync(b);
+    return x.dev === y.dev && x.ino === y.ino;
+  } catch {
+    // Either path may not exist — `--out` usually does not on the first fold —
+    // and a destination that is not there is a destination with nothing to
+    // destroy.
+    return false;
+  }
+}
+
 function claimOut(inputs) {
-  const dest = path.resolve(values.out);
-  const alias = inputs.find((f) => path.resolve(f) === dest);
+  const alias = inputs.find((f) => sameFile(f, values.out));
   if (alias) {
-    process.stderr.write(`decisions: --out ${oneLine(values.out)} names an input of this run`
+    process.stderr.write(`decisions: --out ${oneLine(values.out)} is an input of this run`
       + ` (${oneLine(alias)}). This bridge claims --out before reading anything, so folding`
       + ' there would destroy the file it is folding from\n');
     process.exit(2);
   }
   try {
-    rmSync(dest);
+    rmSync(values.out);
   } catch (e) {
-    if (e.code === 'ENOENT') return;
+    if (e.code === 'ENOENT') return false;
     process.stderr.write(`decisions: ${oneLine(values.out)}: cannot be claimed for this run`
       + ` (${oneLine(e.code)}). A batch a previous fold left there would still be on disk`
       + ' after a refusal, and `converge.mjs --record` would append it a second time\n');
     process.exit(2);
   }
-  process.stderr.write(`decisions: ${oneLine(values.out)} held a batch from an earlier fold and`
-    + ' was removed when this run started; nothing this run refuses has been recorded\n');
+  return true;
 }
 
-claimOut([...values.fix, values.report, values.briefing].filter(Boolean));
+const clearedOut = claimOut([...values.fix, values.report, values.briefing].filter(Boolean));
+
+// Said on the way out, and only when this run is leaving without writing.
+//
+// The notice belongs to the REFUSAL, not to the removal: every fold after the
+// first overwrites a file that was already there, so announced at the moment of
+// removal it printed "removed, nothing recorded" on stderr in front of every
+// successful run's own report of the batch it had just written — on the channel
+// the Skill tells the orchestrating agent to read and act on. But it cannot be
+// printed from `refuse` either: three of the exits it exists to cover are
+// `readJson`'s, in bridge-io.mjs, which never reach anything in this file. An
+// exit hook is the one place that is both.
+//
+// It says a FILE was removed rather than a batch, because that is all this
+// bridge checked. `--out` pointed at something else entirely is the operator's
+// own mistake and gets the truth about it, not a sentence inventing a previous
+// fold.
+process.on('exit', (code) => {
+  if (!code || !clearedOut) return;
+  process.stderr.write(`decisions: a file already at ${oneLine(values.out)} was removed when`
+    + ' this run started, and this run wrote nothing: nothing it refused has been recorded\n');
+});
 
 function refuse(code, message) {
   process.stderr.write(message);

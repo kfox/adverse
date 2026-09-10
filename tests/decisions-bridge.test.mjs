@@ -9,7 +9,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -369,8 +371,8 @@ test('a refusal clears the decisions.json a previous fold left at --out', () => 
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stdout, /nothing written to/);
     assert.equal(existsSync(out), false, 'the refusal leaves no earlier batch at --out');
-    assert.match(r.stderr, /held a batch from an earlier fold and was removed/);
-    assert.match(r.stderr, /nothing this run refuses has been recorded/);
+    assert.match(r.stderr, /a file already at .*decisions\.json was removed/);
+    assert.match(r.stderr, /nothing it refused has been recorded/);
 
     // The same class through `readJson`, which is in bridge-io.mjs and exits 2
     // on its own before any of this bridge's code runs. A truncated payload is
@@ -385,7 +387,23 @@ test('a refusal clears the decisions.json a previous fold left at --out', () => 
     // Announced from the claim, not from this bridge's own refusals: told only
     // from those, the notice would be missing from the three exits in
     // bridge-io.mjs that the claim exists to cover.
-    assert.match(r2.stderr, /held a batch from an earlier fold and was removed/);
+    assert.match(r2.stderr, /a file already at .*decisions\.json was removed/);
+
+    // And NOT on the way out of a run that wrote: the loop folds every
+    // iteration to one fixed path, so from the second fold on the file is
+    // always there. Announced at the moment of removal, this printed "removed,
+    // nothing recorded" in front of every successful run's own report of the
+    // batch it had just written — on the channel the Skill tells the
+    // orchestrating agent to read and act on.
+    const good = write(dir, 'fix-auth-guard.json', goodFix);
+    const third = run(['--fix', good, '--out', out]);
+    assert.equal(third.status, 0, third.stderr);
+    assert.equal(existsSync(out), true);
+    // The fourth is the one that matters: it starts with the third's file at
+    // `--out`, so it removes one and still says nothing, because it wrote.
+    const fourth = run(['--fix', good, '--out', out]);
+    assert.equal(fourth.status, 0, fourth.stderr);
+    assert.doesNotMatch(fourth.stderr, /was removed when this run started/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -567,9 +585,34 @@ test('an --out naming an input is refused before anything is removed', () => {
     const src = write(dir, 'fix-auth-guard.json', goodFix);
     const r = run(['--fix', src, '--report', report, '--out', report]);
     assert.equal(r.status, 2, r.stdout);
-    assert.match(r.stderr, /--out .*report\.json names an input of this run/);
+    assert.match(r.stderr, /--out .*report\.json is an input of this run/);
     assert.equal(existsSync(report), true, 'the input this run reads from is still there');
     assert.equal(existsSync(src), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two names for one file are one file, so --out through a symlink is refused', () => {
+  // `path.resolve` normalizes separators and `..` and resolves neither symlinks
+  // nor case, so a string comparison let the exact data loss it was written to
+  // stop through: a path reaching the same file by another name deleted the
+  // input and then failed to read it. `/tmp` against `/private/tmp` is the
+  // everyday instance of this — it is where the loop's run directory lives on
+  // macOS — and a symlinked directory is the portable one.
+  const dir = freshTmp();
+  try {
+    const real = path.join(dir, 'run');
+    mkdirSync(real);
+    const link = path.join(dir, 'link');
+    symlinkSync(real, link);
+    const report = write(real, 'report.json', mergedReport);
+    const src = write(dir, 'fix-auth-guard.json', goodFix);
+    const r = run(['--fix', src, '--report', report,
+      '--out', path.join(link, 'report.json')]);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /is an input of this run/);
+    assert.equal(existsSync(report), true, 'the file the run reads from is still there');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
