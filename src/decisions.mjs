@@ -605,41 +605,48 @@ function payloadEntries(payload) {
   ];
 }
 
-// Is the BRIEFING the likelier explanation for every citation disagreeing at
-// once, rather than every payload contradicting itself?
+// What made EVERY citation disagree at once, as far as the payloads and this
+// briefing can say: `'briefing'`, `'either'`, or null for "one wrong pair at a
+// time", which is the ordinary case and needs no paragraph of its own.
+//
+// The refusal is right in all three — an id and a title naming different
+// findings cannot both be honored — but the remedy is not, and pointing an
+// operator at the wrong file costs them the iteration.
 //
 // `briefing.mjs` re-mints ids positionally on every triage run and the loop
 // writes them to the same path, so handing the fold another iteration's
-// briefing makes every citation disagree together. The refusal is right either
-// way — there is no correct fold — but the diagnosis is not, and "N payloads
-// each got their own pair wrong" is the least likely reading of "all of them".
+// briefing makes every citation disagree together. So does a payload that
+// pairs two entries with each other's ids. At two citations those two inputs
+// are the same document, and no field distinguishes them:
 //
-// Two things have to hold, and each was a way of getting this wrong:
+//   briefing        F1 -> "the guard", F3 -> "the budget"
+//   payload cites   F3 -> "the guard", F1 -> "the budget"
 //
-// - Every citation the check COULD contradict does. The denominator is not
-//   every stated id: an id that resolves to nothing leaves the check with
-//   nothing to compare and can never land in `transposed`, so counting those
-//   suppressed this whole diagnosis on any batch that also carried one stale
-//   citation — which a foreign briefing, being a different length, tends to
-//   produce.
-// - None of the disagreeing titles is in this briefing at all. A payload that
-//   transposes two titles between two entries also makes every citation
-//   disagree, and it is the canonical case this guard was built for: the
-//   titles are this briefing's own, paired with each other's ids. Sending that
-//   operator to check their briefing sends them away from the payload that is
-//   wrong.
-export function foreignBriefing(changes, payloads, briefing) {
+// which is either ids rotated between iterations or a payload with its pairs
+// swapped. `'either'` is that answer, said out loud. What the first version of
+// this said instead was "check your briefing", and the correction to it said
+// "check your payload" — by requiring that none of the titles be in this
+// briefing, which is true only of a briefing from an unrelated review and is
+// exactly the case that needs the least explaining.
+//
+// One thing holds in every non-null answer, and it was the first way of
+// getting this wrong: every citation the check COULD contradict does. The
+// denominator is not every stated id — an id that resolves to nothing leaves
+// the check with nothing to compare and can never land in `transposed`, so
+// counting those suppressed the whole diagnosis on any batch that also carried
+// one stale citation, which a briefing of a different length tends to produce.
+export function transpositionCause(changes, payloads, briefing) {
   const transposed = changes.filter((c) => c.cause === 'briefing');
-  if (transposed.length < 2) return false;
+  if (transposed.length < 2) return null;
 
   const stated = payloads
     .flatMap((p) => [...(p?.fixed ?? []), ...(p?.declined ?? [])])
     .filter((d) => d && d.id !== null && d.id !== undefined && d.id !== '').length;
   const unresolvable = changes.filter((c) => c.staleId !== null && c.staleId !== undefined).length;
-  if (transposed.length !== stated - unresolvable) return false;
+  if (transposed.length !== stated - unresolvable) return null;
 
   const titles = new Set(briefingEntries(briefing).map((e) => normalizeTitle(e.title)));
-  return transposed.every((c) => !titles.has(normalizeTitle(c.title)));
+  return transposed.every((c) => !titles.has(normalizeTitle(c.title))) ? 'briefing' : 'either';
 }
 
 export function reconciliations(payloads, report, briefing = null) {

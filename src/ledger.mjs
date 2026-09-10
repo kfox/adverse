@@ -1153,6 +1153,17 @@ export function recordDecisions(ledger, decisions, {
     // the report, and a caller that supplies its own is supplying the field a
     // regression pass excuses a lane on — which is the one selection the party
     // whose commit is under review must not make.
+    // Three values, and the comment on `reconciled` below says so — but the
+    // field went in as `d.reconciled ?? null`, unchecked. `isSelfIdentified`
+    // reads `reconciled === false`, so anything that is not exactly `false`
+    // VOUCHES: the plausible hand-written `"reconciled": "false"` and a stray
+    // `0` both granted the exemption they were written to withhold, and
+    // converge's warning is about `null`, so neither bridge said a word.
+    if (![true, false, null, undefined].includes(d.reconciled)) {
+      throw new Error(`decision for ${JSON.stringify(d.title)} carries reconciled: `
+        + `${JSON.stringify(d.reconciled)}; the fold records true, false or null, and only `
+        + 'an exact `false` withholds the exemption a `noted` entry grants');
+    }
     if (d.reporters !== undefined) {
       throw new Error(`decision for ${JSON.stringify(d.title)} carries \`reporters\`; the `
         + 'reporting lanes are derived from the report this decision answers, not declared by '

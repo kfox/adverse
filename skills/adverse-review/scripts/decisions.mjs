@@ -36,8 +36,8 @@ import { oneLine, parseBridgeArgs, readJson, usage, writeOutput } from './bridge
 import { importFromSrc } from './package-root.mjs';
 
 const {
-  NAMED_NOT_FIXED_DISPOSITION, briefingEntries, foldFixPayloads, foreignBriefing,
-  reconciliations,
+  NAMED_NOT_FIXED_DISPOSITION, briefingEntries, foldFixPayloads, reconciliations,
+  transpositionCause,
 } = await importFromSrc('decisions.mjs');
 const {
   isSettled, requireFindings, summarizeDispositions,
@@ -348,6 +348,27 @@ const isNamed = (c) => c.disposition === NAMED_NOT_FIXED_DISPOSITION;
 // batch — see `bindingFor`'s `statesId` (src/decisions.mjs).
 const transposed = changes.filter((c) => c.cause === 'briefing');
 
+// The extra paragraph for a batch where EVERY citation disagrees, keyed on what
+// `transpositionCause` could establish. Neither answer contradicts the refusal
+// above; they say which file to open first, which is the whole cost of getting
+// this wrong.
+const TRANSPOSITION_CAUSE = {
+  briefing:
+    '    EVERY id here disagrees, and not one of these titles is in this briefing\n'
+    + '    at all — so this is more likely to be one wrong --briefing than one wrong\n'
+    + '    payload per citation. Triage re-mints ids positionally on every run and\n'
+    + '    writes them to the same path. Check that this briefing.json is the one\n'
+    + '    these payloads were authored against before correcting anything in them.\n',
+  either:
+    '    EVERY id here disagrees, and every one of these titles IS in this briefing,\n'
+    + '    under another id. Two inputs look exactly like this and nothing here tells\n'
+    + '    them apart: a briefing from another iteration, whose ids triage re-mints\n'
+    + '    positionally on every run, and a payload that paired two entries with each\n'
+    + '    other\'s ids. Check first whether this briefing.json is the one these\n'
+    + '    payloads were authored against — if it is, the pairs in the payload are\n'
+    + '    swapped; if it is not, its ids are.\n',
+  null: '',
+};
 
 // A transposed pair is the one answer this bridge REFUSES on, and the refusal
 // is why the check exists rather than being the check's report of itself.
@@ -374,15 +395,7 @@ if (transposed.length) {
     + '    both be right. Find which finding was actually decided and correct the\n'
     + '    payload: `converge.mjs --record` takes no --briefing, so it would bind\n'
     + '    each of these by its title and settle whichever finding that names.\n'
-    + (foreignBriefing(changes, payloads, briefing)
-      ? '    EVERY id here disagrees, and not one of these titles is in this briefing\n'
-        + '    at all — which is more likely to be one wrong --briefing than one wrong\n'
-        + '    payload per citation. Triage re-mints ids positionally on every run and\n'
-        + '    writes them to the same path, so a briefing from another iteration\n'
-        + '    disagrees with all of them at once. Check that this briefing.json is the\n'
-        + '    one these payloads were authored against before correcting anything in\n'
-        + '    them.\n'
-      : ''));
+    + TRANSPOSITION_CAUSE[transpositionCause(changes, payloads, briefing)]);
   refuse(1, 'decisions: a payload contradicts its own identity claims; refusing to fold it\n');
 }
 

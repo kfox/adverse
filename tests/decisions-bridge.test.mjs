@@ -472,6 +472,8 @@ test('a briefing that disagrees with every citation is named as a cause', () => 
     assert.match(r.stdout, /EVERY id here disagrees/, r.stdout);
     assert.match(r.stdout, /not one of these titles is in this briefing/, r.stdout);
     assert.match(r.stdout, /re-mints ids positionally on every run/, r.stdout);
+    assert.doesNotMatch(r.stdout, /every one of these titles IS in this briefing/,
+      'and not the paragraph for the case where they are');
     assert.equal(existsSync(out), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -535,12 +537,18 @@ test('a stale citation beside the transposed ones does not suppress the cause', 
   }
 });
 
-test('a swap between two entries of this briefing is not blamed on the briefing', () => {
-  // The other control, and the case the guard was built for: a payload that
-  // pairs each of two entries with the other's id makes every citation
-  // disagree at once, just as a foreign briefing does. The titles are this
-  // briefing's own, so telling the operator to check their briefing sends them
-  // away from the payload that is wrong.
+test('a swap inside this briefing is named as one of two answers, not as the briefing', () => {
+  // A payload that pairs two entries with each other's ids makes every
+  // citation disagree at once — and so does a briefing from another iteration,
+  // whose ids triage re-mints positionally over the same findings. At two
+  // citations those two inputs are the same document and no field here tells
+  // them apart, so the paragraph names both and says which file to open first.
+  //
+  // The two wrong answers, in order: this said "check your briefing", which
+  // sends the operator away from a payload that may be the wrong thing; the
+  // correction said nothing at all, by requiring that none of the titles be in
+  // this briefing — true only of an unrelated review's briefing, which is the
+  // case needing the least explaining.
   const dir = freshTmp();
   try {
     const src = write(dir, 'fix-auth-guard.json', {
@@ -556,7 +564,11 @@ test('a swap between two entries of this briefing is not blamed on the briefing'
 
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
-    assert.doesNotMatch(r.stdout, /EVERY id here disagrees/, r.stdout);
+    assert.match(r.stdout, /every one of these titles IS in this briefing/, r.stdout);
+    assert.match(r.stdout, /if it is, the pairs in the payload are/, r.stdout);
+    assert.doesNotMatch(r.stdout, /more likely to be one wrong --briefing/,
+      'the briefing is not the likelier answer here; it is one of two');
+    assert.equal(existsSync(out), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

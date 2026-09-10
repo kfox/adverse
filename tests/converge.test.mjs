@@ -740,6 +740,43 @@ test('an entry the fold checked against a report is not warned about', () => {
     'the missing flag has its own sentence, about the report this run did not name');
 });
 
+test('a reconciled the fold never writes is refused, not granted the exemption', () => {
+  // `isSelfIdentified` reads `reconciled === false`, so anything that is not
+  // exactly `false` VOUCHES — and the field went into the ledger as
+  // `d.reconciled ?? null`, unchecked, while its own comment said three values.
+  // A hand-written `"false"` is the string spelling of the one value that
+  // withholds the exemption, and it granted it; converge's warning is about
+  // `null`, so neither bridge said a word.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json',
+    { decisions: [notedEntry({ reconciled: 'false' })] });
+
+  const r = run(['--ledger', ledger, '--record', decisions,
+                 '--repo', repo, '--at', reviewed], repo);
+
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /carries reconciled: "false"/, r.stderr);
+  assert.match(r.stderr, /true, false or null/, r.stderr);
+  assert.equal(existsSync(ledger), false, 'and nothing was recorded');
+});
+
+test('the singular warning agrees with itself all the way through', () => {
+  // Three pronouns, and the third was not branched: "1 noted entry was folded
+  // with no report, so it keeps the exemption that excuses the next decision
+  // matching THEM".
+  const { repo, reviewed } = repoWithTwoCommits();
+  const decisions = writeJson(repo, 'd.json',
+    { decisions: [notedEntry({ reconciled: null })] });
+
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--record', decisions,
+                 '--repo', repo, '--at', reviewed], repo);
+
+  assert.match(r.stderr, /1 noted entry was folded/, r.stderr);
+  assert.doesNotMatch(r.stderr, /matching\n\s+them:/, r.stderr);
+  assert.match(r.stderr, /matching\n\s+it:/, r.stderr);
+});
+
 test('a batch with nothing that vouches is not warned about an exemption', () => {
   // The control: the warning is gated on the entries, so a batch holding none
   // of them is told nothing about one. Same run, same missing --report.

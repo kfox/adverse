@@ -198,7 +198,8 @@ if (values.record) {
       + `${vouching.length === 1 ? 'entry was' : 'entries were'} folded with no report, so\n`
       + `  ${vouching.length === 1 ? 'it keeps' : 'they keep'} the exemption that excuses the`
       + ' next decision matching\n'
-      + '  them: this ledger withholds that only where the fold checked the identity\n'
+      + `  ${vouching.length === 1 ? 'it' : 'them'}: this ledger withholds that only where`
+      + ' the fold checked the identity\n'
       + '  against a report and no lane had filed it. Re-fold with\n'
       + '  `decisions.mjs --report` to have it checked.\n');
   }

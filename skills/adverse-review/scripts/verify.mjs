@@ -43,7 +43,8 @@
 // in Phase 7. It is not carried into `report.json`; the dispositions that have
 // to reach the arithmetic are the open ones, and those are now findings.
 
-import { makeWriteQueue, parseBridgeArgs, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { makeWriteQueue, oneLine, parseBridgeArgs, readJson, requireKnownPersona, usage }
+  from './bridge-io.mjs';
 
 import { importFromSrc } from './package-root.mjs';
 
@@ -139,7 +140,22 @@ if (values.briefing) {
   // `undefined` as the briefing's anchor, and a still-open critical was
   // re-emitted at `warning` with no file and no line — with `id "F3" is
   // undefined in the briefing` on stderr and exit 1, blaming the payload.
-  for (const f of briefingEntries(doc)) briefed.set(f.id, f);
+  //
+  // Wrapped, because `briefingEntries` THROWS on a document whose `findings` is
+  // missing or is not an array — a decisions.json or a verify payload handed to
+  // `--briefing` by mistake. Unwrapped here, that was a raw Node stack at exit
+  // 1, and for this bridge exit 1 means it read a payload that failed its
+  // schema (references/convergence-loop.md). The same call in decisions.mjs is
+  // wrapped and refuses at 2 naming the file; that guard did not travel with
+  // the import.
+  let entries = [];
+  try {
+    entries = briefingEntries(doc);
+  } catch (e) {
+    process.stderr.write(`verify: ${oneLine(values.briefing)}: ${e.message}\n`);
+    process.exit(2);
+  }
+  for (const f of entries) briefed.set(f.id, f);
   briefedByTitle = indexByTitle(doc);
 }
 

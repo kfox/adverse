@@ -521,6 +521,33 @@ test('a briefed finding cited by an id the briefing does not carry binds by titl
   }
 });
 
+test('a --briefing whose findings is not an array is exit 2, naming the file', () => {
+  // `briefingEntries` THROWS on a document with no `findings` array — a
+  // decisions.json or a verify payload handed to `--briefing` by mistake — and
+  // this call site had no guard, so it was a raw Node stack at exit 1. For this
+  // bridge exit 1 means it read a payload that failed its schema. The sibling
+  // call in decisions.mjs is wrapped; the guard did not travel with the import.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ decisions: [] }));
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F1', title: 'a title', status: 'open', reason: 'r' }],
+      added: [],
+    }));
+
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /briefing\.json/, r.stderr);
+    assert.doesNotMatch(r.stderr, /at file:|not iterable|TypeError/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a title-less briefing entry does not answer an id lookup here either', () => {
   // The sibling of the hole `briefingEntries` closes for decisions.mjs, in the
   // guard that file's comments name. Indexed on `id` alone, a title-less entry

@@ -20,9 +20,11 @@
 // The real fix belongs upstream in src/synthesis.mjs — join on ID, or on
 // file/line proximity — at which point this script becomes dead weight.
 
-import { makeWriteQueue, parseBridgeArgs, readJson, requireKnownPersona, usage } from './bridge-io.mjs';
+import { makeWriteQueue, oneLine, parseBridgeArgs, readJson, requireKnownPersona, usage }
+  from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
+const { briefingEntries } = await importFromSrc('decisions.mjs');
 const { DEFAULT_PERSONAS, laneAgentOf } = await importFromSrc('personas.mjs');
 
 
@@ -49,8 +51,38 @@ if (!values.briefing || !values.round2.length || !values.outdir) {
 }
 
 const briefing = readJson(values.briefing, 'repair');
-const titleById = new Map(briefing.findings.map((f) => [f.id, f.title]));
-const reporterById = new Map(briefing.findings.map((f) => [f.id, f.reporter]));
+
+// The third hand-written index over `briefing.findings`, and the last: the two
+// in decisions.mjs and verify.mjs go through `briefingEntries`, and this one
+// took every entry with no predicate at all. Two costs, and the second is
+// worse than an unresolvable id:
+//
+// - An entry with no title made `canonical` undefined, so a correctly cited
+//   edge was reported `unresolvable id "F3"` and lost its `from` repair — the
+//   payload blamed for a field triage failed to write.
+// - A whitespace title is TRUTHY, so the reviewer's correct `edge.title` was
+//   rewritten to whitespace: the join key every downstream edge rides on,
+//   corrupted in silence, by the function that exists to repair it.
+//
+// `briefingEntries` also throws on a `findings` that is missing or is not an
+// array, which `.map` used to answer with a raw TypeError at exit 1 — and for
+// this bridge exit 1 means a payload failed its schema.
+let entries = [];
+try {
+  entries = briefingEntries(briefing);
+} catch (e) {
+  process.stderr.write(`repair: ${oneLine(values.briefing)}: ${e.message}\n`);
+  process.exit(2);
+}
+const titleById = new Map(entries.map((f) => [f.id, f.title]));
+const reporterById = new Map(entries.map((f) => [f.id, f.reporter]));
+
+// Every id this briefing STATES, usable entry or not, so an id it does carry is
+// not reported as an id it does not — the same distinction decisions.mjs makes.
+// "Unresolvable" sends the reviewer to check their citation; for an entry this
+// tool skipped, there is nothing to check it against.
+const statedIds = new Set((briefing.findings ?? [])
+  .filter((f) => f && typeof f.id === 'string' && f.id).map((f) => f.id));
 const groupIds = new Set((briefing.groups ?? []).map((g) => g.id));
 
 let repaired = 0, unresolved = 0, checked = 0;
@@ -85,7 +117,13 @@ for (const src of values.round2) {
       const canonical = titleById.get(edge.id);
       if (!canonical) {
         unresolved += 1;
-        process.stderr.write(`  ! ${payload.persona}/${key}: unresolvable id ${JSON.stringify(edge.id)} (title: ${JSON.stringify(edge.title)})\n`);
+        process.stderr.write(`  ! ${payload.persona}/${key}: unresolvable id `
+          + `${JSON.stringify(edge.id)} (title: ${JSON.stringify(edge.title)})`
+          + (statedIds.has(edge.id)
+            ? ' — this briefing states that id, on an entry with no usable title,'
+              + ' so there was nothing to repair the title against'
+            : '')
+          + '\n');
         continue;
       }
       if (edge.title !== canonical) {

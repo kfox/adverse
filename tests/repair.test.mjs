@@ -48,6 +48,89 @@ test('a paraphrased title is repaired to the briefing\'s canonical string', () =
   }
 });
 
+test('a whitespace briefing title is not repaired INTO the round-2 edge', () => {
+  // The third hand-written index over `briefing.findings`, and the only one
+  // that WRITES: a whitespace title is truthy, so `canonical` was truthy and
+  // the reviewer's correct title was overwritten with whitespace — the join key
+  // every downstream edge rides on, corrupted in silence by the function that
+  // exists to repair it. `briefing.mjs` copies the titles, so a blank one is
+  // this tool's own output, not the payload's mistake.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{ id: 'F1', title: '   ', reporter: 'auditor' }],
+    }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward',
+      validate: [{ id: 'F1', title: 'the guard is unreachable', from: 'someone' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    // Exit 1, because the edge is unresolved and every unresolved edge sets
+    // it. That is the honest answer here: the id named an entry this tool
+    // could not use, so the title was checked against nothing.
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    const repaired = JSON.parse(
+      readFileSync(path.join(dir, 'round2-steward.repaired.json'), 'utf-8'));
+    assert.equal(repaired.validate[0].title, 'the guard is unreachable',
+      'the reviewer\'s title stands: there was nothing to repair it against');
+    assert.match(r.stderr, /this briefing states that id/, r.stderr);
+    assert.match(r.stderr, /nothing to repair the title against/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an id the briefing does not carry is still the citation to correct', () => {
+  // The control for the sentence above: an id absent from the file gets the
+  // ordinary report and none of the triage-output wording.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{ id: 'F1', title: 'a real one', reporter: 'auditor' }],
+    }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward',
+      validate: [{ id: 'F9', title: 'invented', from: 'someone' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    assert.match(r.stderr, /unresolvable id "F9"/, r.stderr);
+    assert.doesNotMatch(r.stderr, /this briefing states that id/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --briefing whose findings is not an array is exit 2, naming the file', () => {
+  // `.map` on an object is a raw TypeError at exit 1, and exit 1 means this
+  // bridge read a payload that failed its schema. The same input is a named
+  // exit-2 refusal in decisions.mjs and verify.mjs.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: { F1: 'a real one' } }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward', validate: [{ id: 'F1', title: 't', from: 'someone' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /briefing\.json/, r.stderr);
+    assert.doesNotMatch(r.stderr, /is not a function|TypeError/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an id absent from the briefing is unresolved, reported, and left untouched', () => {
   const dir = freshTmp();
   try {
