@@ -1056,7 +1056,8 @@ function renderRootCauses(rootCauses) {
       // One span for the whole identity triple: all three arrive on a group
       // citation out of briefing.json, where nothing has gated them against
       // the taxonomy the way `buildFinding` gates a finding's own pair.
-      const who = verbatim(`${c.reporter}, ${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}`);
+      const who = verbatim(`${c.reporter ?? 'no reporter'}, `
+        + `${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}`);
       lines.push(`- **${verbatim(c.id)}** (${who}) `
         + `${c.title}${loc}${against}`
 

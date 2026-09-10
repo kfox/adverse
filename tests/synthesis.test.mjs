@@ -1129,6 +1129,26 @@ test('a split group is not counted as covered by the headline', () => {
   assert.match(md, /covering 0 findings still grouped/);
 });
 
+test('both renderers say a citation names no reporter, rather than printing the absence', () => {
+  // A citation claiming nobody is what a briefing writes for a finding
+  // synthesis did not build, so it is legal and it reaches both renderers.
+  // Interpolated bare, the markdown printed the word `undefined` beside the
+  // citation id and the dashboard printed nothing at all — where the two
+  // fields beside it have said `no severity` and `unclassified` all along.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const anonymous = [{ ...g,
+    citations: [...g.citations,
+      { id: 'F9', kind: 'defect', severity: 'warning', file: 'a.py', line: 1,
+        title: 'nobody filed this' }] }];
+  const syn = synthesize(round1, rulings('one'), { rootCauseGroups: anonymous });
+
+  const md = renderMarkdown(syn);
+  assert.match(md, /`no reporter, warning·defect`/);
+  assert.doesNotMatch(md, /undefined/);
+  assert.match(renderHtml(syn), /no reporter · warning·defect/);
+});
+
 test('both renderers show a contract citation\'s counterpart', () => {
   const { round1, groups } = oneGuard();
   const syn = synthesize(round1, rulings('one'), { rootCauseGroups: groups });

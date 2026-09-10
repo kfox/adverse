@@ -320,7 +320,8 @@ function renderRootCause(rc) {
     // group decision copied from here can still match next iteration.
     const against = c.counterpart
       ? ` <span class="loc">contradicts ${esc(c.counterpart)}</span>` : '';
-    return `<li><strong>${esc(c.id)}</strong> <span class="cite-meta">${esc(c.reporter)} · `
+    return `<li><strong>${esc(c.id)}</strong> `
+      + `<span class="cite-meta">${esc(c.reporter ?? 'no reporter')} · `
       + `${esc(c.severity ?? 'no severity')}·${esc(c.kind ?? 'unclassified')}</span> ${esc(c.title)}`
       + (loc ? ` <span class="loc">${esc(loc)}</span>` : '')
       + against

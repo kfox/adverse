@@ -110,27 +110,28 @@ export const isLaneList = (value) => Array.isArray(value)
 // each caller refuses it in its own register — and never as one reviewer,
 // which is what wrapping a bare `"auditor"` in a list would have made of the
 // string this vocabulary exists to catch.
-// Whether a citation's reporter fields are lane names — BOTH of them, because
-// they are read by different things. `claimedLanes` prefers `reporters`, and
-// both renderers print the singular `reporter` verbatim beside the citation
-// id; a citation carrying a good list and a junk singular satisfied the first
-// and published `[object Object]` through the second, into report.md, the
-// dashboard and report.json alike.
-//
-// Absence is not a bad value, here as there: a citation naming no reporter is
-// what a briefing writes for a finding synthesis did not build.
-const laneOrAbsent = (value) => value === undefined || value === null
-  || typeof value === 'string';
-export const citesLaneNames = (citation) => laneOrAbsent(citation?.reporter)
-  && (citation?.reporters === undefined || citation?.reporters === null
-    || isLaneList(citation.reporters));
-
 export const claimedLanes = (citation) => {
   const claimed = citation?.reporters ?? [citation?.reporter];
   if (!Array.isArray(claimed)) return null;
   const lanes = claimed.filter((lane) => lane !== undefined && lane !== null);
   return isLaneList(lanes) ? lanes : null;
 };
+
+// Whether a citation's reporter fields are lane names — BOTH of them, because
+// they are read by different things. `claimedLanes` prefers `reporters`, and
+// both renderers print the singular `reporter` beside the citation id; a
+// citation carrying a good list and a junk singular satisfied the first and
+// published `[object Object]` through the second, into report.md, the
+// dashboard and report.json alike.
+//
+// Absence is not a bad value, here as there: a citation naming no reporter is
+// what a briefing writes for a finding synthesis did not build, and each
+// renderer says so in words rather than printing the absence.
+const laneOrAbsent = (value) => value === undefined || value === null
+  || typeof value === 'string';
+export const citesLaneNames = (citation) => laneOrAbsent(citation?.reporter)
+  && (citation?.reporters === undefined || citation?.reporters === null
+    || isLaneList(citation.reporters));
 
 // Null prototype, because `severity` is reviewer-supplied and callers test
 // membership with `severity in SEVERITY_RANK` and `SEVERITY_RANK[s]`. A plain
