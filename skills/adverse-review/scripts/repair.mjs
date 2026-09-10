@@ -137,17 +137,25 @@ for (const src of values.round2) {
   }
   requireKnownPersona(payload.persona, { prefix: 'repair', file: src, personas: DEFAULT_PERSONAS });
 
-  // Every list this payload can carry, checked the same way and in one place:
-  // an ABSENT key is none of them, anything else that is not an array is
-  // refused — `null` included, which is what a serializer writes for a field
-  // it had no value for and which `briefingEntries` refuses on the other side
-  // of this bridge —
-  // and an element that is not an object is refused. `groups` had neither
-  // check and the other two had only the first, so `{"groups": {…}}` was
-  // `object is not iterable` and `{"validate": [null]}` was
+  // Every list this bridge READS, checked the same way and in one place: an
+  // ABSENT key is none of them, anything else that is not an array is refused
+  // — `null` included, which is what a serializer writes for a field it had no
+  // value for and which `briefingEntries` refuses on the other side of this
+  // bridge — and an element that is not an object is refused. `groups` had
+  // neither check and the other two had only the first, so `{"groups": {…}}`
+  // was `object is not iterable` and `{"validate": [null]}` was
   // `Cannot read properties of null (reading 'id')` — raw stack traces from a
   // bridge whose exit 1 means "this payload failed its schema", which is what
   // it should have SAID.
+  //
+  // Reads, and not every list the round-2 schema has: `added` is required
+  // there and passes through here untouched, so nothing in this file can trip
+  // over its shape, and refusing it would be this bridge failing a payload on
+  // a ground it does not need. That is also why this is not a call to
+  // `validatePhase2`, which states these same rules for these same keys and is
+  // what `verify.mjs` does with its own schema. Repair runs BEFORE validation,
+  // on payloads that by definition may not satisfy it yet; everything it
+  // refuses has to be a shape this file would otherwise crash on.
   const listOf = (key) => {
     const list = payload[key];
     if (list === undefined) return [];

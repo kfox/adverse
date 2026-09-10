@@ -200,8 +200,14 @@ export function loadLedger(file) {
   if (raw.version !== LEDGER_VERSION) {
     throw new Error(`ledger version ${raw.version} is not ${LEDGER_VERSION}; refusing to guess at its shape`);
   }
-  raw.entries ??= [];
-  raw.iterations ??= [];
+  // Absent is empty; `null` is not absent. `??=` treated them alike, so the
+  // one spelling a serializer actually writes for a list it had no value for
+  // was the one spelling these checks could not see — and this same tree
+  // refuses it on the other side of the bridge, in `repair.mjs`, for that
+  // reason. Two readers disagreeing about the likeliest malformed shape is how
+  // the hole stays open.
+  if (raw.entries === undefined) raw.entries = [];
+  if (raw.iterations === undefined) raw.iterations = [];
   // Both lists are walked by every reader in this file, and `checkBinding` —
   // the pass that refuses a ledger this tool did not write — is called OUTSIDE
   // the try/catch that wraps this function in all three bridges. So an
@@ -270,6 +276,20 @@ export function checkBinding(ledger, resolve) {
 
   const resolveOnce = memoizeResolve(resolve);
 
+  // Every problem below names its entry by title, and the bridges re-clip the
+  // whole line at `MAX_REASON_CHARS` before printing it — so a title anywhere
+  // near that cap pushed the rest of the sentence off the end, and what got
+  // cut was the half that says what to do about it. A title here is for
+  // recognizing an entry in a file the reader has open, which does not take
+  // 500 characters. Local rather than in src/limits.mjs by that file's own
+  // test: nothing outside this function has to agree on it.
+  const MAX_PROBLEM_TITLE_CHARS = 120;
+  const named = (title) => {
+    const flat = oneLine(title);
+    return JSON.stringify(flat.length > MAX_PROBLEM_TITLE_CHARS
+      ? `${flat.slice(0, MAX_PROBLEM_TITLE_CHARS)}…` : flat);
+  };
+
   if (ledger.base && !resolveOnce(ledger.base)) {
     problems.push(`base ${oneLine(ledger.base)} is not a commit in this repository`);
   }
@@ -285,11 +305,11 @@ export function checkBinding(ledger, resolve) {
     // and it passed clean. `recordDecisions` always writes one, so an entry
     // without it did not come from this tool.
     if (!e.atCommit) {
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} carries no atCommit; every recorded decision has one`);
+      problems.push(`entry ${named(e.title)} carries no atCommit; every recorded decision has one`);
       continue;
     }
     if (!resolveOnce(e.atCommit)) {
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} is anchored at ${oneLine(e.atCommit)}, which is not a commit in this repository`);
+      problems.push(`entry ${named(e.title)} is anchored at ${oneLine(e.atCommit)}, which is not a commit in this repository`);
     }
     // Validity when present, not presence. `atCommit` above is required
     // because every entry carries one; `fixCommit` is null on every
@@ -300,14 +320,14 @@ export function checkBinding(ledger, resolve) {
     // silence: the ledger would answer "this commit closed nothing", which is
     // the derived form of `--closed-by-none`.
     if (e.fixCommit && !resolveOnce(e.fixCommit)) {
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} names fix commit ${oneLine(e.fixCommit)}, which is not a commit in this repository`);
+      problems.push(`entry ${named(e.title)} names fix commit ${oneLine(e.fixCommit)}, which is not a commit in this repository`);
     }
     if (e.disposition !== undefined && !DISPOSITIONS.includes(e.disposition)) {
       // Stringified first and bounded second, unlike the title beside it: a
       // disposition that is not a string at all is exactly what this branch
       // reports, and `String(…)` would render every such value as the same
       // `[object Object]`.
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} has disposition ${oneLine(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
+      problems.push(`entry ${named(e.title)} has disposition ${oneLine(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
     // The same evidence as the disposition above, and it was only ever caught
     // reactively: `reconciled` is a field `recordDecisions` writes and nothing
@@ -318,7 +338,7 @@ export function checkBinding(ledger, resolve) {
     // the forged value is never mentioned at all. This is the pass whose job
     // is refusing a ledger that did not come from here, so it says so here.
     if (e.reconciled !== undefined && ![true, false, null].includes(e.reconciled)) {
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} has reconciled ${oneLine(JSON.stringify(e.reconciled))}, which is not one of true, false, null; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
+      problems.push(`entry ${named(e.title)} has reconciled ${oneLine(JSON.stringify(e.reconciled))}, which is not one of true, false, null; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
     }
   }
   return problems;
@@ -808,10 +828,35 @@ function settlingMatches(decision, findings) {
 // repository's own definition of one finding — the bar at which a decision
 // SETTLES it — so two report findings reaching it are the same finding and both
 // reporter lists belong.
+// The lanes a record attributes itself to, refusing anything that is not a
+// list of them.
+//
+// Thrown, not answered, for the same reason `closureOf` throws on a commit that
+// does not resolve: every honest answer here names lanes, and there is nothing
+// to say about a `reporters` that is not a list of names. A string is why this
+// exists — `reporters: "auditor"` iterates CHARACTER BY CHARACTER, so an entry
+// carrying one answered `closureOf` with the seven lanes a, d, i, o, r, t, u,
+// which become a regression pass's exclusion list. Silently, in the one place
+// whose whole contract is that no lane is excluded without a recorded reason.
+//
+// `undefined` is the only absence: `recordDecisions` writes an array on every
+// entry, so a null here did not come from this tool either.
+function lanesOf(record, where) {
+  const lanes = record?.reporters;
+  if (lanes === undefined) return [];
+  if (!Array.isArray(lanes) || lanes.some((l) => typeof l !== 'string')) {
+    throw new TypeError(`${where} carries a reporters of ${oneLine(JSON.stringify(lanes))},`
+      + ' which is not a list of lane names');
+  }
+  return lanes;
+}
+
 function reportersOf(decision, findings) {
   const lanes = new Set();
   for (const finding of settlingMatches(decision, findings)) {
-    for (const lane of finding.reporters ?? []) lanes.add(lane);
+    for (const lane of lanesOf(finding, `finding ${JSON.stringify(oneLine(finding.title))}`)) {
+      lanes.add(lane);
+    }
   }
   return [...lanes].sort();
 }
@@ -1457,7 +1502,9 @@ export function fixCommitsIn(ledger, { iteration = null } = {}) {
 // An entry whose own `fixCommit` resolves nowhere silently fails to match and
 // would push a caller toward `closed: 0`. That is closed one layer up:
 // `checkBinding` refuses such a ledger outright, and every bridge that reads
-// one runs it first.
+// one runs it first. That is true of `fixCommit` and it was not true of
+// `reporters`, which nothing upstream inspects at all — see `lanesOf`, which
+// is where this function's guarantee about that field actually lives.
 export function closureOf(ledger, commit, resolve) {
   const resolveOnce = memoizeResolve(resolve);
 
@@ -1472,13 +1519,14 @@ export function closureOf(ledger, commit, resolve) {
 
   const fixes = (ledger.entries ?? []).filter((e) => e.disposition === 'fixed' && e.fixCommit);
   const closed = fixes.filter((e) => resolveOnce(e.fixCommit) === target);
+  const lanesFor = (e) => lanesOf(e, `entry ${JSON.stringify(oneLine(e.title))}`);
   const lanes = new Set();
-  for (const e of closed) for (const lane of e.reporters ?? []) lanes.add(lane);
+  for (const e of closed) for (const lane of lanesFor(e)) lanes.add(lane);
 
   return {
     recorded: fixes.length > 0,
     closed: closed.length,
-    unattributed: closed.filter((e) => !(e.reporters ?? []).length).length,
+    unattributed: closed.filter((e) => !lanesFor(e).length).length,
     lanes: [...lanes].sort(),
   };
 }

@@ -18,6 +18,7 @@ import {
   normalizeTitle, recordDecisions, saveLedger, scoreMatch, summarizeDispositions,
   uncoveredDecisions, unsupportedFixes,
 } from '../src/ledger.mjs';
+import { MAX_REASON_CHARS } from '../src/limits.mjs';
 
 const finding = (over = {}) => ({
   severity: 'critical', kind: 'defect', file: 'app.py', line: 20,
@@ -317,6 +318,11 @@ test('a ledger from a future version is refused, not guessed at', () => {
 
 for (const [label, json, shown] of [
   ['an entries that is not an array', '{"version":1,"entries":{}}', '{}'],
+  // The spelling `??=` swallowed: it replaced `null` before anything looked at
+  // it, so the one shape a serializer actually writes for a list it had no
+  // value for was the one shape these checks could not see.
+  ['an entries that is null', '{"version":1,"entries":null}', 'null'],
+  ['an iterations that is null', '{"version":1,"iterations":null}', 'null'],
   ['an entry that is not an object', '{"version":1,"entries":[null]}', 'null'],
   ['an iterations that is not an array', '{"version":1,"iterations":5}', '5'],
   ['an iteration that is not an object', '{"version":1,"iterations":["1"]}', '"1"'],
@@ -493,6 +499,23 @@ test('a reconciled no fold writes is named by the check that reads the ledger', 
     checkBinding({ ...emptyLedger(), entries: [{ ...entry, reconciled: false }] },
       (r) => `sha-for-${r}`),
     [], 'and a value the fold does write is not a problem');
+});
+
+test('a long title does not push a problem\'s own words off the end', () => {
+  // The bridges re-clip each problem at MAX_REASON_CHARS before printing it,
+  // so a title near that cap kept the half that names the entry and lost the
+  // half that says what to do about it — on the one problem here whose remedy
+  // is not "you are in the wrong checkout".
+  const l = { ...emptyLedger(),
+              entries: [{ title: 'T'.repeat(400), kind: 'defect', file: 'x.py', line: 1,
+                          disposition: 'noted', reason: 'r', atCommit: 'deadbeef',
+                          reconciled: 'false' }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.ok(problem.length <= MAX_REASON_CHARS, `it survives its own clip: ${problem.length}`);
+  assert.match(problem, /correct or remove that entry$/);
+  assert.match(problem, /T{40}/, 'and enough of the title to recognize the entry');
 });
 
 test('a binding problem is one bounded line, whichever bridge prints it', () => {
@@ -1470,6 +1493,40 @@ test('only a fixed decision closes a finding, whatever else names a commit', () 
   const l = ledgerWith(closed({ disposition: 'declined' }), closed({ disposition: 'noted' }));
   assert.deepEqual(closureOf(l, 'fix1', resolve),
     { recorded: false, closed: 0, unattributed: 0, lanes: [] });
+});
+
+for (const [label, reporters] of [
+  // The one that fabricates rather than crashing, and the reason this is a
+  // refusal and not a tolerant read: a string is iterable, so `"auditor"`
+  // answered with the seven lanes a, d, i, o, r, t, u — an exclusion list for
+  // a regression pass, minted out of a typo, in the one place whose contract
+  // is that no lane is excluded without a recorded reason.
+  ['a string', 'auditor'],
+  ['a number', 5],
+  // `recordDecisions` writes an array on every entry, so a null here did not
+  // come from this tool either — and reading it as "nobody" is the same
+  // fail-open one field along.
+  ['null', null],
+  ['a list holding something that is not a lane name', [{ persona: 'auditor' }]],
+]) test(`closureOf refuses a reporters that is ${label}, rather than reading it`, () => {
+  assert.throws(() => closureOf(ledgerWith(closed({ reporters })), 'fix1', resolve),
+    (e) => {
+      assert.match(e.message, /which is not a list of lane names/);
+      assert.match(e.message, /Off-by-one in the loop bound/, 'the entry is named');
+      return true;
+    });
+});
+
+test('the lanes a decision is recorded with are refused the same way', () => {
+  // Same field, same fabrication, one layer up: `reporters` on a REPORT
+  // finding is what `recordDecisions` derives an entry's lanes from, and a
+  // report is as model-written as a payload.
+  const report = { findings: [{ ...finding(), reporters: 'auditor' }] };
+
+  assert.throws(
+    () => recordDecisions(emptyLedger(), [{ ...finding(), disposition: 'declined', reason: 'r' }],
+      { atCommit: 'reviewed', report }),
+    /which is not a list of lane names/);
 });
 
 test('closureOf throws on a commit that resolves nowhere rather than answering', () => {
