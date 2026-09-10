@@ -282,10 +282,15 @@ const NOT_A_MEMBER = '(?<![\\w$])(?<!(?<!\\.)\\.)';
 // tracked name is compiled literally and `config\.out` cannot match
 // `config?.out`. That is the silent pass, arriving through the same eighteen
 // spellings the exemption was added for.
+//
+// EVERY pattern: a name with a dot in it is compiled by all three of these, and
+// teaching only the first left an owner one level in — `state.files`, spelled
+// `state?.files` — matching nothing at all. The one-level case hid it, because
+// a bare `alias` has no dot for the difference to show up in.
 const optionalDots = (pattern) => pattern.replace(/\\\./g, '\\??\\.');
-const boundary = (name) => new RegExp(
-  `${NOT_A_MEMBER}${optionalDots(quoted(name))}(?![\\w$])`);
-const memberOf = (name) => new RegExp(`${NOT_A_MEMBER}${quoted(name)}\\s*\\??\\s*[.[]`);
+const spelled = (name) => optionalDots(quoted(name));
+const boundary = (name) => new RegExp(`${NOT_A_MEMBER}${spelled(name)}(?![\\w$])`);
+const memberOf = (name) => new RegExp(`${NOT_A_MEMBER}${spelled(name)}\\s*\\??\\s*[.[]`);
 // An object used without naming one of its properties: aliased wholesale,
 // passed on, or read through a bracket, which is the same thing here because
 // `withoutStrings` empties the key before this sees it. Binding an object
@@ -297,7 +302,7 @@ const memberOf = (name) => new RegExp(`${NOT_A_MEMBER}${quoted(name)}\\s*\\??\\s
 // `.` alike, because `config?.out` names `out` exactly as `config.out` does
 // and the scanned bridges spell it that way eighteen times.
 const wholesale = (name) => new RegExp(
-  `${NOT_A_MEMBER}${quoted(name)}(?!\\s*\\??\\.\\s*[A-Za-z_$])(?![\\w$])`);
+  `${NOT_A_MEMBER}${spelled(name)}(?!\\s*\\??\\.\\s*[A-Za-z_$])(?![\\w$])`);
 
 // Every object a tracked name reads a property of: `state.files.out` is handed
 // on by `state.files` as much as by `state`, and either alias reaches the
@@ -1036,6 +1041,12 @@ for (const [label, src, dest] of [
   // and a two-level config object is passed around by exactly that name.
   ['an alias of an object one level inside the tainted path',
     'state.files.out = values.out;\nconst f = state.files;\n'
+    + 'writeFileSync(f.out, body);', 'f.out'],
+  // And the same alias spelled optionally. Only a name with a dot in it can
+  // show the difference, which is why the one-level fixtures above stayed
+  // green while this shape was a silent pass.
+  ['an alias of an inner object reached through an optional chain',
+    'state.files.out = values.out;\nconst f = state?.files;\n'
     + 'writeFileSync(f.out, body);', 'f.out'],
   // And the fallback, on a literal this cannot read pair by pair: a shorthand
   // property has no `:`, so which key holds the caller's path is unknown and
