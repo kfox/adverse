@@ -667,6 +667,22 @@ test('only confirmed root causes are listed, with their citation fanout', () => 
   assert.doesNotMatch(body, /G2/);
 });
 
+for (const [label, over] of [
+  // The one that counts rather than crashing: a string is iterable, so
+  // `"auditor"` published "7 reviewers" — in the one artifact people outside
+  // the session read, which is permanent and which nobody in the session will
+  // re-read. html.mjs and synthesis.mjs throw on the same value.
+  ['a reporters that is a string', { reporters: 'auditor' }],
+  ['a reporters holding something that is not a lane name', { reporters: [7] }],
+  ['a citations that is a string', { citations: 'F1' }],
+]) test(`renderComment refuses a root cause with ${label}`, () => {
+  const rc = { id: 'G1', title: 'one unreset counter', status: 'confirmed', blocking: true,
+               citations: [{ id: 'F1' }], reporters: ['auditor'], ...over };
+
+  assert.throws(() => renderComment(report({ root_causes: [rc] }), { branch: BRANCH }),
+    /unusable `root_causes\[0\]\.(reporters|citations)`/);
+});
+
 // The refusal that matters most: this is what stops a truncated or
 // hand-written report.json from publishing a run that looks more thorough than
 // it was.

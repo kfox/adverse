@@ -534,6 +534,25 @@ for (const [label, over, base, keeps] of [
   assert.match(problem, /[A-Z]{40}/, 'and enough of the long field to recognize it');
 });
 
+test('a title of quote characters is bounded after escaping, not before', () => {
+  // The budget is spent on what gets PRINTED, and escaping doubles every
+  // character it touches: bounding first and stringifying second let a title
+  // of 600 quotes come back 243 characters long — a problem of 522 against a
+  // cap of 500, cutting the remedy off the very branch this bound was added to
+  // protect. Both fields are long here because one is not enough to cross it,
+  // which is exactly why the plain-fill table above did not catch this.
+  const l = { ...emptyLedger(),
+              entries: [{ title: '"'.repeat(600), kind: 'defect', file: 'x.py', line: 1,
+                          disposition: 'noted', reason: 'r', atCommit: 'deadbeef',
+                          reconciled: 'F'.repeat(600) }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.ok(problem.length <= MAX_REASON_CHARS,
+    `it survives converge's own clip: ${problem.length}`);
+  assert.match(problem, /correct or remove that entry$/);
+});
+
 for (const [label, reporters] of [
   ['a string', 'auditor'],
   ['a number', 5],

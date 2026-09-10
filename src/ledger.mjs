@@ -41,7 +41,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import { MAX_REASON_CHARS } from './limits.mjs';
-import { ADVISORY_KINDS } from './taxonomy.mjs';
+import { ADVISORY_KINDS, isLaneList } from './taxonomy.mjs';
 import { isBlocking, isOpenBlocking } from './synthesis.mjs';
 
 refuseDirectRun(import.meta.url);
@@ -249,13 +249,6 @@ function memoizeResolve(resolve) {
   };
 }
 
-// What `recordDecisions` writes into an entry's `reporters`, and therefore the
-// only shape any reader of that field may accept. Shared because the two
-// readers fail differently and must not disagree about what they are failing
-// on: `checkBinding` reports it as one more field only this tool writes, and
-// `lanesOf` throws.
-const isLaneList = (value) => Array.isArray(value) && value.every((l) => typeof l === 'string');
-
 // Refuse a ledger this tool did not write for this tree.
 //
 // `loadLedger` checks the shape and the version, so a ledger naming another
@@ -303,7 +296,11 @@ export function checkBinding(ledger, resolve) {
     return flat.length > MAX_PROBLEM_FIELD_CHARS
       ? `${flat.slice(0, MAX_PROBLEM_FIELD_CHARS)}…` : flat;
   };
-  const named = (title) => JSON.stringify(brief(title));
+  // Stringified first and bounded second, for the reason the disposition
+  // branch below gives and one more: escaping DOUBLES every character it
+  // touches, so bounding first spent the budget twice — a title of 600 quotes
+  // came back 243 characters long and pushed the remedy off the end again.
+  const named = (title) => brief(JSON.stringify(title));
 
   if (ledger.base && !resolveOnce(ledger.base)) {
     problems.push(`base ${brief(ledger.base)} is not a commit in this repository`);
@@ -344,14 +341,6 @@ export function checkBinding(ledger, resolve) {
       // `[object Object]`.
       problems.push(`entry ${named(e.title)} has disposition ${brief(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
-    // The same evidence as the disposition above, and it was only ever caught
-    // reactively: `reconciled` is a field `recordDecisions` writes and nothing
-    // else does, so a value it never writes says this entry was edited by
-    // something that is not this tool. `cannotVouch` withholds the exemption
-    // from such an entry, which is the consequence — but only if some later
-    // decision happens to match it at SETTLING_SCORE, and if none ever does
-    // the forged value is never mentioned at all. This is the pass whose job
-    // is refusing a ledger that did not come from here, so it says so here.
     // Refused here as well as at the read, and for the reason every other
     // field on this list is: `recordDecisions` writes an array of lane names
     // on every entry, so anything else did not come from this tool. `lanesOf`
@@ -361,6 +350,14 @@ export function checkBinding(ledger, resolve) {
     if (e.reporters !== undefined && !isLaneList(e.reporters)) {
       problems.push(`entry ${named(e.title)} has reporters ${brief(JSON.stringify(e.reporters))}, which is not a list of lane names; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
     }
+    // The same evidence as the disposition above, and it was only ever caught
+    // reactively: `reconciled` is a field `recordDecisions` writes and nothing
+    // else does, so a value it never writes says this entry was edited by
+    // something that is not this tool. `cannotVouch` withholds the exemption
+    // from such an entry, which is the consequence — but only if some later
+    // decision happens to match it at SETTLING_SCORE, and if none ever does
+    // the forged value is never mentioned at all. This is the pass whose job
+    // is refusing a ledger that did not come from here, so it says so here.
     if (e.reconciled !== undefined && ![true, false, null].includes(e.reconciled)) {
       problems.push(`entry ${named(e.title)} has reconciled ${brief(JSON.stringify(e.reconciled))}, which is not one of true, false, null; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
     }

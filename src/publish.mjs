@@ -55,7 +55,7 @@ import { statSync } from 'node:fs';
 import { refuseDirectRun } from './entryGuard.mjs';
 import { flatten, verbatim } from './markdown.mjs';
 import { probeState } from './probe.mjs';
-import { ADVISORY_KINDS } from './taxonomy.mjs';
+import { ADVISORY_KINDS, isLaneList } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -579,6 +579,22 @@ export function renderComment(report, { branch, head = null, base = null, iterat
       ? (!value || typeof value !== 'object' || Array.isArray(value))
       : !Array.isArray(value);
     if (wrong) throw new Error(`venue: this report.json has an unusable \`${k}\``);
+  }
+
+  // A root cause's own lists, for the reason the top-level ones are checked and
+  // one more: this renderer COUNTS them, and a string counts. `"auditor"`
+  // published "7 reviewers" — in the one artifact people outside the session
+  // read, which is permanent and which nobody in the session will re-read.
+  // html.mjs and synthesis.mjs throw on that same value; this was the reader
+  // that answered.
+  for (const [i, rc] of report.root_causes.entries()) {
+    if (!rc || typeof rc !== 'object' || Array.isArray(rc)) continue;
+    if (rc.citations !== undefined && !Array.isArray(rc.citations)) {
+      throw new Error(`venue: this report.json has an unusable \`root_causes[${i}].citations\``);
+    }
+    if (rc.reporters !== undefined && !isLaneList(rc.reporters)) {
+      throw new Error(`venue: this report.json has an unusable \`root_causes[${i}].reporters\``);
+    }
   }
 
   const findings = report.findings.filter((f) => f && typeof f === 'object');

@@ -81,6 +81,18 @@ export function assertCoversConfidences(map, where) {
 // from a string literal of its own.
 export const PROVENANCE = Object.freeze({ review: 'review', regression: 'regression' });
 
+// What a `reporters` field is allowed to hold, wherever one is read: a list of
+// lane names. Here rather than in either reader by this file's own test — it is
+// the shape of a field the ledger, the synthesizer, the HTML renderer and the
+// PR comment all read, and none of them owns it.
+//
+// A string is the reason it exists. `"auditor"` is iterable, so
+// `(rc.reporters ?? []).length` published "7 reviewers" and an entry carrying
+// one answered `closureOf` with the lanes a, d, i, o, r, t, u. Every reader
+// refuses it now, each in its own register.
+export const isLaneList = (value) => Array.isArray(value)
+  && value.every((lane) => typeof lane === 'string');
+
 // Null prototype, because `severity` is reviewer-supplied and callers test
 // membership with `severity in SEVERITY_RANK` and `SEVERITY_RANK[s]`. A plain
 // object answers `constructor`, `toString`, `valueOf` and nine more with
