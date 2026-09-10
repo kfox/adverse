@@ -501,21 +501,62 @@ test('a reconciled no fold writes is named by the check that reads the ledger', 
     [], 'and a value the fold does write is not a problem');
 });
 
-test('a long title does not push a problem\'s own words off the end', () => {
-  // The bridges re-clip each problem at MAX_REASON_CHARS before printing it,
-  // so a title near that cap kept the half that names the entry and lost the
-  // half that says what to do about it — on the one problem here whose remedy
-  // is not "you are in the wrong checkout".
+// Every value one of these problems interpolates comes off the ledger file the
+// problem is about, so any of them can be as long as its writer likes. converge
+// re-clips the finished sentence at MAX_REASON_CHARS, which cuts the words
+// AFTER the long field — the remedy, or what the ref was wrong about — and
+// triage and regression print it raw, where the same field buries the sentence
+// instead. Bounding the title alone fixed the one field that was measured.
+for (const [label, over, base, keeps] of [
+  ['title', { title: 'T'.repeat(600), reconciled: 'false' }, null,
+   /correct or remove that entry$/],
+  ['reconciled', { reconciled: 'F'.repeat(600) }, null,
+   /correct or remove that entry$/],
+  ['disposition', { disposition: 'D'.repeat(600) }, null,
+   /which is not one of fixed, declined, deferred, noted$/],
+  ['reporters', { reporters: 'R'.repeat(600) }, null,
+   /correct or remove that entry$/],
+  ['atCommit', { atCommit: 'A'.repeat(600) }, null,
+   /which is not a commit in this repository$/],
+  ['fixCommit', { disposition: 'fixed', fixCommit: 'F'.repeat(600) }, null,
+   /which is not a commit in this repository$/],
+  ['base', {}, 'B'.repeat(600), /is not a commit in this repository$/],
+]) test(`an over-long ${label} does not push a problem's own words off the end`, () => {
+  const l = { ...emptyLedger(), base,
+              entries: [{ title: 't', kind: 'defect', file: 'x.py', line: 1,
+                          disposition: 'noted', reason: 'r', atCommit: 'deadbeef', ...over }] };
+
+  const [problem] = checkBinding(l, (r) => (r === 'deadbeef' ? 'sha-for-deadbeef' : null));
+
+  assert.ok(problem.length <= MAX_REASON_CHARS,
+    `it survives converge's own clip: ${problem.length}`);
+  assert.match(problem, keeps);
+  assert.match(problem, /[A-Z]{40}/, 'and enough of the long field to recognize it');
+});
+
+for (const [label, reporters] of [
+  ['a string', 'auditor'],
+  ['a number', 5],
+  ['a list holding something that is not a lane name', ['auditor', 7]],
+]) test(`a reporters that is ${label} is refused with the ledger, not at the read`, () => {
+  // `lanesOf` catches it only when someone asks about that entry's fix commit,
+  // so a forged `reporters` loaded, recorded and saved clean — and became a
+  // refusal an iteration later, if ever. It is a field only the fold writes,
+  // which is exactly what this pass is for.
   const l = { ...emptyLedger(),
-              entries: [{ title: 'T'.repeat(400), kind: 'defect', file: 'x.py', line: 1,
-                          disposition: 'noted', reason: 'r', atCommit: 'deadbeef',
-                          reconciled: 'false' }] };
+              entries: [{ title: 't', kind: 'defect', file: 'x.py', line: 1,
+                          disposition: 'noted', reason: 'r', atCommit: 'deadbeef', reporters }] };
 
   const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
 
-  assert.ok(problem.length <= MAX_REASON_CHARS, `it survives its own clip: ${problem.length}`);
+  assert.match(problem, /which is not a list of lane names/);
   assert.match(problem, /correct or remove that entry$/);
-  assert.match(problem, /T{40}/, 'and enough of the title to recognize the entry');
+  assert.deepEqual(
+    checkBinding({ ...emptyLedger(),
+                   entries: [{ title: 't', kind: 'defect', file: 'x.py', line: 1,
+                               disposition: 'noted', reason: 'r', atCommit: 'deadbeef',
+                               reporters: ['auditor'] }] }, (r) => `sha-for-${r}`),
+    [], 'and the shape the fold does write is not a problem');
 });
 
 test('a binding problem is one bounded line, whichever bridge prints it', () => {

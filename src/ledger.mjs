@@ -249,6 +249,13 @@ function memoizeResolve(resolve) {
   };
 }
 
+// What `recordDecisions` writes into an entry's `reporters`, and therefore the
+// only shape any reader of that field may accept. Shared because the two
+// readers fail differently and must not disagree about what they are failing
+// on: `checkBinding` reports it as one more field only this tool writes, and
+// `lanesOf` throws.
+const isLaneList = (value) => Array.isArray(value) && value.every((l) => typeof l === 'string');
+
 // Refuse a ledger this tool did not write for this tree.
 //
 // `loadLedger` checks the shape and the version, so a ledger naming another
@@ -276,22 +283,30 @@ export function checkBinding(ledger, resolve) {
 
   const resolveOnce = memoizeResolve(resolve);
 
-  // Every problem below names its entry by title, and the bridges re-clip the
-  // whole line at `MAX_REASON_CHARS` before printing it — so a title anywhere
-  // near that cap pushed the rest of the sentence off the end, and what got
-  // cut was the half that says what to do about it. A title here is for
-  // recognizing an entry in a file the reader has open, which does not take
-  // 500 characters. Local rather than in src/limits.mjs by that file's own
-  // test: nothing outside this function has to agree on it.
-  const MAX_PROBLEM_TITLE_CHARS = 120;
-  const named = (title) => {
-    const flat = oneLine(title);
-    return JSON.stringify(flat.length > MAX_PROBLEM_TITLE_CHARS
-      ? `${flat.slice(0, MAX_PROBLEM_TITLE_CHARS)}…` : flat);
+  // Every value a problem below interpolates comes off the same JSON file the
+  // problem is about, so any of them can be 500 characters of the writer's
+  // choosing — and `oneLine` alone bounds each at the width of the whole line.
+  // converge re-clips the finished sentence at `MAX_REASON_CHARS`, so one long
+  // field there cuts the words after it: the remedy, or the "which is not a
+  // commit in this repository" that says what the ref was wrong about. triage
+  // and regression print it raw, where the same field buries the sentence
+  // instead. Bounding the FIELDS is what fixes both, and it is every field
+  // rather than the title alone: `reconciled`, `base`, `atCommit` and
+  // `fixCommit` each reached the cap on their own.
+  //
+  // A value here is for recognizing a thing in a file the reader has open,
+  // which does not take 500 characters. Local rather than in src/limits.mjs by
+  // that file's own test: nothing outside this function has to agree on it.
+  const MAX_PROBLEM_FIELD_CHARS = 120;
+  const brief = (value) => {
+    const flat = oneLine(value);
+    return flat.length > MAX_PROBLEM_FIELD_CHARS
+      ? `${flat.slice(0, MAX_PROBLEM_FIELD_CHARS)}…` : flat;
   };
+  const named = (title) => JSON.stringify(brief(title));
 
   if (ledger.base && !resolveOnce(ledger.base)) {
-    problems.push(`base ${oneLine(ledger.base)} is not a commit in this repository`);
+    problems.push(`base ${brief(ledger.base)} is not a commit in this repository`);
   }
   for (const e of ledger.entries ?? []) {
     // The caller refuses the ledger on the first problem, so listing every one
@@ -309,7 +324,7 @@ export function checkBinding(ledger, resolve) {
       continue;
     }
     if (!resolveOnce(e.atCommit)) {
-      problems.push(`entry ${named(e.title)} is anchored at ${oneLine(e.atCommit)}, which is not a commit in this repository`);
+      problems.push(`entry ${named(e.title)} is anchored at ${brief(e.atCommit)}, which is not a commit in this repository`);
     }
     // Validity when present, not presence. `atCommit` above is required
     // because every entry carries one; `fixCommit` is null on every
@@ -320,14 +335,14 @@ export function checkBinding(ledger, resolve) {
     // silence: the ledger would answer "this commit closed nothing", which is
     // the derived form of `--closed-by-none`.
     if (e.fixCommit && !resolveOnce(e.fixCommit)) {
-      problems.push(`entry ${named(e.title)} names fix commit ${oneLine(e.fixCommit)}, which is not a commit in this repository`);
+      problems.push(`entry ${named(e.title)} names fix commit ${brief(e.fixCommit)}, which is not a commit in this repository`);
     }
     if (e.disposition !== undefined && !DISPOSITIONS.includes(e.disposition)) {
       // Stringified first and bounded second, unlike the title beside it: a
       // disposition that is not a string at all is exactly what this branch
       // reports, and `String(…)` would render every such value as the same
       // `[object Object]`.
-      problems.push(`entry ${named(e.title)} has disposition ${oneLine(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
+      problems.push(`entry ${named(e.title)} has disposition ${brief(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
     // The same evidence as the disposition above, and it was only ever caught
     // reactively: `reconciled` is a field `recordDecisions` writes and nothing
@@ -337,8 +352,17 @@ export function checkBinding(ledger, resolve) {
     // decision happens to match it at SETTLING_SCORE, and if none ever does
     // the forged value is never mentioned at all. This is the pass whose job
     // is refusing a ledger that did not come from here, so it says so here.
+    // Refused here as well as at the read, and for the reason every other
+    // field on this list is: `recordDecisions` writes an array of lane names
+    // on every entry, so anything else did not come from this tool. `lanesOf`
+    // alone caught it only when someone happened to ask about that entry's fix
+    // commit, so a forged `reporters` loaded, recorded and saved clean and
+    // became a refusal an iteration later, if ever.
+    if (e.reporters !== undefined && !isLaneList(e.reporters)) {
+      problems.push(`entry ${named(e.title)} has reporters ${brief(JSON.stringify(e.reporters))}, which is not a list of lane names; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
+    }
     if (e.reconciled !== undefined && ![true, false, null].includes(e.reconciled)) {
-      problems.push(`entry ${named(e.title)} has reconciled ${oneLine(JSON.stringify(e.reconciled))}, which is not one of true, false, null; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
+      problems.push(`entry ${named(e.title)} has reconciled ${brief(JSON.stringify(e.reconciled))}, which is not one of true, false, null; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
     }
   }
   return problems;
@@ -794,6 +818,29 @@ function requireDecision(d, i) {
   return d;
 }
 
+// The lanes a record attributes itself to, refusing anything that is not a
+// list of them.
+//
+// Thrown, not answered, for the same reason `closureOf` throws on a commit that
+// does not resolve: every honest answer here names lanes, and there is nothing
+// to say about a `reporters` that is not a list of names. A string is why this
+// exists — `reporters: "auditor"` iterates CHARACTER BY CHARACTER, so an entry
+// carrying one answered `closureOf` with the seven lanes a, d, i, o, r, t, u,
+// which become a regression pass's exclusion list. Silently, in the one place
+// whose whole contract is that no lane is excluded without a recorded reason.
+//
+// `undefined` is the only absence: `recordDecisions` writes an array on every
+// entry, so a null here did not come from this tool either.
+function lanesOf(record, where) {
+  const lanes = record?.reporters;
+  if (lanes === undefined) return [];
+  if (!isLaneList(lanes)) {
+    throw new TypeError(`${where} carries a reporters of ${oneLine(JSON.stringify(lanes))},`
+      + ' which is not a list of lane names');
+  }
+  return lanes;
+}
+
 // The report findings a decision matches strongly enough to settle.
 //
 // Lifted out of `reportersOf`, which computed exactly this list and then kept
@@ -828,29 +875,6 @@ function settlingMatches(decision, findings) {
 // repository's own definition of one finding — the bar at which a decision
 // SETTLES it — so two report findings reaching it are the same finding and both
 // reporter lists belong.
-// The lanes a record attributes itself to, refusing anything that is not a
-// list of them.
-//
-// Thrown, not answered, for the same reason `closureOf` throws on a commit that
-// does not resolve: every honest answer here names lanes, and there is nothing
-// to say about a `reporters` that is not a list of names. A string is why this
-// exists — `reporters: "auditor"` iterates CHARACTER BY CHARACTER, so an entry
-// carrying one answered `closureOf` with the seven lanes a, d, i, o, r, t, u,
-// which become a regression pass's exclusion list. Silently, in the one place
-// whose whole contract is that no lane is excluded without a recorded reason.
-//
-// `undefined` is the only absence: `recordDecisions` writes an array on every
-// entry, so a null here did not come from this tool either.
-function lanesOf(record, where) {
-  const lanes = record?.reporters;
-  if (lanes === undefined) return [];
-  if (!Array.isArray(lanes) || lanes.some((l) => typeof l !== 'string')) {
-    throw new TypeError(`${where} carries a reporters of ${oneLine(JSON.stringify(lanes))},`
-      + ' which is not a list of lane names');
-  }
-  return lanes;
-}
-
 function reportersOf(decision, findings) {
   const lanes = new Set();
   for (const finding of settlingMatches(decision, findings)) {
