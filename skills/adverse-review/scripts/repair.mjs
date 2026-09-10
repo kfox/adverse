@@ -92,8 +92,20 @@ const reporterById = new Map(entries.map((f) => [f.id, f.reporter]));
 // empty, a malformed `groups` reports every group ruling in every payload as
 // unresolvable — which sends the reviewer to check citations that are correct,
 // and blames the payloads for the shape of the briefing.
+//
+// `null` is refused with the rest of them, and only an ABSENT key is read as
+// no groups at all. `null` is what a serializer writes for a field it had no
+// value for, so it is the likeliest spelling of the malformed list above — and
+// `briefingEntries` already refuses a `"findings": null`, so tolerating it here
+// made the two lists disagree about the one shape most likely to arrive.
+//
+// The array check fires for `groups` alone today: `briefingEntries` runs first
+// and refuses a non-array `findings` in its own sentence, so this one is the
+// guard for the list nothing upstream checks. It is written for both because
+// the next list added here gets it for free, and a predicate that is correct
+// standalone is one the caller cannot use wrongly.
 const statedIdsIn = (list, key) => {
-  if (list !== undefined && list !== null && !Array.isArray(list)) {
+  if (list !== undefined && !Array.isArray(list)) {
     process.stderr.write(`repair: ${oneLine(values.briefing)}: \`${key}\` is not an array\n`);
     process.exit(2);
   }

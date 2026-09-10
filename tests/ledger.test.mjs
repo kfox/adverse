@@ -442,6 +442,25 @@ test('a ledger naming another repository is refused, not adjudicated from', () =
   assert.deepEqual(checkBinding(l, (r) => `sha-for-${r}`), [], 'a ledger that resolves here is accepted');
 });
 
+test('a reconciled no fold writes is named by the check that reads the ledger', () => {
+  // The same evidence as a disposition outside the vocabulary, and it was
+  // caught only reactively: `cannotVouch` withholds the exemption from such an
+  // entry, but only if some later decision happens to match it — and if none
+  // ever does, the forged value is never mentioned at all. This is the pass
+  // whose job is refusing a ledger that did not come from this tool.
+  const entry = { title: 't', kind: 'defect', file: 'x.py', line: 1,
+                  disposition: 'noted', reason: 'r', atCommit: 'deadbeef' };
+  const l = { ...emptyLedger(), entries: [{ ...entry, reconciled: 'false' }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.match(problem, /has reconciled "false", which is not one of true, false, null/);
+  assert.deepEqual(
+    checkBinding({ ...emptyLedger(), entries: [{ ...entry, reconciled: false }] },
+      (r) => `sha-for-${r}`),
+    [], 'and a value the fold does write is not a problem');
+});
+
 test('a binding problem is one bounded line, whichever bridge prints it', () => {
   // Three bridges render these — converge.mjs, triage.mjs, regression.mjs —
   // each with its own `problems.map((p) => `  - ${p}\n`)`, so the bounding is
@@ -1612,6 +1631,23 @@ test('a note whose reconciled no fold wrote does not vouch on the reader\'s side
   // operator about their payloads.
   assert.match(uncovered.why, /holds a value no fold writes/);
   assert.doesNotMatch(uncovered.why, /excusing its own decision/);
+});
+
+test('a note that says no lane filed it is named as that, beside an unreadable one', () => {
+  // Where the matching notes hold both reasons for not vouching, the report
+  // gets the one that is TRUE of them. Keyed on `every`, a single unreadable
+  // note demoted the whole answer to "whether any lane had filed it cannot be
+  // read off this ledger at all" — while the note beside it said exactly that
+  // — and suppressed the accusation an operator can act on.
+  const ledger = notedLedger(false);
+  ledger.entries.push({ ...ledger.entries[0], reconciled: 'false' });
+  const later = [{ ...mintedItem, disposition: 'fixed', reason: 'bounded it',
+                   fixCommit: 'bbb2222' }];
+
+  const [uncovered] = uncoveredDecisions(later, unreportedReport, { ledger });
+
+  assert.match(uncovered.why, /a batch would be excusing its own decision with its own footnote/);
+  assert.doesNotMatch(uncovered.why, /cannot be read off this ledger/);
 });
 
 test('a note from a ledger written before the field existed still vouches', () => {

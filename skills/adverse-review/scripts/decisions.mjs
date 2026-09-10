@@ -568,10 +568,11 @@ if (misanchored.length) {
 if (unreported.length) {
   // Its own heading, never folded into the blocks above: an unbound `noted`
   // entry is not the same accusation. It records fine and settles nothing by
-  // design, and it vouches for nothing either — `cannotVouch`
-  // (src/ledger.mjs) withholds on `reconciled === false`, which is the fold
-  // saying it looked this identity up in a report and no lane had filed it. This block is
-  // built from the TITLE half of those, not all of them: cause `anchor` records
+  // design, and it vouches for nothing either — `cannotVouch` (src/ledger.mjs)
+  // withholds on `reconciled === false`, which is the fold saying it looked
+  // this identity up in a report and no lane had filed it, and on any value no
+  // fold wrote. This block is built from the TITLE half of those, not all of
+  // them: cause `anchor` records
   // `false` too, and prints under its own heading above, which carries the same
   // consequence. It is NOT the wider claim that only an identity the report
   // carried can vouch: an entry from a fold given no report records `null` and

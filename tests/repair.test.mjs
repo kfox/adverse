@@ -394,7 +394,15 @@ test('a null entry in `groups` does not take the whole phase down', () => {
   }
 });
 
-test('a `groups` that is not an array is refused, not read as no groups at all', () => {
+for (const [label, groups] of [
+  ['an object', { G1: 'one root cause' }],
+  // `null` is what a serializer writes for a field it had no value for, so it
+  // is the likeliest spelling of a malformed list — and `briefingEntries`
+  // already refuses a `"findings": null`, so tolerating it here made the two
+  // lists disagree about the one shape most likely to arrive. Only an ABSENT
+  // key is no groups at all.
+  ['null', null],
+]) test(`a \`groups\` that is ${label} is refused, not read as no groups at all`, () => {
   // Read as empty, it reports every group ruling in every payload as
   // unresolvable — which sends the reviewer to check citations that are
   // correct, and blames the payloads for the shape of the briefing.
@@ -403,7 +411,7 @@ test('a `groups` that is not an array is refused, not read as no groups at all',
     const briefing = path.join(dir, 'briefing.json');
     writeFileSync(briefing, JSON.stringify({
       findings: [{ id: 'F1', title: 'Canonical Title', reporter: 'auditor' }],
-      groups: { G1: 'one root cause' },
+      groups,
     }));
     const round2 = path.join(dir, 'round2-steward.json');
     writeFileSync(round2, JSON.stringify({

@@ -283,6 +283,17 @@ export function checkBinding(ledger, resolve) {
       // `[object Object]`.
       problems.push(`entry ${JSON.stringify(oneLine(e.title))} has disposition ${oneLine(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
+    // The same evidence as the disposition above, and it was only ever caught
+    // reactively: `reconciled` is a field `recordDecisions` writes and nothing
+    // else does, so a value it never writes says this entry was edited by
+    // something that is not this tool. `cannotVouch` withholds the exemption
+    // from such an entry, which is the consequence — but only if some later
+    // decision happens to match it at SETTLING_SCORE, and if none ever does
+    // the forged value is never mentioned at all. This is the pass whose job
+    // is refusing a ledger that did not come from here, so it says so here.
+    if (e.reconciled !== undefined && ![true, false, null].includes(e.reconciled)) {
+      problems.push(`entry ${JSON.stringify(oneLine(e.title))} has reconciled ${oneLine(JSON.stringify(e.reconciled))}, which is not one of true, false, null`);
+    }
   }
   return problems;
 }
@@ -999,8 +1010,14 @@ export function uncoveredDecisions(decisions, report, { ledger = emptyLedger() }
     const notes = notesMatching(ledger, d);
     if (notes.some((entry) => !cannotVouch(entry))) continue;
     // Every note here failed to vouch, so which sentence they earn is which
-    // reason they failed for.
-    const noteWhy = notes.every((entry) => entry.reconciled === false)
+    // reason they failed for — and where the set holds both reasons, the one
+    // that is TRUE of it wins. Keyed on `every`, a single unreadable note
+    // demoted the whole report to "whether any lane had filed it cannot be
+    // read off this ledger at all" while a note beside it said exactly that,
+    // which suppressed the actionable accusation in favor of a false
+    // sentence. That is the shape the transposition cause one file over was
+    // wrong about, polarity reversed.
+    const noteWhy = notes.some((entry) => entry.reconciled === false)
       ? MINTED_NOTE_WHY : UNREADABLE_NOTE_WHY;
     uncovered.push({
       title: clipReason(d.title ?? ''),
