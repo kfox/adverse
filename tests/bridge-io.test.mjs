@@ -334,7 +334,7 @@ function withoutStrings(text) {
 
 // The same source with every comment and every regex literal turned to spaces
 // — same length, same line breaks, so an offender's line number is still its
-// line number.
+// line number — plus the lines where a `/` could not be resolved at all.
 //
 // Every scan below reads the source as text, and three things in a .mjs file
 // look exactly like code without being it. Comments cost two silent passes in
@@ -343,25 +343,34 @@ function withoutStrings(text) {
 // `copyFileSync(tmp, /* to, atomically */ values.out)` reported nothing while
 // the same call without the comment was flagged.
 //
-// A regex literal cost a worse one, because it desynchronizes the scan rather
+// A regex literal costs a worse one, because it desynchronizes the scan rather
 // than misreading one call. `plan.mjs:85` writes `` `'${s.replace(/'/g,
 // "'\\''")}'` ``, and the `'` inside `/'/g` read as a string opener: from that
 // line to the end of the file nothing was blanked at all — 39 comment lines in
-// that one file — and both directions above went live again after it. So a
-// regex is recognized here rather than being written off as an unlikely
-// spelling, which is what the first version of this comment did.
+// that one file — and both directions above went live again after it.
 //
-// Recognized by what precedes it, which is the whole of the ambiguity: `/` is
-// division after a value — an identifier, a number, a `)`, a `]`, a string —
-// and starts a regex everywhere else. A character class is tracked, so `/[/]/`
-// does not end at its own bracketed slash, and the flags go with the literal.
-// Nothing downstream needs to know regexes exist, which is also what closes
-// `callArgs`' bracket-in-a-regex case.
-const AFTER_A_VALUE = /[\w$)\]]/;
+// `/` is division after a value and starts a regex everywhere else, and THAT
+// discrimination is a heuristic no matter how many cases it lists. Two were
+// missing and each was silent: a keyword ends in a word character, so
+// `return /'/.test(q)` read as division and desynchronized exactly as
+// plan.mjs did; and `i++ / 2` ends in `+`, so a real division started a
+// phantom regex that blanked to the end of the file.
+//
+// So the answer is not only a longer list. A regex literal cannot contain a
+// newline — that is a syntax error, not a rare spelling — so a scan that
+// reaches one was NOT reading a regex. It stops there, blanks only that line,
+// and REPORTS it. That bounds the whole class the two cases above belong to:
+// every future misreading is one loud line instead of a silently erased file.
+// The list is still worth getting right, because a report on correct code is a
+// rule nobody can keep green, and division after `++`, `--` and a decimal
+// point is correct code.
+const VALUE_BEFORE_SLASH = /(?:[\w$)\]'"`]|\+\+|--|\.)\s*$/;
+const KEYWORD_BEFORE_SLASH = /(?<![\w$])(?:return|typeof|case|delete|void|yield|await|new|do|else|in|of|instanceof|throw)\s*$/;
 
 function blankNonCode(src) {
   let out = '';
-  let prev = '';
+  const unresolved = [];
+  const lineAt = (i) => src.slice(0, i).split('\n').length;
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\'' || c === '"' || c === '`') {
@@ -375,10 +384,14 @@ function blankNonCode(src) {
           break;
         }
       }
-      prev = ')';
       continue;
     }
-    if (c === '/' && src[i + 1] === '/') {
+    // A shebang is a line comment as far as this is concerned, and its slashes
+    // are neither operators nor regex delimiters. Every bridge opens with one,
+    // so the noisy branch below reported all fifteen of them the moment it
+    // existed — which is the branch doing its job on the one input that is not
+    // JavaScript at all.
+    if ((c === '/' && src[i + 1] === '/') || (i === 0 && c === '#' && src[1] === '!')) {
       while (i < src.length && src[i] !== '\n') {
         out += ' ';
         i += 1;
@@ -397,33 +410,48 @@ function blankNonCode(src) {
       }
       continue;
     }
-    if (c === '/' && !AFTER_A_VALUE.test(prev)) {
-      out += ' ';
+    // The tail of what has been emitted, which is the code before this `/`
+    // with its comments already blanked. Bounded, because the only thing being
+    // asked is what the last token was and `instanceof` is the longest answer.
+    const before = out.slice(-24);
+    if (c === '/'
+      && (KEYWORD_BEFORE_SLASH.test(before) || !VALUE_BEFORE_SLASH.test(before))) {
+      const opened = i;
       let inClass = false;
-      for (i += 1; i < src.length; i += 1) {
+      let closed = false;
+      for (; i < src.length && src[i] !== '\n'; i += 1) {
         out += ' ';
-        if (src[i] === '\\') {
+        if (src[i] === '\\' && i > opened) {
           out += ' ';
           i += 1;
         } else if (src[i] === '[') {
           inClass = true;
         } else if (src[i] === ']') {
           inClass = false;
-        } else if (src[i] === '/' && !inClass) {
+        } else if (src[i] === '/' && i > opened && !inClass) {
+          closed = true;
           break;
         }
       }
-      while (/[a-z]/.test(src[i + 1] ?? '')) {
-        out += ' ';
-        i += 1;
+      if (closed) {
+        while (/[a-z]/.test(src[i + 1] ?? '')) {
+          out += ' ';
+          i += 1;
+        }
+      } else {
+        // A newline or the end of the file, inside what was read as a regex.
+        // No regex reaches either, so this `/` was something else — and the
+        // line it is on has just been blanked, so whatever it held is gone
+        // from every scan below. Reported, at the line, rather than left to be
+        // a hole nobody can see.
+        unresolved.push(lineAt(opened));
+        i -= 1;
       }
-      prev = ')';
       continue;
     }
     out += c;
-    if (!/\s/.test(c)) prev = c;
   }
-  return out;
+  return { code: out, unresolved };
 }
 
 // From the open paren to the paren that closes it, so a nested call in the first
@@ -515,40 +543,53 @@ function splitArgs(text) {
 //   state.out = values.out;           a property target
 //   outs[0] = values.out;             a computed-member target
 //   const dest = path.join(           a right-hand side that wraps, which
-//     values.outdir, name);           `[^;\n]*` stopped at the newline, and
-//                                     this repo wraps at 80-120 columns
+//     values.outdir, name);           this repo does at 80-120 columns
 //   const a = 1, dest = values.out;   the second declarator of a list
 //
-// THREE patterns, differing only in where the right-hand side ends, and each
-// is blind exactly where another sees. That is the design and not an accident:
-// one pattern with an unbounded right-hand side swallowed the statement after
-// any `=` that is not terminated by a `;` — every `for` header's third clause,
-// every `while ((m = re.exec(s)) !== null)` — so the binding on the next line
-// went untracked, and `triage.mjs` measurably lost two names to a `for` header
-// that way. The version before it had two independent passes that covered each
-// other here, and collapsing them into one is what removed the cover.
+// The right-hand side is the hard half, and one unbounded pattern got it wrong
+// in the direction that matters: it swallowed the statement after any `=` not
+// terminated by a `;` — every `for` header's third clause, every
+// `while ((m = re.exec(s)) !== null)` — so the binding on the NEXT line went
+// untracked. Measured on the scanned directory, `triage.mjs` lost two names to
+// one `for` header that way. Bounding it at a newline instead only moved the
+// hole: a wrapped right-hand side inside a `for` or `while` body was then
+// invisible to every pattern at once, and both halves of that are live shapes
+// here.
 //
-//   TO_LINE      stops at a newline, so a swallowed header recovers on the
-//                next line, which is where the binding after it lives.
-//   TO_STATEMENT stops at the `;`, which is the only one that reads a
-//                right-hand side wrapped over two lines.
-//   TO_CLAUSE    stops at a comma as well, which is the only one that reaches
-//                the second declarator of `const a = 1, dest = values.out;`.
-//                The other two match `a`, whose right-hand side then runs
-//                through `dest`'s — and it is the TAINTED name that went
-//                untracked there, so the failure was a silent pass and not the
-//                over-tainting an earlier version of this comment claimed.
+// So the source is CHUNKED first, on `;`, `{` and `}` — every one of them,
+// nesting ignored, which is what makes a `for` header's clauses three chunks
+// and its body's statements their own. A right-hand side is then bounded by
+// its chunk and may wrap freely inside it.
 //
-// `(?![=>])` keeps `==`, `===` and an arrow out. Nothing else needs excluding:
-// a `!=`, `<=` or `>=` cannot match, because what precedes the `=` must end a
-// name or be one of the compound operators listed.
+// Two patterns per chunk, and the pair is deliberate:
+//
+//   TO_CHUNK  the whole rest of the chunk, which is the only one that reads
+//             past a comma — a destination supplied as anything but the first
+//             argument of its own right-hand side,
+//             `path.join(tmpdir(), values.out)`. On
+//             `const a = 1, dest = values.out` it binds `a` to everything
+//             after it, so `a` is tainted by `dest`'s value — over-tainting,
+//             which costs a false offender at worst and is the direction to
+//             fail in. It also taints `i` in triage.mjs and `n` in
+//             converge.mjs today, harmlessly.
+//   TO_COMMA  stops at the next comma, which is the only one that reaches
+//             `dest` in that same declarator list — the tainted name, which
+//             the greedy pattern consumed and never bound. That was a silent
+//             pass, and it is the one the pair exists for.
+//
+// Both read a right-hand side that wraps over two lines, which is what the
+// chunking bought: neither is bounded at a newline any more, and a wrapped
+// call inside a loop body is no longer invisible to both at once.
+//
+// `(?![=>])` keeps `==`, `===` and an arrow out. A `!=`, `<=` or `>=` cannot
+// match either, because what precedes the `=` must end a name or be one of the
+// compound operators listed.
 const ASSIGNMENT_TARGET = '(?:(?:const|let|var)\\s+)?'
   + '([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*|\\[[^\\]\\n]*\\])*)'
   + '\\s*(?:\\|\\||&&|\\?\\?|\\*\\*|<<|>>>?|[-+*/%&|^])?=(?![=>])';
 const ASSIGNMENTS = [
-  new RegExp(`${ASSIGNMENT_TARGET}([^;\n]*)`, 'g'),
-  new RegExp(`${ASSIGNMENT_TARGET}([^;]*)`, 'g'),
-  new RegExp(`${ASSIGNMENT_TARGET}([^;,\n]*)`, 'g'),
+  new RegExp(`${ASSIGNMENT_TARGET}([\\s\\S]*)`, 'g'),
+  new RegExp(`${ASSIGNMENT_TARGET}([^,]*)`, 'g'),
 ];
 
 function destNames(src) {
@@ -564,8 +605,8 @@ function destNames(src) {
       if (bound) names.add(bound[1]);
     }
   }
-  const bindings = ASSIGNMENTS
-    .flatMap((pattern) => [...src.matchAll(pattern)])
+  const bindings = src.split(/[;{}]/)
+    .flatMap((chunk) => ASSIGNMENTS.flatMap((pattern) => [...chunk.matchAll(pattern)]))
     .map((m) => [m[1], m[2]]);
   for (const [name, init] of bindings) {
     if (init.trim() === 'values') objects.add(name);
@@ -588,9 +629,13 @@ function destNames(src) {
 
 function selfWrittenDestinations(source) {
   // Every scan below reads this, not `source`: see `blankNonCode`.
-  const src = blankNonCode(source);
+  const { code: src, unresolved } = blankNonCode(source);
   const { handed } = destNames(src);
-  const found = [];
+  const found = unresolved.map((line) => ({
+    line,
+    call: 'a `/` on this line could not be read as a regex or a division,'
+      + ' so the line was blanked and nothing on it was scanned',
+  }));
   for (const m of src.matchAll(CALLS)) {
     const line = src.slice(0, m.index).split('\n').length;
     const args = callArgs(src, m.index + m[0].length - 1);
@@ -704,6 +749,29 @@ for (const [label, src, dest] of [
   ['a destination bound after a division',
     'const half = values.width / 2;\n'
     + 'const dest = values.out;\nwriteFileSync(dest, half);', 'dest'],
+  // A keyword ends in a word character, so `return /'/.test(q)` read as a
+  // division — and then the quote inside the regex opened a string, which is
+  // the plan.mjs desynchronization all over again.
+  ['a destination behind a comment, after a regex following a keyword',
+    'const ok = () => { return /don\'t/.test(q); };\n'
+    + 'copyFileSync(tmp, /* to, atomically */ values.out);', 'values.out'],
+  // And the other side of the same predicate: `i++ / 2` ends in `+`, so a real
+  // division started a phantom regex that blanked to the end of the file.
+  ['a destination bound after a division following an increment',
+    'const half = i++ / 2;\n'
+    + 'const dest = values.out;\nwriteFileSync(dest, half);', 'dest'],
+  // The comma-bounded pattern stops at the first comma, so a destination
+  // supplied as anything but the FIRST argument of its own right-hand side is
+  // reachable only by the pattern that reads the whole chunk.
+  ['a destination bound past a comma in its own argument list',
+    'const dest = path.join(tmpdir(), values.out);\nwriteFileSync(dest, body);', 'dest'],
+  // A wrapped right-hand side inside a loop BODY, which is the hole that
+  // bounding the right-hand side at a newline opened: every pattern missed it
+  // at once. Both halves are shapes in the scanned directory.
+  ['a wrapped destination bound inside a while body',
+    'while ((m = re.exec(s)) !== null) {\n'
+    + '  const dest = path.join(\n    values.outdir, name);\n'
+    + '  writeFileSync(dest, body);\n}', 'dest'],
 ]) {
   test(`the rule reads ${label}`, () => {
     const calls = selfWrittenDestinations(src).map((o) => o.call);
@@ -711,8 +779,31 @@ for (const [label, src, dest] of [
       `this writes a caller-supplied destination and the rule passed it:\n${src}`);
     assert.ok(calls.some((c) => c.includes(dest)),
       `the rule flagged something other than ${dest}: ${calls.join(', ')}`);
+    // Every source above is valid JavaScript whose slashes are all resolvable,
+    // so the unresolved-slash report below is a wrong answer here even though
+    // it is an offender — and without this line a mis-read division renders as
+    // a catch, which is how two of these fixtures first passed on a rule that
+    // had stopped reading their code at all.
+    assert.ok(!calls.some((c) => c.includes('could not be read')),
+      `the rule could not read this at all: ${calls.join(', ')}`);
   });
 }
+
+// The other side of that: a `/` the rule can resolve neither way. The source is
+// deliberately not valid JavaScript, because a slash it CAN resolve is by
+// definition not this branch's case. Both halves of the answer are asserted —
+// the line is named, and the scan stopped at the newline, so the write below it
+// was still read. Blanking on to the next `/` anywhere in the file is what
+// silently erased the second one.
+test('the rule reports a slash it can read as neither a regex nor a division', () => {
+  const calls = selfWrittenDestinations(
+    'const r = (/ 2);\n'
+    + 'writeFileSync(values.out, readFileSync(\'/tmp/in\'));',
+  );
+  assert.deepEqual(calls.map((o) => o.line), [1, 2]);
+  assert.match(calls[0].call, /could not be read as a regex or a division/);
+  assert.match(calls[1].call, /values\.out/);
+});
 
 // And the other direction, because a rule that flags everything is a rule
 // nobody can keep green. Each of these is a real shape in the scanned
