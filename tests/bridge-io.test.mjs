@@ -275,8 +275,17 @@ const quoted = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // `values`. A flat `(?<![\w$.])` rejected both alike, which made the shortest
 // spelling of handing an object on invisible.
 const NOT_A_MEMBER = '(?<![\\w$])(?<!(?<!\\.)\\.)';
-const boundary = (name) => new RegExp(`${NOT_A_MEMBER}${quoted(name)}(?![\\w$])`);
-const memberOf = (name) => new RegExp(`${NOT_A_MEMBER}${quoted(name)}\\s*[.[]`);
+// `a?.b` and `a.b` are the same read, so every pattern here has to spell both.
+// Teaching the lookahead below about `?.` without teaching these two inverted
+// the fix it was part of: a FIXED property behind `?.` stopped being reported,
+// and a TAINTED one behind `?.` stopped being reported with it, because the
+// tracked name is compiled literally and `config\.out` cannot match
+// `config?.out`. That is the silent pass, arriving through the same eighteen
+// spellings the exemption was added for.
+const optionalDots = (pattern) => pattern.replace(/\\\./g, '\\??\\.');
+const boundary = (name) => new RegExp(
+  `${NOT_A_MEMBER}${optionalDots(quoted(name))}(?![\\w$])`);
+const memberOf = (name) => new RegExp(`${NOT_A_MEMBER}${quoted(name)}\\s*\\??\\s*[.[]`);
 // An object used without naming one of its properties: aliased wholesale,
 // passed on, or read through a bracket, which is the same thing here because
 // `withoutStrings` empties the key before this sees it. Binding an object
@@ -290,18 +299,28 @@ const memberOf = (name) => new RegExp(`${NOT_A_MEMBER}${quoted(name)}\\s*[.[]`);
 const wholesale = (name) => new RegExp(
   `${NOT_A_MEMBER}${quoted(name)}(?!\\s*\\??\\.\\s*[A-Za-z_$])(?![\\w$])`);
 
-// The object a tracked name reads a property of, or null if the name is not a
-// property path at all. Cutting at the first `.` is wrong twice over: a dot
-// inside a bracket belongs to the KEY, so `combined[payload.persona].out` gave
-// the owner `combined[payload` — a name nothing spells, which is a silent pass
-// on the alias this owner exists to catch, and combine.mjs writes that exact
-// shape. And a bracketed property has no dot to cut at: `withoutStrings`
-// empties the key, so `config['files-out']` is tracked as `config['']` and
-// asking for a dot found no owner at all. The owner is the leading identifier
-// whenever anything follows it.
-const ownerOf = (name) => {
-  const base = /^[A-Za-z_$][\w$]*/.exec(name);
-  return base && base[0].length < name.length ? base[0] : null;
+// Every object a tracked name reads a property of: `state.files.out` is handed
+// on by `state.files` as much as by `state`, and either alias reaches the
+// caller's path. So this is every proper prefix that ends where a property
+// access begins, and not the leading identifier alone.
+//
+// Cutting at the first `.` was wrong twice over, which is what makes the
+// bracket depth load-bearing. A dot inside a bracket belongs to the KEY, so
+// `combined[payload.persona].out` gave `combined[payload` — a name nothing
+// spells, and combine.mjs writes that exact shape. And a bracketed property
+// has no dot to cut at at all: `withoutStrings` empties the key, so
+// `config['files-out']` is tracked as `config['']`.
+const ownersOf = (name) => {
+  const owners = [];
+  let depth = 0;
+  for (let i = 0; i < name.length; i += 1) {
+    if (name[i] === ']') depth -= 1;
+    else if (depth === 0 && i > 0 && (name[i] === '.' || name[i] === '[')) {
+      owners.push(name.slice(0, i));
+    }
+    if (name[i] === '[') depth += 1;
+  }
+  return owners;
 };
 
 // Text with its string literals emptied, for asking whether an expression reads
@@ -781,9 +800,16 @@ function destNames(src, statements) {
   // and that is as true of `values` as of a literal bound below. `memberOf`
   // alone needed a `.` or a `[` after the name, so a spread of the caller's
   // own options object was a silent pass on the shortest spelling there is.
+  //
+  // This is wider than "a property is read off `values`" and deliberately so:
+  // `const n = Object.keys(values).length` taints `n`, and anything derived
+  // from `n` after it. That is the direction this file fails in — a name that
+  // cannot be a path costs a false offender someone reads once, where the
+  // spread costs a destination nobody sees — and no bridge in the scanned
+  // directory trips it today.
   const handed = (raw) => {
     const text = withoutStrings(raw);
-    const owners = new Set([...names].map(ownerOf).filter(Boolean));
+    const owners = new Set([...names].flatMap(ownersOf));
     return [...objects].some((o) => memberOf(o).test(text) || wholesale(o).test(text))
       || [...names].some((n) => boundary(n).test(text))
       || [...owners].some((o) => wholesale(o).test(text));
@@ -994,6 +1020,23 @@ for (const [label, src, dest] of [
   // after the name could not see.
   ['an object literal spreading the caller\'s options',
     'const c = { ...values };\nwriteFileSync(c.out, body);', 'c.out'],
+  // The optional-chained spellings of everything above it. A tracked name is
+  // compiled literally, so `config\\.out` could not match `config?.out` and
+  // the exemption that stops a FIXED property counting as a wholesale use
+  // stopped a TAINTED one being reported at all — through the same eighteen
+  // spellings the exemption was added for.
+  ['a tainted property read through an optional chain',
+    'const config = { out: values.out };\nwriteFileSync(config?.out, body);',
+    'config?.out'],
+  ['the caller\'s own options read through an optional chain',
+    'writeFileSync(values?.out, body);', 'values?.out'],
+  ['a name bound to a tainted property through an optional chain',
+    'const o = { a: values.out };\nconst p = o?.a;\nwriteFileSync(p, body);', 'p'],
+  // An INTERMEDIATE object: `state.files` is handed on as readily as `state`,
+  // and a two-level config object is passed around by exactly that name.
+  ['an alias of an object one level inside the tainted path',
+    'state.files.out = values.out;\nconst f = state.files;\n'
+    + 'writeFileSync(f.out, body);', 'f.out'],
   // And the fallback, on a literal this cannot read pair by pair: a shorthand
   // property has no `:`, so which key holds the caller's path is unknown and
   // the whole name is tainted rather than the one pair it could read.
