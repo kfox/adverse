@@ -274,7 +274,13 @@ const quoted = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // as the caller's own object rather than as somebody else's property named
 // `values`. A flat `(?<![\w$.])` rejected both alike, which made the shortest
 // spelling of handing an object on invisible.
-const NOT_A_MEMBER = '(?<![\\w$])(?<!(?<!\\.)\\.)';
+// Whitespace before that dot too, because the space this file now reads as
+// part of a property path on the RIGHT of a name has to be read the same way
+// on its left: `other . values.out` reads somebody else's property, and a
+// lookbehind seeing only an adjacent dot called it the caller's own object and
+// reported correct code. A spread stays reachable through it — `{ ... values }`
+// ends in a dot preceded by a dot, whichever run of spaces follows.
+const NOT_A_MEMBER = '(?<![\\w$])(?<!(?<!\\.)\\.\\s*)';
 // `a?.b` and `a.b` are the same read, so every pattern here has to spell both.
 // Teaching the lookahead below about `?.` without teaching these two inverted
 // the fix it was part of: a FIXED property behind `?.` stopped being reported,
@@ -299,6 +305,13 @@ const NOT_A_MEMBER = '(?<![\\w$])(?<!(?<!\\.)\\.)';
 // matters, so no fixture distinguishes a `memberOf` that spells `?.` from one
 // that does not. Said here rather than left as a mutation nobody could make
 // red.
+//
+// Dots only, and not the brackets beside them: a bracketed read is reported
+// through the WHOLESALE check on its owner — `state[ key ]` names no property
+// this file can see, because `withoutStrings` empties the key — so `state`
+// alone carries it, however the brackets are spaced. Whitespace inside a
+// bracket is normalized where the name is BOUND instead, which is the half a
+// fixture can tell apart.
 const optionalDots = (pattern) => pattern.replace(/\\\./g, '\\s*\\??\\.\\s*');
 const spelled = (name) => optionalDots(quoted(name));
 const boundary = (name) => new RegExp(`${NOT_A_MEMBER}${spelled(name)}(?![\\w$])`);
@@ -743,9 +756,29 @@ function splitArgs(text) {
 // `(?![=>])` keeps `==`, `===` and an arrow out. A `!=`, `<=` or `>=` cannot
 // match either, because what precedes the `=` must end a name or be one of the
 // compound operators listed.
+//
+// The target is spelled the way the three name patterns above spell one, and
+// the match is canonicalized before it becomes a name. This is the pattern
+// that PRODUCES the names, so it was the one place where a space around a dot
+// still ended the path: `state . out = values.out` bound the name `out`, which
+// `boundary` then refused to find in `writeFileSync(state.out, …)` because a
+// dot precedes it there — the write vanished, and the unspaced twin of that
+// line is a fixture below. A target wrapped before its dot is the same silence
+// on the shape an 80-column line produces, and a comment between the two is
+// the same again, because comments blank to spaces.
 const ASSIGNMENT = new RegExp('(?:(?:const|let|var)\\s+)?'
-  + '([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*|\\[[^\\]\\n]*\\])*)'
+  + '([A-Za-z_$][\\w$]*(?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*|\\s*\\[[^\\]\\n]*\\])*)'
   + '\\s*(?:\\|\\||&&|\\?\\?|\\*\\*|<<|>>>?|[-+*/%&|^])?=(?![=>])', 'g');
+
+// One spelling of a path, for names this file compiles literally. Around a
+// dot, this removes exactly the whitespace `optionalDots` puts back, so a name
+// bound from one spelling is found in every other. Around a bracket there is
+// nothing to put back — a bracketed read is found through its owner — so this
+// is the only place the two spellings are reconciled.
+const canonicalPath = (target) => target
+  .replace(/\s*\??\.\s*/g, '.')
+  .replace(/\s*\??\.?\s*\[\s*/g, '[')
+  .replace(/\s*\]/g, ']');
 
 // An object literal binds its PROPERTIES, and not the name that holds it.
 // Bounding a value at its statement makes the whole literal one value, so
@@ -801,7 +834,8 @@ function destNames(src, statements) {
     const statement = withoutStrings(raw);
     return [...statement.matchAll(ASSIGNMENT)].flatMap((m) => {
       const init = statement.slice(m.index + m[0].length);
-      return objectBindings(m[1], init) ?? [[m[1], init]];
+      const target = canonicalPath(m[1]);
+      return objectBindings(target, init) ?? [[target, init]];
     });
   });
   for (const [name, init] of bindings) {
@@ -1080,6 +1114,25 @@ for (const [label, src, dest] of [
   ['a destination whose value holds a quoted semicolon before the path',
     'const dest = path.join(\'a;b\', values.out);\n'
     + 'writeFileSync(dest, body);', 'dest'],
+  // The target of an assignment, with a space where a property path allows
+  // one. The pattern that produces the tracked names was the last place a
+  // space around a dot still ended the path, so each of these bound the name
+  // `out` — which `boundary` cannot find in `state.out`, because a dot
+  // precedes it there. The unspaced twin is the fixture six above.
+  ['a destination assigned onto a property with a space around the dot',
+    'state . out = values.out;\nwriteFileSync(state.out, body);', 'state.out'],
+  ['a destination assigned onto a property wrapped before its dot',
+    'state\n  .out = values.out;\nwriteFileSync(state.out, body);', 'state.out'],
+  // Comments blank to same-length runs of spaces, which is why this is the
+  // same shape as the two above and not a fifth one.
+  ['a destination assigned onto a property behind a comment',
+    'state /* the run */ .out = values.out;\n'
+    + 'writeFileSync(state.out, body);', 'state.out'],
+  // A bracketed property, bound with spaces and written without them. The
+  // target pattern stopped at the space, so nothing was bound at all and the
+  // object never became a name the write could be traced to.
+  ['a destination assigned onto a spaced-out bracketed property',
+    'state [ key ] = values.out;\nwriteFileSync(state[key], body);', 'state[key]'],
   // A wrapped right-hand side inside a loop BODY, which is the hole that
   // bounding the right-hand side at a newline opened: every pattern missed it
   // at once. Both halves are shapes in the scanned directory.
@@ -1200,6 +1253,13 @@ for (const [label, src] of [
   ['a block comment quoting the same shape',
     '/* was: state.out = values.out */\n'
     + 'state.out = path.join(tmpdir(), \'x\');\nwriteFileSync(state.out, body);'],
+  // The other side of reading a space as part of a property path: the same
+  // space on the LEFT of a name says the name belongs to somebody else. This
+  // is the spaced twin of the `other.values.out` fixture above, and a
+  // lookbehind that saw only an adjacent dot reported it — correct code, which
+  // is a rule nobody can keep green.
+  ['a destination off some other object, spaced, that has a `values`',
+    'const notOurs = other . values.out;\nwriteFileSync(notOurs, body);'],
   // The other direction of the regex finding: a false positive, from the same
   // desynchronization, on the same fixture as the control two above.
   ['the same comment, after a regex holding a quote',
