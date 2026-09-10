@@ -366,6 +366,47 @@ test('a refused payload leaves no half-published outdir', () => {
   }
 });
 
+for (const [label, payload, named] of [
+  ['a groups that is not an array', { persona: 'steward', groups: { G1: 'accept' } },
+   '`groups` must be an array'],
+  ['a groups that is null', { persona: 'steward', groups: null },
+   '`groups` must be an array'],
+  ['a validate that is null', { persona: 'steward', validate: null },
+   '`validate` must be an array'],
+  ['a null group ruling', { persona: 'steward', groups: [null] },
+   '`groups[0]` is not an object'],
+  ['a null edge', { persona: 'steward', validate: [null] },
+   '`validate[0]` is not an object'],
+  ['an edge that is a string', { persona: 'steward', challenge: ['F1'] },
+   '`challenge[0]` is not an object'],
+]) {
+  // Every list this payload can carry, checked the same way: `groups` had
+  // neither guard and the other two had only the array one, so `{"groups":{…}}`
+  // was `object is not iterable` and `{"validate":[null]}` was `Cannot read
+  // properties of null` — raw stack traces from a bridge whose exit 1 means
+  // "this payload failed its schema", which is what it should have said.
+  test(`${label} is named, not a stack trace`, () => {
+    const dir = freshTmp();
+    try {
+      const briefing = path.join(dir, 'briefing.json');
+      writeFileSync(briefing, JSON.stringify({
+        findings: [{ id: 'F1', title: 'Canonical Title', reporter: 'auditor' }],
+        groups: [{ id: 'G1', title: 'one root cause' }],
+      }));
+      const round2 = path.join(dir, 'round2-steward.json');
+      writeFileSync(round2, JSON.stringify(payload));
+
+      const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+      assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+      assert.ok(r.stderr.includes(named), `names the list and the index: ${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /TypeError|not iterable|at file:/, r.stderr);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('a null entry in `groups` does not take the whole phase down', () => {
   // The same `f &&` guard `findings` has, on the list that was indexed without
   // it: `[null]` is a triage output one element short of its shape, and

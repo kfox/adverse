@@ -137,13 +137,35 @@ for (const src of values.round2) {
   }
   requireKnownPersona(payload.persona, { prefix: 'repair', file: src, personas: DEFAULT_PERSONAS });
 
-  for (const key of ['validate', 'challenge']) {
-    const edges = payload[key];
-    if (edges !== undefined && !Array.isArray(edges)) {
+  // Every list this payload can carry, checked the same way and in one place:
+  // an ABSENT key is none of them, anything else that is not an array is
+  // refused — `null` included, which is what a serializer writes for a field
+  // it had no value for and which `briefingEntries` refuses on the other side
+  // of this bridge —
+  // and an element that is not an object is refused. `groups` had neither
+  // check and the other two had only the first, so `{"groups": {…}}` was
+  // `object is not iterable` and `{"validate": [null]}` was
+  // `Cannot read properties of null (reading 'id')` — raw stack traces from a
+  // bridge whose exit 1 means "this payload failed its schema", which is what
+  // it should have SAID.
+  const listOf = (key) => {
+    const list = payload[key];
+    if (list === undefined) return [];
+    if (!Array.isArray(list)) {
       process.stderr.write(`repair: ${src}: \`${key}\` must be an array\n`);
       process.exit(1);
     }
-    for (const edge of edges ?? []) {
+    for (const [i, item] of list.entries()) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        process.stderr.write(`repair: ${src}: \`${key}[${i}]\` is not an object\n`);
+        process.exit(1);
+      }
+    }
+    return list;
+  };
+
+  for (const key of ['validate', 'challenge']) {
+    for (const edge of listOf(key)) {
       checked += 1;
       const canonical = titleById.get(edge.id);
       if (!canonical) {
@@ -172,7 +194,7 @@ for (const src of values.round2) {
   // for the same reason an edge's does: a ruling on an invented group is a
   // ruling on nothing, and dropping it silently means a candidate root cause
   // that a reviewer DID rule on is reported as unruled.
-  for (const ruling of payload.groups ?? []) {
+  for (const ruling of listOf('groups')) {
     checked += 1;
     if (!groupIds.has(ruling.id)) {
       unresolved += 1;

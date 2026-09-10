@@ -356,7 +356,11 @@ test('a ledger anchored in another repository is refused', () => {
   const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
   const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /does not belong to this repository/);
+  // The lead names what this pass refuses, which is wider than a foreign tree:
+  // `checkBinding` reports fields only this tool writes holding values it never
+  // writes, too. The line under it is where THIS ledger's problem is named.
+  assert.match(r.stderr, /this ledger is not one this tool wrote for this tree/);
+  assert.match(r.stderr, /not a commit in this repository/, r.stderr);
 });
 
 test('a blocking finding nobody cross-examined holds the loop open', () => {
@@ -827,6 +831,22 @@ test('a ledger file holding null is refused by shape, not by version', () => {
   const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /not a ledger object/);
+  assert.doesNotMatch(r.stderr, /Cannot read properties/);
+});
+
+test('a ledger entry that is not an object is refused, not walked', () => {
+  // `checkBinding` runs outside the try/catch that wraps `loadLedger` here, so
+  // this was an uncaught `Cannot read properties of null` at exit 1 — the code
+  // this bridge reserves for a batch that IS in the ledger.
+  const { repo } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  writeFileSync(ledger, JSON.stringify({ version: 1, entries: [null], iterations: [] }));
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
+
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /entries\[0\]/, r.stderr);
   assert.doesNotMatch(r.stderr, /Cannot read properties/);
 });
 

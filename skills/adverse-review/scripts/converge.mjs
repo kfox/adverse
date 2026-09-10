@@ -127,7 +127,7 @@ function refuseBinding(problems, lead, tail = '') {
 // across repositories, so they are the binding.
 const bindingProblems = checkBinding(ledger, resolveHere);
 if (bindingProblems.length) {
-  refuseBinding(bindingProblems, 'this ledger does not belong to this repository:');
+  refuseBinding(bindingProblems, 'this ledger is not one this tool wrote for this tree:');
 }
 
 // --- record mode -------------------------------------------------------------

@@ -202,6 +202,24 @@ export function loadLedger(file) {
   }
   raw.entries ??= [];
   raw.iterations ??= [];
+  // Both lists are walked by every reader in this file, and `checkBinding` —
+  // the pass that refuses a ledger this tool did not write — is called OUTSIDE
+  // the try/catch that wraps this function in all three bridges. So an
+  // `entries` holding `[null]` was not a refusal but an uncaught `Cannot read
+  // properties of null`, at exit 1, which is the code converge reserves for a
+  // batch that IS in the ledger. Same shape as the object check above, one
+  // level down.
+  for (const [name, list] of [['entries', raw.entries], ['iterations', raw.iterations]]) {
+    if (!Array.isArray(list)) {
+      throw new Error(`ledger ${oneLine(file)} holds ${shapeOf(list)} for \`${name}\`, `
+        + 'not an array; refusing to guess at its shape');
+    }
+    const at = list.findIndex((e) => !e || typeof e !== 'object' || Array.isArray(e));
+    if (at >= 0) {
+      throw new Error(`ledger ${oneLine(file)} holds ${shapeOf(list[at])} at `
+        + `\`${name}[${at}]\`, not an entry; refusing to guess at its shape`);
+    }
+  }
   return raw;
 }
 
@@ -225,13 +243,21 @@ function memoizeResolve(resolve) {
   };
 }
 
-// Refuse a ledger that does not belong to this repository.
+// Refuse a ledger this tool did not write for this tree.
 //
-// `loadLedger` checks only `version`, so a ledger naming another repo entirely
-// loaded fine and its entries adjudicated findings they had never seen. Commits
-// are the one field that cannot be faked across repositories: if `base` or an
-// entry's `atCommit` does not resolve here, this ledger is not about this tree.
-// `resolve` is injected rather than imported so this module stays pure.
+// `loadLedger` checks the shape and the version, so a ledger naming another
+// repo entirely loaded fine and its entries adjudicated findings they had never
+// seen. Commits are the one field that cannot be faked across repositories: if
+// `base` or an entry's `atCommit` does not resolve here, this ledger is not
+// about this tree. `resolve` is injected rather than imported so this module
+// stays pure.
+//
+// The other half is the fields only `recordDecisions` writes — `disposition`,
+// `reconciled` — holding values it never writes, which says the same thing
+// about the WRITER rather than the tree. Both are reported here, so the
+// sentence a bridge puts above this list has to cover both: "not this
+// repository" was already false of a bad disposition before it was false of a
+// bad reconciled.
 export function checkBinding(ledger, resolve) {
   const problems = [];
 
@@ -292,7 +318,7 @@ export function checkBinding(ledger, resolve) {
     // the forged value is never mentioned at all. This is the pass whose job
     // is refusing a ledger that did not come from here, so it says so here.
     if (e.reconciled !== undefined && ![true, false, null].includes(e.reconciled)) {
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} has reconciled ${oneLine(JSON.stringify(e.reconciled))}, which is not one of true, false, null`);
+      problems.push(`entry ${JSON.stringify(oneLine(e.title))} has reconciled ${oneLine(JSON.stringify(e.reconciled))}, which is not one of true, false, null; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
     }
   }
   return problems;
@@ -932,6 +958,14 @@ const MINTED_NOTE_WHY = 'the only thing on record carrying this identity is a `n
 // because it is a different remedy: nothing here says a fold made any
 // statement about this identity, so there is nothing to tell the operator
 // about their payloads. The ledger is what they have to look at.
+//
+// Unreachable through the bridges, deliberately: `checkBinding` refuses such a
+// ledger at startup, so by the time this function runs under `converge.mjs` no
+// entry can carry an unreadable `reconciled`. It is kept because
+// `uncoveredDecisions` is exported and this file's guarantees are its own — a
+// caller that skips the binding check gets the withholding anyway, which is
+// the whole point of closing this on the reader's side as well as the
+// writer's.
 const UNREADABLE_NOTE_WHY = 'the only thing on record carrying this identity is a `noted` entry '
   + 'whose `reconciled` field holds a value no fold writes, so whether any lane had filed it '
   + 'cannot be read off this ledger at all';

@@ -159,7 +159,7 @@ if (values.ledger) {
   // it" and puts its own text in front of every reviewer.
   const problems = checkBinding(ledger, (ref) => resolveRef(repo, ref));
   if (problems.length) {
-    process.stderr.write('triage: this ledger does not belong to this repository:\n'
+    process.stderr.write('triage: this ledger is not one this tool wrote for this tree:\n'
       + problems.map((p) => `  - ${p}\n`).join(''));
     process.exit(1);
   }

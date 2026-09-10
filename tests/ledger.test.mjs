@@ -315,6 +315,34 @@ test('a ledger from a future version is refused, not guessed at', () => {
   }
 });
 
+for (const [label, json, shown] of [
+  ['an entries that is not an array', '{"version":1,"entries":{}}', '{}'],
+  ['an entry that is not an object', '{"version":1,"entries":[null]}', 'null'],
+  ['an iterations that is not an array', '{"version":1,"iterations":5}', '5'],
+  ['an iteration that is not an object', '{"version":1,"iterations":["1"]}', '"1"'],
+]) {
+  // Both lists are walked by every reader in that file, and `checkBinding` —
+  // the pass that refuses a ledger this tool did not write — is called OUTSIDE
+  // the try/catch that wraps `loadLedger` in all three bridges. So `[null]` was
+  // not a refusal but an uncaught `Cannot read properties of null`, at an exit
+  // code that means something else entirely.
+  test(`a ledger with ${label} is refused by shape`, () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-ledger-'));
+    try {
+      const file = path.join(dir, 'l.json');
+      writeFileSync(file, json, 'utf-8');
+      assert.throws(() => loadLedger(file), (e) => {
+        assert.match(e.message, /refusing to guess at its shape/);
+        assert.ok(e.message.includes(shown), `named as ${shown}: ${e.message}`);
+        assert.ok(e.message.includes(file), 'and the file is named');
+        return true;
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('a ledger file that is not an object is refused by shape, not by version', () => {
   // `null` came back as `Cannot read properties of null (reading 'version')`,
   // which names neither the file nor what is wrong with it, and the three
@@ -455,6 +483,12 @@ test('a reconciled no fold writes is named by the check that reads the ledger', 
   const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
 
   assert.match(problem, /has reconciled "false", which is not one of true, false, null/);
+  // And what to do about it. Everything else this pass reports is a ref that
+  // does not resolve, where "wrong repository" is the obvious next move; a
+  // `reconciled` outside the vocabulary is a field of the operator's own
+  // ledger, and a refusal that names it without saying so leaves a run with
+  // nothing to try but deleting the file.
+  assert.match(problem, /the fold writes that field.*correct or remove that entry/);
   assert.deepEqual(
     checkBinding({ ...emptyLedger(), entries: [{ ...entry, reconciled: false }] },
       (r) => `sha-for-${r}`),

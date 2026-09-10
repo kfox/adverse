@@ -259,7 +259,7 @@ function loadBoundLedger(ledgerPath, repo, { flag = '--ledger', refusal = 1 } = 
   }
   const problems = checkBinding(ledger, (ref) => resolveRef(repo, ref));
   if (problems.length) {
-    process.stderr.write('regression: this ledger does not belong to this repository:\n'
+    process.stderr.write('regression: this ledger is not one this tool wrote for this tree:\n'
       + problems.map((pr) => `  - ${pr}\n`).join(''));
     process.exit(refusal);
   }

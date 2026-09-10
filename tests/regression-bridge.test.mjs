@@ -161,7 +161,12 @@ test('a ledger bound to another repository is refused, not consulted', () => {
     const r = run(['--payload', path.join(dir, 'regression-adversary.json'),
                    '--outdir', dir, '--ledger', path.join(dir, 'ledger.json'), '--repo', dir]);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /does not belong to this repository/);
+    // The lead names what this pass refuses, which is wider than a foreign
+    // tree: `checkBinding` reports fields only this tool writes holding
+    // values it never writes, too. The line under it is where THIS ledger's
+    // problem is named.
+    assert.match(r.stderr, /this ledger is not one this tool wrote for this tree/);
+    assert.match(r.stderr, /not a commit in this repository/, r.stderr);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

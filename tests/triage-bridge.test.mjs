@@ -379,7 +379,11 @@ test('a ledger that does not belong to this repository is refused', () => {
                                          '--out', path.join(dir, 'b.json')],
                       { encoding: 'utf-8' });
   assert.equal(r.status, 1, 'a foreign ledger must be refused, not adjudicated from');
-  assert.match(r.stderr, /does not belong to this repository/);
+  // The lead names what this pass refuses, which is wider than a foreign tree:
+  // `checkBinding` reports fields only this tool writes holding values it never
+  // writes, too. The line under it is where THIS ledger's problem is named.
+  assert.match(r.stderr, /this ledger is not one this tool wrote for this tree/);
+  assert.match(r.stderr, /not a commit in this repository/, r.stderr);
 });
 
 test('a ledger entry with no atCommit is refused', () => {
