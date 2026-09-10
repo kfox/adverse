@@ -335,6 +335,9 @@ for (const [label, citation] of [
   // published `[object Object]` into all three artifacts.
   ['a good reporters list beside a junk reporter',
     { id: 'F1', title: 't', reporters: ['auditor'], reporter: { lane: 'auditor' } }],
+  // An absence inside the list, which is a list that got a lane wrong rather
+  // than a citation that named nobody.
+  ['a reporters holding an absence', { id: 'F1', title: 't', reporters: [null] }],
 ]) test(`a briefing citation with ${label} is refused, naming the file`, () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'adverse-cite-'));
   const briefing = path.join(dir, 'briefing.json');
@@ -346,6 +349,31 @@ for (const [label, citation] of [
 
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /`groups\[0\]\.citations\[0\]` claims a reporter that is not a lane name/);
+  assert.match(r.stderr, new RegExp(briefing.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// The shapes underneath the field. This loop is the one place that can name
+// the file a value came from, so a group or a citation that is not an object
+// belongs to it too — otherwise the run died in the report builder reading a
+// property of null, naming neither the file nor which citation.
+for (const [label, groups, expected] of [
+  ['a group that is not an object', [null], /`groups\[0\]` is not a group/],
+  ['a citations that is not a list',
+    [{ id: 'G1', title: 't', citations: 'F1' }], /`groups\[0\]\.citations` is not a list/],
+  ['a citation that is not an object',
+    [{ id: 'G1', title: 't', citations: [null] }],
+    /`groups\[0\]\.citations\[0\]` is not a citation/],
+]) test(`a briefing with ${label} is refused, naming the file`, () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-shape-'));
+  const briefing = path.join(dir, 'briefing.json');
+  writeFileSync(briefing, JSON.stringify({ base: 'main', head: HEAD, findings: [], groups }));
+
+  const r = runSynth(['--round1', round1File(dir), '--briefing', briefing,
+    '--out', path.join(dir, 'report.md')]);
+
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, expected);
   assert.match(r.stderr, new RegExp(briefing.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   rmSync(dir, { recursive: true, force: true });
 });

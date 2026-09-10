@@ -104,17 +104,26 @@ export const isLaneList = (value) => Array.isArray(value)
 // `null`, counted in the PR comment's reviewer tally and rendered as the word
 // "null" in the dashboard, which is vouching spelled by an absence.
 //
-// Absence ONLY. A reporter that is present and not a lane name is a malformed
-// file rather than an empty claim, and dropping it would put "0 reviewers" in
-// a permanent PR comment with nothing said about why. It comes back `null`, so
-// each caller refuses it in its own register — and never as one reviewer,
-// which is what wrapping a bare `"auditor"` in a list would have made of the
-// string this vocabulary exists to catch.
+// Absence ONLY, and only of the FIELD. A reporter that is present and not a
+// lane name is a malformed file rather than an empty claim, and dropping it
+// would put "0 reviewers" in a permanent PR comment with nothing said about
+// why. It comes back `null`, so each caller refuses it in its own register —
+// and never as one reviewer, which is what wrapping a bare `"auditor"` in a
+// list would have made of the string this vocabulary exists to catch.
+//
+// An absence INSIDE a list is not that absence. `[null]` is a list that was
+// written and got a lane wrong, not a citation that named nobody, and
+// filtering it away here would have said "claims nobody" for it while the
+// predicate below said "not lane names" — one file, two answers, on the shape
+// nothing in this repository writes.
 export const claimedLanes = (citation) => {
-  const claimed = citation?.reporters ?? [citation?.reporter];
-  if (!Array.isArray(claimed)) return null;
-  const lanes = claimed.filter((lane) => lane !== undefined && lane !== null);
-  return isLaneList(lanes) ? lanes : null;
+  const claimed = citation?.reporters;
+  if (claimed !== undefined && claimed !== null) {
+    return isLaneList(claimed) ? claimed : null;
+  }
+  const reporter = citation?.reporter;
+  if (reporter === undefined || reporter === null) return [];
+  return typeof reporter === 'string' ? [reporter] : null;
 };
 
 // Whether a citation's reporter fields are lane names — BOTH of them, because

@@ -92,6 +92,10 @@ for (const [label, citation, expected] of [
   ['a reporters that is an object', { reporters: { lane: 'auditor' } }, null],
   ['a reporter that is a number', { reporter: 42 }, null],
   ['a reporters holding something that is not a lane name', { reporters: ['auditor', 7] }, null],
+  // An absence inside a list is not the absence above it: `[null]` is a list
+  // that got a lane wrong, and reading it as "claims nobody" would have given
+  // one file two answers, since the predicate below calls it what it is.
+  ['a reporters holding an absence', { reporters: [null] }, null],
 ]) test(`claimedLanes reads ${label}`, () => {
   assert.deepEqual(claimedLanes(citation), expected);
 });
@@ -111,6 +115,20 @@ for (const [label, citation, expected] of [
   // The one the reading above cannot see, because it stops at `reporters`.
   ['a citation with a good list beside a junk singular',
     { reporters: ['auditor'], reporter: { lane: 'auditor' } }, false],
+  ['a citation whose list holds an absence', { reporters: [null] }, false],
 ]) test(`citesLaneNames judges ${label}`, () => {
   assert.equal(citesLaneNames(citation), expected);
+});
+
+// The two answer the same question about absence, and a reader who takes
+// either one as the definition should not be wrong about the other.
+test('the reading and the judgement agree on which citations name nobody', () => {
+  for (const citation of [
+    {}, { reporters: null }, { reporter: null }, { reporter: 'auditor' },
+    { reporters: [] }, { reporters: ['auditor'] }, { reporters: [null] },
+    { reporters: 'auditor' }, { reporter: 42 }, { reporters: ['auditor', 7] },
+  ]) {
+    assert.equal(claimedLanes(citation) !== null, citesLaneNames(citation),
+      JSON.stringify(citation));
+  }
 });

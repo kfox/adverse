@@ -370,12 +370,26 @@ async function cmdSynthesize(rest) {
   if (briefing && !Array.isArray(briefing.groups)) {
     die(`synthesize: ${values.briefing}: not a briefing.json (no \`groups\` array)`);
   }
+  // The one place that can name the file a value came from, so it walks the
+  // whole shape rather than the one field: a group or a citation that is not
+  // an object reached `buildRootCauses` instead and died there reading a
+  // property of null, naming neither the file nor which citation.
   for (const [i, group] of (briefing?.groups ?? []).entries()) {
-    for (const [j, c] of (Array.isArray(group?.citations) ? group.citations : []).entries()) {
-      if (citesLaneNames(c)) continue;
-      die(`synthesize: ${values.briefing}: \`groups[${i}].citations[${j}]\` claims a reporter`
-        + ' that is not a lane name; triage writes that field and this value is not one it'
-        + ' writes, so correct or remove that citation');
+    const bad = (where, what) =>
+      die(`synthesize: ${values.briefing}: \`groups[${i}]${where}\` ${what};`
+        + ' triage writes this file and that is not a value it writes,'
+        + ' so correct or remove it');
+    if (!group || typeof group !== 'object' || Array.isArray(group)) {
+      bad('', 'is not a group');
+    }
+    const citations = group.citations ?? [];
+    if (!Array.isArray(citations)) bad('.citations', 'is not a list');
+    for (const [j, c] of citations.entries()) {
+      if (!c || typeof c !== 'object' || Array.isArray(c)) {
+        bad(`.citations[${j}]`, 'is not a citation');
+      } else if (!citesLaneNames(c)) {
+        bad(`.citations[${j}]`, 'claims a reporter that is not a lane name');
+      }
     }
   }
 
