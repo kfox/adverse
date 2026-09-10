@@ -251,7 +251,9 @@ test('two payloads claiming one persona refuse to collide, rather than one overw
     const b = round2At(dir, 'round2-auditor-stale.json', 'auditor');
     const r = runRepair(['--briefing', briefingAt(dir), '--round2', a, '--round2', b, '--outdir', dir]);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /already written this run/);
+    assert.match(r.stderr, /already claimed this run/);
+    assert.doesNotMatch(r.stderr, /already written/,
+      'nothing has been written yet: the claim is made at queue time');
     assert.throws(() => readFileSync(path.join(dir, 'round2-auditor.repaired.json')),
       'the collision is refused before the first file is written, not after');
   } finally {

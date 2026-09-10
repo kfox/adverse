@@ -34,7 +34,14 @@ if (!values.target || !values.out) {
 // where every other one is: before any work is done, and as a usage error.
 if (values['files-out']
   && path.resolve(values['files-out']) === path.resolve(values.out)) {
-  usage(`collect: --out and --files-out name one file: ${oneLine(values.out)}\n${USAGE}`);
+  // Both spellings and the path they resolve to, because the operator typed two
+  // different strings and naming one of them shows the spelling that is not
+  // wrong. `d/both.json` alone, from `--files-out d/./both.json`, reads as a
+  // refusal of the flag that was fine.
+  usage(`collect: --out and --files-out name one file:\n`
+    + `  --out       ${oneLine(values.out)}\n`
+    + `  --files-out ${oneLine(values['files-out'])}\n`
+    + `  both resolve to ${oneLine(path.resolve(values.out))}\n${USAGE}`);
 }
 
 const target = path.resolve(values.target);

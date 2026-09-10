@@ -92,7 +92,13 @@ test('the write refuses a symlink planted after the destination was judged', () 
 
     assert.equal(code, 2, 'a write that could not happen is exit 2, not a review claim');
     assert.match(said, /ELOOP/, 'the kernel refused to resolve the link');
-    assert.match(said, /nothing was written/);
+    // Two sentences, about two different files. "Nothing was written" answered
+    // for both, so a destination the failed write had truncated and could not
+    // clear sat under a line saying nothing had been written to it.
+    assert.match(said, /this run opened nothing at that path/, said);
+    assert.match(said, /no other file was written/, said);
+    assert.doesNotMatch(said, /^\s+nothing was written$/m,
+      'the sentence about the other files must not answer for this one');
     assert.equal(readFileSync(target, 'utf-8'), '{"keep":"me"}',
       'the link target must not be written through');
     assert.equal(lstatSync(dest).isSymbolicLink(), true,
@@ -262,25 +268,57 @@ const READ_MODE = /^(['"])r\1$/;
 const boundary = (name) =>
   new RegExp(`(?<![\\w$])${name.replace(/\$/g, '\\$')}(?![\\w$])`);
 
-// From the open paren to the paren that closes it, so a nested call in the
-// first argument does not truncate the second.
+// Text with its string literals emptied, for asking whether an expression reads
+// a caller-supplied path. A tainted NAME inside a literal is not a tainted
+// value: probe.mjs builds its patch file under `'adverse-probe-patch.'`, and
+// `patch` is a tainted name, so the literal tainted `patchFile` and `patchFile`
+// then flagged probe.mjs's own mkdtemp write. `values['files-out']` survives
+// this, because the bracket is what the check reads and not the key.
+function withoutStrings(text) {
+  return text.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g, "''");
+}
+
+// From the open paren to the paren that closes it, so a nested call in the first
+// argument does not truncate the second. Quoted text is skipped, because a
+// bracket inside a string is not a bracket — `writeFileSync(values.out, '(' +
+// body)` never returns to depth 0 otherwise.
+//
+// Returns null when it cannot find the close, and the caller reports that as an
+// offender rather than skipping it. A regex literal still defeats this (`\(` in
+// `body.replace(/\(/g, '')`), and where one failure mode is silent and the other
+// noisy the answer is not "skip the call this rule exists to read".
 function callArgs(src, open) {
-  let depth = 0;
+  const depths = [];
+  let quote = null;
   for (let i = open; i < src.length; i += 1) {
-    if ('([{'.includes(src[i])) depth += 1;
-    else if (')]}'.includes(src[i])) {
-      depth -= 1;
-      if (depth === 0) return splitArgs(src.slice(open + 1, i));
+    const c = src[i];
+    if (quote) {
+      if (c === '\\') i += 1;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '\'' || c === '"' || c === '`') quote = c;
+    else if ('([{'.includes(c)) depths.push(c);
+    else if (')]}'.includes(c)) {
+      depths.pop();
+      if (!depths.length) return splitArgs(src.slice(open + 1, i));
     }
   }
-  return [];
+  return null;
 }
 
 function splitArgs(text) {
   const args = [''];
   let depth = 0;
+  let quote = null;
   for (const c of text) {
-    if ('([{'.includes(c)) depth += 1;
+    if (quote) {
+      args[args.length - 1] += c;
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '\'' || c === '"' || c === '`') quote = c;
+    else if ('([{'.includes(c)) depth += 1;
     else if (')]}'.includes(c)) depth -= 1;
     if (c === ',' && depth === 0) args.push('');
     else args[args.length - 1] += c;
@@ -292,38 +330,59 @@ function splitArgs(text) {
 // `values.out`, `const dest = values.out`, `const dir = values.outdir` and then
 // `path.join(dir, name)`. To a fixed point, because one indirection is not a
 // number anyone should have picked.
+//
+// Assignments as well as declarations. `let dest = null; dest = values.out;` is
+// a shape probe.mjs already writes for its patch file, and following only
+// declarators left it invisible — one keyword away from the hole this closes.
+// A name bound to `values` ITSELF is tracked too, since `opts.out` off
+// `const opts = values` is the same claim spelled through another object.
 function destNames(src) {
   const names = new Set();
+  const objects = new Set(['values']);
   for (const m of src.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*values\b/g)) {
     for (const part of m[1].split(',')) {
       const bound = /([A-Za-z_$][\w$]*)\s*$/.exec(part.split(':').pop() ?? '');
       if (bound) names.add(bound[1]);
     }
   }
-  const bindings = [...src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=([^;\n]*)/g)]
-    .map((m) => [m[1], m[2]]);
+  const bindings = [
+    ...src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=([^;\n]*)/g),
+    ...src.matchAll(/^\s*([A-Za-z_$][\w$]*)\s*=(?!=)([^;\n]*)/gm),
+  ].map((m) => [m[1], m[2]]);
+  for (const [name, init] of bindings) {
+    if (init.trim() === 'values') objects.add(name);
+  }
+
+  const handed = (raw) => {
+    const text = withoutStrings(raw);
+    return [...objects].some((o) => new RegExp(`\\b${o}[.[]`).test(text))
+      || [...names].some((n) => boundary(n).test(text));
+  };
   for (let pass = 0; pass <= bindings.length; pass += 1) {
     const before = names.size;
     for (const [name, init] of bindings) {
-      if (/\bvalues[.[]/.test(init) || [...names].some((n) => boundary(n).test(init))) {
-        names.add(name);
-      }
+      if (handed(init)) names.add(name);
     }
     if (names.size === before) break;
   }
-  return [...names];
+  return { names: [...names], handed };
 }
 
 function selfWrittenDestinations(src) {
-  const handed = destNames(src);
+  const { handed } = destNames(src);
   const found = [];
   for (const m of src.matchAll(CALLS)) {
+    const line = src.slice(0, m.index).split('\n').length;
     const args = callArgs(src, m.index + m[0].length - 1);
+    if (args === null) {
+      found.push({ line, call: `${m[1]}(…) — this rule could not read its arguments` });
+      continue;
+    }
     const dest = args[DESTINATION_ARG[m[1]]];
     if (dest === undefined) continue;
     if (m[1] === 'openSync' && args.slice(1).some((a) => READ_MODE.test(a))) continue;
-    if (!/\bvalues[.[]/.test(dest) && !handed.some((n) => boundary(n).test(dest))) continue;
-    found.push({ line: src.slice(0, m.index).split('\n').length, call: `${m[1]}(${dest}, …)` });
+    if (!handed(dest)) continue;
+    found.push({ line, call: `${m[1]}(${dest}, …)` });
   }
   return found;
 }
@@ -391,11 +450,44 @@ test('the queue compares destinations as paths, not as text', () => {
       `${dir}/./sub/../round1-auditor.verified.json`, 'verify-auditor-stale.json', '{}'));
 
     assert.equal(seen.code, 1, seen.said);
-    assert.match(seen.said, /already written this run/, seen.said);
+    assert.match(seen.said, /already claimed this run/, seen.said);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The queue's version of the two sentences, in the case where they disagreed
+// most: the write fails after its open, the clear fails too, and the outdir
+// holds nothing else. Measured before this: `…could not be cleared, so a partial
+// file is at that path` immediately followed by `nothing was written`, over a
+// file really sitting there at zero bytes. The commit that split those two
+// outcomes tested `writeOutput` and not the queue, which is how the queue kept
+// the old sentence.
+test('the queue does not answer for this file with a sentence about the others',
+  { skip: process.getuid?.() === 0 }, () => {
+    const dir = freshTmp();
+    try {
+      const walled = path.join(dir, 'walled');
+      mkdirSync(walled);
+      const dest = path.join(walled, 'out.json');
+      writeFileSync(dest, '{"the previous iteration":true}');
+      chmodSync(walled, 0o555);
+
+      const queue = makeWriteQueue('regression');
+      queue.queue(dest, 'round1-auditor.json', { not: 'a string' });
+      const seen = catchExit(() => queue.flush('wrote'));
+
+      assert.equal(seen.code, 2, seen.said);
+      assert.match(seen.said, /could not be cleared, so a partial file is at that path/,
+        seen.said);
+      assert.match(seen.said, /no other file was written/, seen.said);
+      assert.equal(readFileSync(dest, 'utf-8'), '',
+        'and that is what is at the path the first sentence is about');
+    } finally {
+      chmodSync(path.join(dir, 'walled'), 0o700);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
 test('an ordinary destination is still written', () => {
   // The control for the test above: the flag must not refuse the honest case.

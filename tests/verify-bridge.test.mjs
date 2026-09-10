@@ -251,7 +251,9 @@ test('two verify payloads for one persona refuse to collide', () => {
     const r = runVerify(['--verify', mk('verify-auditor.json'),
                          '--verify', mk('verify-auditor-stale.json'), '--outdir', dir]);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /already written this run/);
+    assert.match(r.stderr, /already claimed this run/);
+    assert.doesNotMatch(r.stderr, /already written/,
+      'nothing has been written yet: the claim is made at queue time');
     // Claimed at QUEUE time, so the collision is refused before the first file
     // is written rather than after the colliding payload's sibling is on disk.
     assert.throws(() => readFileSync(path.join(dir, 'round1-auditor.verified.json')));

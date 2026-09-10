@@ -221,8 +221,14 @@ function makeWriteGuard(prefix) {
     // a guard whose answer depends on how its caller spelled the directory.
     const key = path.resolve(dest);
     if (written.has(key)) {
+      // "Claimed", not "written": this runs from `queue`, and every caller of
+      // the queue flushes once after queuing everything, so at this moment
+      // nothing has been written and there is no file at that path —
+      // tests/verify-bridge.test.mjs asserts exactly that. "Already written
+      // this run" is also the signal `flush` uses for an outdir that really is
+      // partial, which is the one thing this refusal must not be confused with.
       process.stderr.write(`${prefix}: ${oneLine(src)}: refuses to overwrite ${oneLine(dest)},`
-        + ` already written this run from ${oneLine(written.get(key))}`
+        + ` already claimed this run by ${oneLine(written.get(key))}`
         + ' — two payloads claim one persona\n');
       process.exit(1);
     }
@@ -268,14 +274,14 @@ export function makeWriteQueue(prefix) {
         try {
           writeClaimed(dest, body);
         } catch (e) {
-          // "Nothing was written" is about the OTHER files — `done` being
-          // empty — and was the only thing said. A write that failed part way
-          // through the first one had already emptied its destination and left
-          // a prefix of the new body there (measured under `ulimit -f`: an
-          // EFBIG four kilobytes in), so that sentence stood over a truncated
-          // payload the next glob reads as a whole one. What this run did to
-          // THIS destination is the same question `writeOutput` answers, in the
-          // same words.
+          // Two sentences, about two different things, and the second one used
+          // to answer for both. `done` is the OTHER files, and "nothing was
+          // written" over an empty one stood above a destination the failed
+          // write had truncated and could not clear — measured under `ulimit
+          // -f`, an EFBIG four kilobytes in, and again with a 0555 directory
+          // where the clear itself fails. So this destination gets the sentence
+          // `writeOutput` gives it, in the same words, and the other files get
+          // one that says it is about them.
           process.stderr.write(`${prefix}: ${oneLine(dest)}: cannot be written`
             + ` (${oneLine(e.message)})\n`
             + `    ${destinationOutcome(e)}\n`
@@ -283,7 +289,7 @@ export function makeWriteQueue(prefix) {
               ? `    ${done.map(oneLine).join(', ')} ${done.length === 1 ? 'was' : 'were'}`
                 + ' already written,'
                 + ' so this outdir is partial: clear it or fold into a fresh one\n'
-              : '    nothing was written\n'));
+              : '    no other file was written\n'));
           process.exit(2);
         }
         done.push(dest);
