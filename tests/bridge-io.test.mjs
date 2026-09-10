@@ -359,8 +359,13 @@ function withoutStrings(text) {
 // So the answer is not only a longer list. A regex literal cannot contain a
 // newline — that is a syntax error, not a rare spelling — so a scan that
 // reaches one was NOT reading a regex. It stops there, blanks only that line,
-// and REPORTS it. That bounds the whole class the two cases above belong to:
-// every future misreading is one loud line instead of a silently erased file.
+// and REPORTS it. That bounds the damage a misreading can do to the line it is
+// on, and makes the misreadings nothing closes on that line loud. It does not
+// make all of them loud: a phantom regex that finds a second `/` further along
+// the same line closes, and blanks what is between in silence. That is the
+// residue, and it is why the discrimination is built on the last CODE token
+// rather than on a window over the blanked output — see `remember` below.
+//
 // The list is still worth getting right, because a report on correct code is a
 // rule nobody can keep green, and division after `++`, `--` and a decimal
 // point is correct code.
@@ -370,7 +375,30 @@ const KEYWORD_BEFORE_SLASH = /(?<![\w$])(?:return|typeof|case|delete|void|yield|
 function blankNonCode(src) {
   let out = '';
   const unresolved = [];
+  const boundaries = [];
   const lineAt = (i) => src.slice(0, i).split('\n').length;
+
+  // What the last code token was, which is the only question the `/` test
+  // asks. NOT a window over `out`: comments blank to same-LENGTH runs of
+  // spaces, so any comment of about two dozen characters between a value and a
+  // `/` pushed the value out of the window, and a real division read as a
+  // regex. Measured both directions on `const half = width /* the halfway
+  // point */ / 2;` — a report on correct code, which the real-bridge rule
+  // fails on — and on
+  // `const rate = count /* per second */ / elapsed; // ops/sec`, where the
+  // line comment's `//` closed the phantom and the statement's `;` was blanked
+  // in silence.
+  //
+  // So the tail is built from the characters that ARE code: a blanked comment
+  // contributes nothing to it, a run of whitespace contributes one space — so
+  // that `a in /re/` is still a keyword and not the word `ain` — and a literal
+  // contributes a quote, which the value test accepts because a literal is a
+  // value.
+  let tail = '';
+  const remember = (c) => {
+    const t = /\s/.test(c) ? (tail.endsWith(' ') ? '' : ' ') : c;
+    tail = (tail + t).slice(-24);
+  };
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\'' || c === '"' || c === '`') {
@@ -384,6 +412,7 @@ function blankNonCode(src) {
           break;
         }
       }
+      remember('\'');
       continue;
     }
     // A shebang is a line comment as far as this is concerned, and its slashes
@@ -410,12 +439,8 @@ function blankNonCode(src) {
       }
       continue;
     }
-    // The tail of what has been emitted, which is the code before this `/`
-    // with its comments already blanked. Bounded, because the only thing being
-    // asked is what the last token was and `instanceof` is the longest answer.
-    const before = out.slice(-24);
     if (c === '/'
-      && (KEYWORD_BEFORE_SLASH.test(before) || !VALUE_BEFORE_SLASH.test(before))) {
+      && (KEYWORD_BEFORE_SLASH.test(tail) || !VALUE_BEFORE_SLASH.test(tail))) {
       const opened = i;
       let inClass = false;
       let closed = false;
@@ -438,6 +463,7 @@ function blankNonCode(src) {
           out += ' ';
           i += 1;
         }
+        remember('\'');
       } else {
         // A newline or the end of the file, inside what was read as a regex.
         // No regex reaches either, so this `/` was something else — and the
@@ -449,9 +475,23 @@ function blankNonCode(src) {
       }
       continue;
     }
+    // A statement boundary, as far as anything here needs one: a `;` that is
+    // code. Recorded here and nowhere else, which is what keeps the `;` inside
+    // a string or a template out — a `;` in a literal is not a boundary, and
+    // reading one as a boundary truncated a template-literal right-hand side
+    // at its own text.
+    if (c === ';') boundaries.push(out.length);
     out += c;
+    remember(c);
   }
-  return { code: out, unresolved };
+  let from = 0;
+  const statements = [];
+  for (const at of boundaries) {
+    statements.push(out.slice(from, at));
+    from = at + 1;
+  }
+  statements.push(out.slice(from));
+  return { code: out, unresolved, statements };
 }
 
 // From the open paren to the paren that closes it, so a nested call in the first
@@ -545,54 +585,50 @@ function splitArgs(text) {
 //   const dest = path.join(           a right-hand side that wraps, which
 //     values.outdir, name);           this repo does at 80-120 columns
 //   const a = 1, dest = values.out;   the second declarator of a list
+//   const dest = `${values.outdir}`;  a template literal, which is how this
+//                                     directory usually spells a destination
 //
-// The right-hand side is the hard half, and one unbounded pattern got it wrong
-// in the direction that matters: it swallowed the statement after any `=` not
-// terminated by a `;` — every `for` header's third clause, every
-// `while ((m = re.exec(s)) !== null)` — so the binding on the NEXT line went
-// untracked. Measured on the scanned directory, `triage.mjs` lost two names to
-// one `for` header that way. Bounding it at a newline instead only moved the
-// hole: a wrapped right-hand side inside a `for` or `while` body was then
-// invisible to every pattern at once, and both halves of that are live shapes
-// here.
+// The right-hand side is the hard half, and every wrong answer here has been a
+// question about where it ENDS. One unbounded pattern swallowed the statement
+// after any `=` not terminated by a `;` — every `for` header's third clause,
+// every `while ((m = re.exec(s)) !== null)` — so the binding on the NEXT line
+// went untracked, and `triage.mjs` lost two names to one `for` header that
+// way. Bounding it at a newline instead lost a right-hand side that wraps.
+// Bounding it at a `;`, `{` or `}` in the blanked text lost every right-hand
+// side holding one of those inside a literal — a template literal truncated at
+// its own `${`, an object literal at its own brace — and that cost 25 tracked
+// names across the eight bridges with none gained, which is 25 destinations
+// this rule stopped being able to see.
 //
-// So the source is CHUNKED first, on `;`, `{` and `}` — every one of them,
-// nesting ignored, which is what makes a `for` header's clauses three chunks
-// and its body's statements their own. A right-hand side is then bounded by
-// its chunk and may wrap freely inside it.
+// So a right-hand side ends where its STATEMENT does, `blankNonCode` decides
+// what a statement is (a `;` that is code, never one inside a literal), and
+// every `=` in a statement is read with the rest of that statement as its
+// value. Nothing is bounded at a comma or a newline any more.
 //
-// Two patterns per chunk, and the pair is deliberate:
+// Reading the rest of the statement over-taints: on
+// `const a = 1, dest = values.out` it binds `a` to everything after it, so `a`
+// carries `dest`'s value. That is a false offender at worst and it is the
+// direction to fail in — the alternative, a comma-bounded right-hand side, was
+// the pattern that could not see `path.join(tmpdir(), values.out)` at all.
+// What it costs today, measured over the real bridges: `i` in triage.mjs — a
+// loop counter, from `for (let i = 0; i < reviews.length; i += 1)` — and `n`
+// in converge.mjs, from `const n = Number(rawMax)`. Both tracked, neither a
+// path, and no bridge is reported.
 //
-//   TO_CHUNK  the whole rest of the chunk, which is the only one that reads
-//             past a comma — a destination supplied as anything but the first
-//             argument of its own right-hand side,
-//             `path.join(tmpdir(), values.out)`. On
-//             `const a = 1, dest = values.out` it binds `a` to everything
-//             after it, so `a` is tainted by `dest`'s value — over-tainting,
-//             which costs a false offender at worst and is the direction to
-//             fail in. It also taints `i` in triage.mjs and `n` in
-//             converge.mjs today, harmlessly.
-//   TO_COMMA  stops at the next comma, which is the only one that reaches
-//             `dest` in that same declarator list — the tainted name, which
-//             the greedy pattern consumed and never bound. That was a silent
-//             pass, and it is the one the pair exists for.
-//
-// Both read a right-hand side that wraps over two lines, which is what the
-// chunking bought: neither is bounded at a newline any more, and a wrapped
-// call inside a loop body is no longer invisible to both at once.
+// One match per `=`, and a `g` regex with a greedy tail could not do that: it
+// consumed the statement, so only the FIRST `=` in it was ever read and the
+// two shapes above in one line — `const a = 1, dest = path.join(tmpdir(),
+// values.out);` — passed silently. The match is the target alone; the value is
+// sliced from where the match ends.
 //
 // `(?![=>])` keeps `==`, `===` and an arrow out. A `!=`, `<=` or `>=` cannot
 // match either, because what precedes the `=` must end a name or be one of the
 // compound operators listed.
-const ASSIGNMENT_TARGET = '(?:(?:const|let|var)\\s+)?'
+const ASSIGNMENT = new RegExp('(?:(?:const|let|var)\\s+)?'
   + '([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*|\\[[^\\]\\n]*\\])*)'
-  + '\\s*(?:\\|\\||&&|\\?\\?|\\*\\*|<<|>>>?|[-+*/%&|^])?=(?![=>])';
-const ASSIGNMENTS = [
-  new RegExp(`${ASSIGNMENT_TARGET}([\\s\\S]*)`, 'g'),
-  new RegExp(`${ASSIGNMENT_TARGET}([^,]*)`, 'g'),
-];
+  + '\\s*(?:\\|\\||&&|\\?\\?|\\*\\*|<<|>>>?|[-+*/%&|^])?=(?![=>])', 'g');
 
-function destNames(src) {
+function destNames(src, statements) {
   const names = new Set();
   const objects = new Set(['values']);
   for (const m of src.matchAll(/(?:const|let|var)?\s*\{([^}]*)\}\s*=\s*values\b/g)) {
@@ -605,9 +641,8 @@ function destNames(src) {
       if (bound) names.add(bound[1]);
     }
   }
-  const bindings = src.split(/[;{}]/)
-    .flatMap((chunk) => ASSIGNMENTS.flatMap((pattern) => [...chunk.matchAll(pattern)]))
-    .map((m) => [m[1], m[2]]);
+  const bindings = statements.flatMap((statement) => [...statement.matchAll(ASSIGNMENT)]
+    .map((m) => [m[1], statement.slice(m.index + m[0].length)]));
   for (const [name, init] of bindings) {
     if (init.trim() === 'values') objects.add(name);
   }
@@ -629,8 +664,8 @@ function destNames(src) {
 
 function selfWrittenDestinations(source) {
   // Every scan below reads this, not `source`: see `blankNonCode`.
-  const { code: src, unresolved } = blankNonCode(source);
-  const { handed } = destNames(src);
+  const { code: src, unresolved, statements } = blankNonCode(source);
+  const { handed } = destNames(src, statements);
   const found = unresolved.map((line) => ({
     line,
     call: 'a `/` on this line could not be read as a regex or a division,'
@@ -655,7 +690,11 @@ function selfWrittenDestinations(source) {
     if (!handed(dest)) continue;
     found.push({ line, call: `${m[1]}(${dest}, …)` });
   }
-  return found;
+  // In line order, whichever scan found them. The unresolved lines are seeded
+  // first and the calls appended, so an offender on line 3 was printed above
+  // one on line 1 — in a message whose whole purpose is to send someone to a
+  // line.
+  return found.sort((a, b) => a.line - b.line);
 }
 
 test('no bridge writes a caller-supplied destination itself', () => {
@@ -760,11 +799,34 @@ for (const [label, src, dest] of [
   ['a destination bound after a division following an increment',
     'const half = i++ / 2;\n'
     + 'const dest = values.out;\nwriteFileSync(dest, half);', 'dest'],
-  // The comma-bounded pattern stops at the first comma, so a destination
-  // supplied as anything but the FIRST argument of its own right-hand side is
-  // reachable only by the pattern that reads the whole chunk.
+  // A destination supplied as anything but the FIRST argument of its own
+  // right-hand side, which is what a right-hand side bounded at a comma could
+  // not reach.
   ['a destination bound past a comma in its own argument list',
     'const dest = path.join(tmpdir(), values.out);\nwriteFileSync(dest, body);', 'dest'],
+  // Both of those shapes in one line. A greedy right-hand side under a `g`
+  // regex consumes the statement, so only the FIRST `=` in it was ever read:
+  // `a` was bound to everything after it and `dest` — the name the write uses
+  // — was never bound at all.
+  ['a second declarator whose value is itself past a comma',
+    'const a = 1, dest = path.join(tmpdir(), values.out);\n'
+    + 'writeFileSync(dest, body);', 'dest'],
+  // A template literal, which is how this directory usually spells a
+  // destination, and an object literal. Both were reachable until a `;`, `{`
+  // or `}` in the BLANKED text became a statement boundary: `blankNonCode`
+  // preserves literals verbatim, so the boundary landed inside the value and
+  // truncated it — at `${` here, at the brace below. That cost 25 tracked
+  // names across the eight bridges, with none gained.
+  ['a destination bound to a template literal',
+    'const dest = `${values.outdir}/round2-x.json`;\n'
+    + 'writeFileSync(dest, body);', 'dest'],
+  ['a destination bound inside an object literal',
+    'const opts = { out: values.out };\nwriteFileSync(opts.out, body);', 'opts.out'],
+  // And the same boundary inside a plain string, with the caller's path after
+  // it — so truncating at the quoted `;` left a value that mentions nothing.
+  ['a destination whose value holds a quoted semicolon before the path',
+    'const dest = path.join(\'a;b\', values.out);\n'
+    + 'writeFileSync(dest, body);', 'dest'],
   // A wrapped right-hand side inside a loop BODY, which is the hole that
   // bounding the right-hand side at a newline opened: every pattern missed it
   // at once. Both halves are shapes in the scanned directory.
@@ -803,6 +865,16 @@ test('the rule reports a slash it can read as neither a regex nor a division', (
   assert.deepEqual(calls.map((o) => o.line), [1, 2]);
   assert.match(calls[0].call, /could not be read as a regex or a division/);
   assert.match(calls[1].call, /values\.out/);
+
+  // In line order whichever scan found them, which two scans and one list
+  // do not give for free: the unresolved lines seed the list and the calls are
+  // appended, so this was reported as line 2 above line 1 — in a message whose
+  // whole purpose is to send someone to a line.
+  const reversed = selfWrittenDestinations(
+    'writeFileSync(values.out, body);\n'
+    + 'const r = (/ 2);',
+  );
+  assert.deepEqual(reversed.map((o) => o.line), [1, 2]);
 });
 
 // And the other direction, because a rule that flags everything is a rule
@@ -820,6 +892,21 @@ for (const [label, src] of [
     'const notOurs = other.values.out;\nwriteFileSync(notOurs, body);'],
   ['a comparison that is not an assignment',
     'const dest = tmp;\nif (dest === values.out) return;\nwriteFileSync(dest, body);'],
+  // A comment between a value and a division. Comments blank to same-LENGTH
+  // runs of spaces, so a window over the blanked output could not see the
+  // value past one of about two dozen characters: the division read as a
+  // regex, found no closing `/` on the line, and this correct code was
+  // REPORTED — which is a rule nobody can keep green.
+  ['a division whose value is two dozen characters back',
+    'const half = width /* the halfway point, in cells */ / 2;\n'
+    + 'writeFileSync(tmp, body);'],
+  // The same window, exhausted by whitespace instead of by a comment: a
+  // continuation line indented past two dozen columns, which is what aligning
+  // an argument list does. A run of whitespace is one space in the tail for
+  // exactly this reason.
+  ['a division whose value is on the line above, indented past the window',
+    'const half = width\n'
+    + '                           / 2;\nwriteFileSync(tmp, body);'],
   // The other direction of the same finding: a comment is not code, so an
   // assignment quoted in one taints nothing. Unanchoring the assignment scan
   // is what first let it reach inside a comment at all.
