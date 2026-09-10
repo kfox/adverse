@@ -264,9 +264,13 @@ const READ_MODE = /^(['"])r\1$/;
 
 // `\b` is no use here: `$` is legal in an identifier and is a non-word
 // character, so `\b$out\b` matches nothing at all and the check passes
-// silently.
-const boundary = (name) =>
-  new RegExp(`(?<![\\w$])${name.replace(/\$/g, '\\$')}(?![\\w$])`);
+// silently. `.` is the other half, in both directions: a tracked name can be a
+// property path (`state.out`), where an unescaped dot is a wildcard, and a dot
+// BEFORE the name means it belongs to some other object — `\bvalues[.[]`
+// matched `other.values.out`, which is not a destination this run was handed.
+const quoted = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const boundary = (name) => new RegExp(`(?<![\\w$.])${quoted(name)}(?![\\w$])`);
+const memberOf = (name) => new RegExp(`(?<![\\w$.])${quoted(name)}\\s*[.[]`);
 
 // Text with its string literals emptied, for asking whether an expression reads
 // a caller-supplied path. A tainted NAME inside a literal is not a tainted
@@ -274,8 +278,45 @@ const boundary = (name) =>
 // `patch` is a tainted name, so the literal tainted `patchFile` and `patchFile`
 // then flagged probe.mjs's own mkdtemp write. `values['files-out']` survives
 // this, because the bracket is what the check reads and not the key.
+// A template literal keeps its INTERPOLATIONS, which are code and not text.
+// Emptying one wholesale was the same silent pass in the other direction, on
+// the spelling the bridges actually use: repair.mjs, verify.mjs and
+// regression.mjs each build a destination as
+// `` `${values.outdir}/round2-${agent}.json` ``, so a bare `writeFileSync` of
+// one of those — the precise regression this rule exists to catch, and the
+// shape six of seven bridges had — read as a constant.
 function withoutStrings(text) {
-  return text.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g, "''");
+  let out = '';
+  for (let i = 0; i < text.length; i += 1) {
+    const open = text[i];
+    if (open !== '\'' && open !== '"' && open !== '`') {
+      out += open;
+      continue;
+    }
+    out += "''";
+    for (i += 1; i < text.length; i += 1) {
+      if (text[i] === '\\') {
+        i += 1;
+      } else if (text[i] === open) {
+        break;
+      } else if (open === '`' && text[i] === '$' && text[i + 1] === '{') {
+        // The expression, spaced so it cannot glue itself to a neighbor. Not
+        // rescanned: a string inside it is part of the expression, and
+        // `values['files-out']` has to survive with its bracket.
+        const start = i + 2;
+        let depth = 0;
+        for (i += 1; i < text.length; i += 1) {
+          if (text[i] === '{') depth += 1;
+          else if (text[i] === '}') {
+            depth -= 1;
+            if (!depth) break;
+          }
+        }
+        out += ` ${text.slice(start, i)} `;
+      }
+    }
+  }
+  return out;
 }
 
 // From the open paren to the paren that closes it, so a nested call in the first
@@ -307,14 +348,26 @@ function callArgs(src, open) {
   return null;
 }
 
+// Escapes as well as quotes, which `callArgs` got and this did not: `'it\\'s'`
+// closed early, re-opened on the trailing quote and swallowed the comma after
+// it, so `renameSync('it\\'s.tmp', values.out)` came back as ONE argument and
+// the destination was `undefined`. That is the silent branch — an argument list
+// `callArgs` cannot read is reported, one this mis-splits was skipped — and it
+// can hide `'r'` from the read-mode exemption as well.
 function splitArgs(text) {
   const args = [''];
   let depth = 0;
   let quote = null;
-  for (const c of text) {
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
     if (quote) {
       args[args.length - 1] += c;
-      if (c === quote) quote = null;
+      if (c === '\\') {
+        args[args.length - 1] += text[i + 1] ?? '';
+        i += 1;
+      } else if (c === quote) {
+        quote = null;
+      }
       continue;
     }
     if (c === '\'' || c === '"' || c === '`') quote = c;
@@ -336,10 +389,20 @@ function splitArgs(text) {
 // declarators left it invisible — one keyword away from the hole this closes.
 // A name bound to `values` ITSELF is tracked too, since `opts.out` off
 // `const opts = values` is the same claim spelled through another object.
+//
+// Anchoring the assignment at the start of a line closed that instance and
+// left the class: `if (x) { dest = values.out; }`, `} else dest = values.out;`
+// and `f(); dest = values.out;` were all still invisible, and so was a
+// PROPERTY target — `state.out = values.out` followed by
+// `writeFileSync(state.out, body)` — which is why the tracked name may be a
+// dotted path. `(?![=>])` keeps `==`, `===` and an arrow out; a `!=` or `<=`
+// cannot match, since the character before the `=` must end an identifier.
+// Bare destructuring assignment (`({ out } = values)`) is the same claim
+// without a keyword, so the keyword is optional.
 function destNames(src) {
   const names = new Set();
   const objects = new Set(['values']);
-  for (const m of src.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*values\b/g)) {
+  for (const m of src.matchAll(/(?:const|let|var)?\s*\{([^}]*)\}\s*=\s*values\b/g)) {
     for (const part of m[1].split(',')) {
       const bound = /([A-Za-z_$][\w$]*)\s*$/.exec(part.split(':').pop() ?? '');
       if (bound) names.add(bound[1]);
@@ -347,7 +410,7 @@ function destNames(src) {
   }
   const bindings = [
     ...src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=([^;\n]*)/g),
-    ...src.matchAll(/^\s*([A-Za-z_$][\w$]*)\s*=(?!=)([^;\n]*)/gm),
+    ...src.matchAll(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*=(?![=>])([^;\n]*)/g),
   ].map((m) => [m[1], m[2]]);
   for (const [name, init] of bindings) {
     if (init.trim() === 'values') objects.add(name);
@@ -355,7 +418,7 @@ function destNames(src) {
 
   const handed = (raw) => {
     const text = withoutStrings(raw);
-    return [...objects].some((o) => new RegExp(`\\b${o}[.[]`).test(text))
+    return [...objects].some((o) => memberOf(o).test(text))
       || [...names].some((n) => boundary(n).test(text));
   };
   for (let pass = 0; pass <= bindings.length; pass += 1) {
@@ -379,7 +442,13 @@ function selfWrittenDestinations(src) {
       continue;
     }
     const dest = args[DESTINATION_ARG[m[1]]];
-    if (dest === undefined) continue;
+    if (dest === undefined) {
+      // Not a skip: this rule knows which argument is the destination, so a
+      // call that has no such argument is a call it did not understand, and
+      // the direction to fail in is the one that says so.
+      found.push({ line, call: `${m[1]}(…) — this rule found no destination argument` });
+      continue;
+    }
     if (m[1] === 'openSync' && args.slice(1).some((a) => READ_MODE.test(a))) continue;
     if (!handed(dest)) continue;
     found.push({ line, call: `${m[1]}(${dest}, …)` });
@@ -403,6 +472,67 @@ test('no bridge writes a caller-supplied destination itself', () => {
     + 'Use writeOutput, or makeWriteQueue for a bridge with more than one output:'
     + ' both carry the flags and the exit code.');
 });
+
+// The rule above asserts an empty list over the real bridges, which is exactly
+// as strong as the rule's reading and no stronger — a spelling it cannot read
+// renders identically to a bridge that does not write its own destination. So
+// each source below writes a caller-supplied destination in a spelling that
+// once passed, and the rule has to name it.
+//
+// Named, not merely counted: the third column is the destination the offender
+// must be reported as. An argument list this rule mis-parses lands on the
+// "no destination argument" branch, which is an offender too — so a count
+// alone reads a mis-parse as a catch.
+for (const [label, src, dest] of [
+  ['a template-literal destination',
+    'writeFileSync(`${values.out}`, body, \'utf-8\');', 'values.out'],
+  ['a template literal joined onto a destructured outdir',
+    'const { outdir } = values;\nwriteFileSync(`${outdir}/round2-x.json`, body);', 'outdir'],
+  ['a stream opened on a template literal',
+    'createWriteStream(`${values.out}`);', 'values.out'],
+  ['a destination after an argument holding an escaped quote',
+    'renameSync(\'it\\\'s.tmp\', values.out);', 'values.out'],
+  ['a destination assigned inside a branch',
+    'let dest = null;\nif (x) { dest = values.out; }\nwriteFileSync(dest, body);', 'dest'],
+  ['a destination assigned onto a property',
+    'state.out = values.out;\nwriteFileSync(state.out, body);', 'state.out'],
+  ['a destination read off an alias whose name starts with $',
+    'const $opts = values;\nwriteFileSync($opts.out, body, \'utf-8\');', '$opts.out'],
+  ['a destination bound by a bare destructuring assignment',
+    'let out;\n({ out } = values);\nwriteFileSync(out, body);', 'out'],
+  ['a call whose destination argument is not there at all',
+    'renameSync(tmp);', 'no destination argument'],
+]) {
+  test(`the rule reads ${label}`, () => {
+    const calls = selfWrittenDestinations(src).map((o) => o.call);
+    assert.notDeepEqual(calls, [],
+      `this writes a caller-supplied destination and the rule passed it:\n${src}`);
+    assert.ok(calls.some((c) => c.includes(dest)),
+      `the rule flagged something other than ${dest}: ${calls.join(', ')}`);
+  });
+}
+
+// And the other direction, because a rule that flags everything is a rule
+// nobody can keep green. Each of these is a real shape in the scanned
+// directory, or one line away from one.
+for (const [label, src] of [
+  // probe.mjs, verbatim in shape: `patch` is a tainted NAME, the mkdtemp prefix
+  // is a string that contains it, and `patchFile` is probe.mjs's own temporary.
+  ['a temporary named after a string that happens to contain a tainted name',
+    'const patchFile = path.join(mkdtempSync(path.join(tmpdir(),'
+    + ' \'adverse-probe-patch.\')), \'p.diff\');\n'
+    + 'writeFileSync(patchFile, patch, \'utf-8\');'],
+  ['a read of a caller-supplied path', 'openSync(values.out, \'r\');'],
+  ['a destination off some other object that happens to have a `values`',
+    'const notOurs = other.values.out;\nwriteFileSync(notOurs, body);'],
+  ['a comparison that is not an assignment',
+    'const dest = tmp;\nif (dest === values.out) return;\nwriteFileSync(dest, body);'],
+]) {
+  test(`the rule passes ${label}`, () => {
+    assert.deepEqual(selfWrittenDestinations(src), [],
+      `this writes nothing a caller supplied and the rule flagged it:\n${src}`);
+  });
+}
 
 // collect.mjs is the first bridge whose two destinations come from argv
 // independently, and it wrote the source block and then replaced it with the
@@ -488,6 +618,30 @@ test('the queue does not answer for this file with a sentence about the others',
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+test('the queue will not flush a second time', () => {
+  // `done` is per-call and `queued` was never drained, so a second flush
+  // re-wrote every file under a fresh `done` list: one that succeeded the first
+  // time and failed the second printed "no other file was written" over an
+  // outdir the first call had filled. Every caller flushes once — which was a
+  // comment standing over an exported factory, and a comment is not a guard.
+  const dir = freshTmp();
+  try {
+    const dest = path.join(dir, 'out.json');
+    const queue = makeWriteQueue('probe');
+    queue.queue(dest, 'payload.json', '{"written":true}');
+    queue.flush('wrote');
+
+    const seen = catchExit(() => queue.flush('wrote'));
+
+    assert.equal(seen.code, 2, seen.said);
+    assert.match(seen.said, /flush\(\) twice/, seen.said);
+    assert.equal(readFileSync(dest, 'utf-8'), '{"written":true}',
+      'and the file the first flush wrote is untouched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('an ordinary destination is still written', () => {
   // The control for the test above: the flag must not refuse the honest case.

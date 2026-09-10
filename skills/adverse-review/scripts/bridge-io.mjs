@@ -257,6 +257,7 @@ function makeWriteGuard(prefix) {
 export function makeWriteQueue(prefix) {
   const claim = makeWriteGuard(prefix);
   const queued = [];
+  let flushed = false;
 
   return {
     queue(dest, src, body) {
@@ -269,8 +270,21 @@ export function makeWriteQueue(prefix) {
     // there is no atomic multi-file write in the stdlib, so saying so is the
     // whole remedy.
     flush(verb) {
+      // Once, and the queue is drained. `done` is per-call and `queued` was
+      // never cleared, so a second `flush()` re-wrote every file under a fresh
+      // `done` list: a write that succeeded the first time and failed the
+      // second printed "no other file was written" over an outdir the first
+      // call had already filled — reviving the exact confusion the two
+      // sentences below exist to remove. Every caller flushes once, and that
+      // was a comment standing over an exported factory, which is not a guard.
+      if (flushed) {
+        process.stderr.write(`${prefix}: flush() twice — this run's outputs are already`
+          + ' written, and a second pass would report a filled outdir as empty\n');
+        process.exit(2);
+      }
+      flushed = true;
       const done = [];
-      for (const { dest, src, body } of queued) {
+      for (const { dest, src, body } of queued.splice(0)) {
         try {
           writeClaimed(dest, body);
         } catch (e) {
