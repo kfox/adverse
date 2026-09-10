@@ -1255,11 +1255,18 @@ for (const [label, src] of [
   // An array destructure beside a declaration, which regression.mjs spells
   // verbatim. Letting the assignment target span a space before its bracket
   // made the optional `const` prefix readable as the NAME, so `const [a, b]`
-  // was tracked, `ownersOf` handed the bare keyword to the wholesale check,
-  // and every later name declared with one was a caller-supplied path.
+  // was tracked, `ownersOf` handed the keyword to the wholesale check, and
+  // every later name declared with one was a caller-supplied path.
+  //
+  // Bracketed in the arrow body too, and that is what makes this fixture pin
+  // each half of the fix rather than only both together: without the canonical
+  // form the owner is `const ` with its trailing space, which needs a non-word
+  // character after it, and a bare `const p` does not have one. `const [p]`
+  // does — so widening the pattern alone, which is the obvious attempt at
+  // #120, turns this red on its own.
   ['a name declared beside an array destructure',
     'const [d] = [values.out];\n'
-    + 'const make = () => { const p = tmpdir(); return p; };\n'
+    + 'const make = () => { const [p] = [tmpdir()]; return p; };\n'
     + 'const o = make();\nwriteFileSync(o, body);'],
   // The other direction of the regex finding: a false positive, from the same
   // desynchronization, on the same fixture as the control two above.
