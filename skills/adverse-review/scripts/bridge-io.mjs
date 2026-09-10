@@ -9,6 +9,7 @@
 // script that never got as far as reading its input exits 2, everywhere.
 
 import { closeSync, constants, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { importFromSrc } from './package-root.mjs';
@@ -133,16 +134,41 @@ function writeClaimed(dest, body) {
   try {
     writeFileSync(fd, body, 'utf-8');
   } catch (e) {
+    e.truncated = true;
     try {
       rmSync(dest, { force: true });
-    } catch { /* named in the caller's refusal either way */ }
-    e.truncated = true;
+      e.cleared = true;
+    } catch {
+      // The clear can fail on its own: `O_TRUNC` needs permission on the FILE
+      // and unlink needs it on the DIRECTORY, so a writable file in a
+      // write-protected directory truncates and then will not be removed.
+      // Measured: a 75-byte out.json (0644) in a directory at 0555 ends up at
+      // zero bytes and stays there. Recorded rather than swallowed, because the
+      // refusal that follows would otherwise say it was cleared.
+      e.cleared = false;
+    }
     throw e;
   } finally {
     try {
       closeSync(fd);
     } catch { /* the write above is what this call is about */ }
   }
+}
+
+// What this run did to the destination, for an operator who has to decide
+// whether to look at it. The errno is the cause; this is the consequence, and
+// it is the reason the open and the write are separate calls above.
+//
+// It says what this run did and not what is at the path now: `--out` is
+// unlinked before the write by at least one caller (decisions.mjs's
+// `claimOut`), so "what was there is unchanged" was a claim this function is in
+// no position to make, and its own bridge contradicted it on the next line.
+function destinationOutcome(e) {
+  if (!e.truncated) return 'this run opened nothing at that path';
+  return e.cleared
+    ? 'the write had already truncated it, so it was cleared'
+    : 'the write had already truncated it and it could not be cleared,'
+      + ' so a partial file is at that path';
 }
 
 // One output file, written the way the queue below writes its own.
@@ -171,9 +197,7 @@ export function writeOutput(prefix, dest, body) {
     // not something anyone should have to infer from ELOOP versus ENOSPC.
     process.stderr.write(`${prefix}: ${oneLine(dest)}: cannot be written`
       + ` (${oneLine(e.message)})\n`
-      + (e.truncated
-        ? '    the write had already truncated it, so it was cleared\n'
-        : '    nothing was written, and what was there is unchanged\n'));
+      + `    ${destinationOutcome(e)}\n`);
     process.exit(2);
   }
 }
@@ -190,12 +214,19 @@ export function writeOutput(prefix, dest, body) {
 function makeWriteGuard(prefix) {
   const written = new Map();
   return function claimDest(dest, src) {
-    if (written.has(dest)) {
-      process.stderr.write(`${prefix}: ${src}: refuses to overwrite ${dest}, already written`
-        + ` this run from ${written.get(dest)} — two payloads claim one persona\n`);
+    // Compared as paths, not as text: `d/x.json` and `d/./x.json` are one file,
+    // and so are a `..` that cancels, a doubled slash and a trailing dot. The
+    // callers here build their destinations from a persona name, so this is not
+    // where the spelling varies today — it is one line, and the alternative is
+    // a guard whose answer depends on how its caller spelled the directory.
+    const key = path.resolve(dest);
+    if (written.has(key)) {
+      process.stderr.write(`${prefix}: ${oneLine(src)}: refuses to overwrite ${oneLine(dest)},`
+        + ` already written this run from ${oneLine(written.get(key))}`
+        + ' — two payloads claim one persona\n');
       process.exit(1);
     }
-    written.set(dest, src);
+    written.set(key, src);
     return dest;
   };
 }
@@ -237,16 +268,17 @@ export function makeWriteQueue(prefix) {
         try {
           writeClaimed(dest, body);
         } catch (e) {
-          // "Nothing was written" was said on the strength of `done` being
-          // empty, which is a claim about the OTHER files. A write that failed
-          // part way through the first one had already emptied its destination
-          // and left a prefix of the new body there — measured under `ulimit
-          // -f`, an EFBIG four kilobytes in — so stderr announced nothing was
-          // written over a truncated payload the next glob reads as a whole one.
-          // `writeClaimed` clears that file; what is left to say is which files
-          // are on disk.
+          // "Nothing was written" is about the OTHER files — `done` being
+          // empty — and was the only thing said. A write that failed part way
+          // through the first one had already emptied its destination and left
+          // a prefix of the new body there (measured under `ulimit -f`: an
+          // EFBIG four kilobytes in), so that sentence stood over a truncated
+          // payload the next glob reads as a whole one. What this run did to
+          // THIS destination is the same question `writeOutput` answers, in the
+          // same words.
           process.stderr.write(`${prefix}: ${oneLine(dest)}: cannot be written`
             + ` (${oneLine(e.message)})\n`
+            + `    ${destinationOutcome(e)}\n`
             + (done.length
               ? `    ${done.map(oneLine).join(', ')} ${done.length === 1 ? 'was' : 'were'}`
                 + ' already written,'

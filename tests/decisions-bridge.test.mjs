@@ -1055,6 +1055,10 @@ test('a symlink planted at --out after the claim is not written through', async 
     writeFileSync(decoy, 'not this bridge\'s to write\n');
     const fifo = path.join(dir, 'fix-auth-guard.json');
     execFileSync('mkfifo', [fifo]);
+    // A real file at `--out`, so `claimOut` removes it and says so: that notice
+    // and the write refusal are two sentences about one path, and they have to
+    // agree. See the assertions below.
+    writeFileSync(out, '{"the previous iteration":true}');
 
     const fold = spawnFold(['--fix', fifo, '--out', out]);
     const fd = openSync(fifo, 'w');
@@ -1075,6 +1079,14 @@ test('a symlink planted at --out after the claim is not written through', async 
     // iteration among them.
     assert.equal(lstatSync(out).isSymbolicLink(), true,
       'a refusal that opened nothing must leave --out as it found it');
+    // Two sentences about one path, on the channel the Skill tells the
+    // orchestrating agent to read and act on, so they have to agree. `claimOut`
+    // unlinked `--out` before reading anything and says so on the way out, and
+    // the write refusal used to answer the same question with "what was there is
+    // unchanged". It says what this run did instead, which is all it knows.
+    assert.match(fold.stderr, /this run opened nothing at that path/);
+    assert.match(fold.stderr, /was removed when this run started/);
+    assert.doesNotMatch(fold.stderr, /is unchanged/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

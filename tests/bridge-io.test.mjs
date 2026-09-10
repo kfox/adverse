@@ -13,8 +13,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
-  chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync,
-  symlinkSync, writeFileSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+  rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -131,7 +131,7 @@ test('a single output refuses a symlink at its destination', () => {
     // open.
     assert.equal(lstatSync(dest).isSymbolicLink(), true,
       'a refusal that wrote nothing leaves the destination as it found it');
-    assert.match(seen.said, /nothing was written, and what was there is unchanged/);
+    assert.match(seen.said, /this run opened nothing at that path/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -155,9 +155,9 @@ test('a destination it could not open is left exactly as it was', () => {
     assert.match(seen.said, /cannot be written/);
     assert.equal(readFileSync(dest, 'utf-8'), '{"the previous iteration":true}',
       'a refused open must neither remove nor truncate what it found');
-    assert.match(seen.said, /nothing was written, and what was there is unchanged/,
+    assert.match(seen.said, /this run opened nothing at that path/,
       'and the refusal says so, because ELOOP versus ENOSPC is not the operator\'s'
-      + ' question — whether their file is still there is');
+      + ' question — what this run did to the file is');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -195,30 +195,137 @@ test('a write that fails after the open clears what the open truncated', () => {
 // that were missing the flag are not on it. A bridge added later is covered
 // here without this file being edited, which is the only version of this rule
 // worth having.
-//
-// Over every way of opening a file for writing, not just the one spelling the
-// six offenders happened to share. `writeFileSync(values.out, …)` is what they
-// wrote; `appendFileSync`, `createWriteStream` and a bare `openSync` reach the
-// same destination with the same missing flag, and a name bound from `values` a
-// few lines above the write is the same code with a variable in it — which is
-// what anyone reads this rule and then writes.
-const OPENS_FOR_WRITING =
-  /\b(?:appendFile|appendFileSync|createWriteStream|openSync|writeFile|writeFileSync)\(\s*([^,)]{0,120})/g;
+// And the case where the clear itself fails, which is not a corner: `O_TRUNC`
+// needs permission on the FILE and unlink needs it on the DIRECTORY, so a
+// writable file in a write-protected directory truncates and then will not be
+// removed. The first version of this said "it was cleared" over the operator's
+// document sitting at zero bytes — an announcement that the one outcome this
+// block exists to prevent had been prevented, while it was happening.
+test('a clear that fails is not reported as a clear', { skip: process.getuid?.() === 0 }, () => {
+  const dir = freshTmp();
+  try {
+    const walled = path.join(dir, 'walled');
+    mkdirSync(walled);
+    const dest = path.join(walled, 'out.json');
+    writeFileSync(dest, '{"the previous iteration":true}');
+    chmodSync(walled, 0o555);
 
-// Locals holding a destination this run was handed: `const dest = values.out`,
-// `const { out } = values`.
+    const seen = catchExit(() => writeOutput('probe', dest, { not: 'a string' }));
+
+    assert.equal(seen.code, 2, seen.said);
+    assert.match(seen.said, /could not be cleared, so a partial file is at that path/,
+      seen.said);
+    assert.equal(existsSync(dest), true, 'and it really is still there');
+    assert.equal(readFileSync(dest, 'utf-8'), '', 'at zero bytes, which is the point');
+  } finally {
+    chmodSync(path.join(dir, 'walled'), 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+//
+// Over every way of REPLACING a file, not just the one spelling the six
+// offenders happened to share. `writeFileSync(values.out, …)` is what they
+// wrote; `appendFileSync`, `createWriteStream` and a bare `openSync` reach the
+// same destination with the same missing flag, and `copyFileSync`/`renameSync`
+// from a temporary file is the natural next thing to write here — an "atomic"
+// output whose destination nobody opened with these flags either.
+//
+// Which argument is the destination is part of the answer: it is the first one
+// for a write and the SECOND for a copy or a rename, and only that argument is
+// read. Searching the whole call instead flagged
+// `writeFileSync(patchFile, patch, 'utf-8')` in probe.mjs, where `patch` is a
+// diff that came from a `values`-derived path and `patchFile` is probe.mjs's own
+// mkdtemp — a rule that cannot tell a destination from a payload needs an
+// allow-list within the week.
+const DESTINATION_ARG = {
+  appendFile: 0,
+  appendFileSync: 0,
+  copyFile: 1,
+  copyFileSync: 1,
+  createWriteStream: 0,
+  openSync: 0,
+  rename: 1,
+  renameSync: 1,
+  writeFile: 0,
+  writeFileSync: 0,
+};
+const CALLS = new RegExp(`\\b(${Object.keys(DESTINATION_ARG).join('|')})\\s*\\(`, 'g');
+
+// Reading is not this rule's business, and `openSync(dest, 'r')` is the one
+// spelling of these that is a read.
+const READ_MODE = /^(['"])r\1$/;
+
+// `\b` is no use here: `$` is legal in an identifier and is a non-word
+// character, so `\b$out\b` matches nothing at all and the check passes
+// silently.
+const boundary = (name) =>
+  new RegExp(`(?<![\\w$])${name.replace(/\$/g, '\\$')}(?![\\w$])`);
+
+// From the open paren to the paren that closes it, so a nested call in the
+// first argument does not truncate the second.
+function callArgs(src, open) {
+  let depth = 0;
+  for (let i = open; i < src.length; i += 1) {
+    if ('([{'.includes(src[i])) depth += 1;
+    else if (')]}'.includes(src[i])) {
+      depth -= 1;
+      if (depth === 0) return splitArgs(src.slice(open + 1, i));
+    }
+  }
+  return [];
+}
+
+function splitArgs(text) {
+  const args = [''];
+  let depth = 0;
+  for (const c of text) {
+    if ('([{'.includes(c)) depth += 1;
+    else if (')]}'.includes(c)) depth -= 1;
+    if (c === ',' && depth === 0) args.push('');
+    else args[args.length - 1] += c;
+  }
+  return args.map((a) => a.trim());
+}
+
+// Every local that holds, or is built from, a destination this run was handed:
+// `values.out`, `const dest = values.out`, `const dir = values.outdir` and then
+// `path.join(dir, name)`. To a fixed point, because one indirection is not a
+// number anyone should have picked.
 function destNames(src) {
   const names = new Set();
-  for (const m of src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;\n]*\bvalues[.[]/g)) {
-    names.add(m[1]);
-  }
   for (const m of src.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*values\b/g)) {
     for (const part of m[1].split(',')) {
       const bound = /([A-Za-z_$][\w$]*)\s*$/.exec(part.split(':').pop() ?? '');
       if (bound) names.add(bound[1]);
     }
   }
+  const bindings = [...src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=([^;\n]*)/g)]
+    .map((m) => [m[1], m[2]]);
+  for (let pass = 0; pass <= bindings.length; pass += 1) {
+    const before = names.size;
+    for (const [name, init] of bindings) {
+      if (/\bvalues[.[]/.test(init) || [...names].some((n) => boundary(n).test(init))) {
+        names.add(name);
+      }
+    }
+    if (names.size === before) break;
+  }
   return [...names];
+}
+
+function selfWrittenDestinations(src) {
+  const handed = destNames(src);
+  const found = [];
+  for (const m of src.matchAll(CALLS)) {
+    const args = callArgs(src, m.index + m[0].length - 1);
+    const dest = args[DESTINATION_ARG[m[1]]];
+    if (dest === undefined) continue;
+    if (m[1] === 'openSync' && args.slice(1).some((a) => READ_MODE.test(a))) continue;
+    if (!/\bvalues[.[]/.test(dest) && !handed.some((n) => boundary(n).test(dest))) continue;
+    found.push({ line: src.slice(0, m.index).split('\n').length, call: `${m[1]}(${dest}, …)` });
+  }
+  return found;
 }
 
 test('no bridge writes a caller-supplied destination itself', () => {
@@ -227,40 +334,64 @@ test('no bridge writes a caller-supplied destination itself', () => {
   for (const file of readdirSync(dir).filter((f) => f.endsWith('.mjs')).sort()) {
     if (file === 'bridge-io.mjs') continue;
     const src = readFileSync(path.join(dir, file), 'utf-8');
-    const handed = destNames(src);
-    for (const m of src.matchAll(OPENS_FOR_WRITING)) {
-      const dest = m[1];
-      if (!/\bvalues[.[]/.test(dest) && !handed.some((n) => new RegExp(`\\b${n}\\b`).test(dest))) {
-        continue;
-      }
-      offenders.push(`${file}:${src.slice(0, m.index).split('\n').length}: ${m[0].trim()}`);
+    for (const { line, call } of selfWrittenDestinations(src)) {
+      offenders.push(`${file}:${line}: ${call}`);
     }
   }
   assert.deepEqual(offenders, [],
-    `these open an output path themselves instead of going through bridge-io:\n  `
+    `these replace a file at an output path instead of going through bridge-io:\n  `
     + `${offenders.join('\n  ')}\n`
     + 'Use writeOutput, or makeWriteQueue for a bridge with more than one output:'
     + ' both carry the flags and the exit code.');
 });
 
-// The queue's collision refusal, reached through a bridge, because that is
-// where it earns its keep: collect.mjs takes `--out` and `--files-out` from the
-// caller and nothing stops them being the same path. Written one after the
-// other — which is what it did — the file list silently landed where the source
-// block was promised, and the exit code said the run succeeded.
-test('a bridge whose two outputs name one file writes neither', () => {
+// collect.mjs is the first bridge whose two destinations come from argv
+// independently, and it wrote the source block and then replaced it with the
+// file list, at exit 0. Both spellings, because the first version of this
+// compared the two strings and `./` walked straight through it — as would a
+// `..` that cancels, a doubled slash, or a trailing dot.
+for (const [label, filesOut] of [
+  ['the same path twice', (dir) => path.join(dir, 'both.json')],
+  // Assembled by hand, because `path.join` would normalize it away — and argv
+  // does not come from `path.join`.
+  ['one path spelled two ways', (dir) => `${dir}/./sub/../both.json`],
+]) {
+  test(`--out and --files-out naming one file is refused: ${label}`, () => {
+    const dir = freshTmp();
+    try {
+      const dest = path.join(dir, 'both.json');
+      writeFileSync(path.join(dir, 'reviewable.mjs'), 'export const x = 1;\n');
+      const r = spawnSync(process.execPath,
+        [bridgePath('collect'), '--target', dir, '--out', dest,
+          '--files-out', filesOut(dir)],
+        { encoding: 'utf-8' });
+
+      assert.equal(r.status, 2, `exit ${r.status}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /--out and --files-out name one file/, r.stderr);
+      assert.doesNotMatch(r.stderr, /persona/,
+        'an argv contradiction is not a payload claiming a persona');
+      assert.equal(existsSync(dest), false, 'and neither output is written');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+// And the guard underneath, on the same question. Its callers build their
+// destinations from a persona name, so they do not vary the spelling today;
+// what makes this worth a line is that the answer must not depend on how the
+// caller spelled the directory it joined them onto.
+test('the queue compares destinations as paths, not as text', () => {
   const dir = freshTmp();
   try {
-    const dest = path.join(dir, 'both.json');
-    writeFileSync(path.join(dir, 'reviewable.mjs'), 'export const x = 1;\n');
-    const r = spawnSync(process.execPath,
-      [bridgePath('collect'), '--target', dir, '--out', dest, '--files-out', dest],
-      { encoding: 'utf-8' });
+    const queue = makeWriteQueue('verify');
+    queue.queue(path.join(dir, 'round1-auditor.verified.json'), 'verify-auditor.json', '{}');
 
-    assert.equal(r.status, 1, `exit ${r.status}: ${r.stderr}`);
-    assert.match(r.stderr, /refuses to overwrite/, r.stderr);
-    assert.equal(existsSync(dest), false,
-      'the second claim is refused before the first write, not after it');
+    const seen = catchExit(() => queue.queue(
+      `${dir}/./sub/../round1-auditor.verified.json`, 'verify-auditor-stale.json', '{}'));
+
+    assert.equal(seen.code, 1, seen.said);
+    assert.match(seen.said, /already written this run/, seen.said);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -4,7 +4,7 @@
 
 import path from 'node:path';
 
-import { makeWriteQueue, parseBridgeArgs, usage } from './bridge-io.mjs';
+import { makeWriteQueue, oneLine, parseBridgeArgs, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { collectDirectory, collectDiff } = await importFromSrc('collect.mjs');
@@ -27,6 +27,16 @@ if (!values.target || !values.out) {
   usage(USAGE);
 }
 
+// Two output flags, taken from argv independently, and nothing about them says
+// they name different files. `--out d/both.json --files-out d/./both.json` wrote
+// the source block and then replaced it with the file list, at exit 0, leaving a
+// file list where a source block was promised. An argv contradiction, answered
+// where every other one is: before any work is done, and as a usage error.
+if (values['files-out']
+  && path.resolve(values['files-out']) === path.resolve(values.out)) {
+  usage(`collect: --out and --files-out name one file: ${oneLine(values.out)}\n${USAGE}`);
+}
+
 const target = path.resolve(values.target);
 try {
   let block, files;
@@ -36,12 +46,9 @@ try {
   } else {
     ({ block, files } = collectDirectory(target));
   }
-  // Two outputs, so the queue rather than two single writes. `--out` and
-  // `--files-out` are a pair — a source block and the list of what is in it —
-  // and the caller supplies both paths independently, so nothing stops them
-  // naming one file. Written one after the other, that silently left the file
-  // list where the block was promised; queued, the second claim on a
-  // destination is refused before the first byte is written.
+  // The queue rather than two single writes: these two outputs are a pair — a
+  // source block and the list of what is in it — so a failure on the second
+  // must not publish the first, and neither is written until both are held.
   const out = makeWriteQueue('collect');
   out.queue(values.out, 'source block', block);
   if (values['files-out']) {
