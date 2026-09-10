@@ -12,12 +12,34 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 
-const { makeWriteQueue } = await import(
+const { makeWriteQueue, writeOutput } = await import(
   new URL('../skills/adverse-review/scripts/bridge-io.mjs', import.meta.url));
+
+// `writeOutput` and `flush` both exit the process on a write failure, so an
+// assertion has to be on what is left on disk and what was said, not on a
+// thrown error: the process would be gone.
+function catchExit(run) {
+  const exit = process.exit;
+  const stderr = process.stderr.write;
+  const seen = { code: null, said: '' };
+  process.exit = (c) => { seen.code = c; throw new Error('exited'); };
+  process.stderr.write = (text) => { seen.said += text; return true; };
+  try {
+    run();
+  } catch (e) {
+    if (e.message !== 'exited') throw e;
+  } finally {
+    process.exit = exit;
+    process.stderr.write = stderr;
+  }
+  return seen;
+}
 
 function freshTmp() {
   return mkdtempSync(path.join(tmpdir(), 'adverse-bridge-io-'));
@@ -68,6 +90,55 @@ test('the write refuses a symlink planted after the destination was judged', () 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// The single-output half of the same rule. Six bridges wrote a caller-supplied
+// `--out` with a plain `writeFileSync` while the queue above had opened with
+// O_NOFOLLOW since it was written — and unlike the queue's case, no claim or
+// check precedes those writes, so the link does not even have to be planted
+// inside a race: it can simply be there.
+test('a single output refuses a symlink at its destination', () => {
+  const dir = freshTmp();
+  try {
+    const target = path.join(dir, 'not-ours.json');
+    const dest = path.join(dir, 'out.json');
+    writeFileSync(target, '{"keep":"me"}');
+    symlinkSync(target, dest);
+
+    const seen = catchExit(() => writeOutput('triage', dest, '{"written":true}'));
+
+    assert.equal(seen.code, 2, 'a write that could not happen is exit 2');
+    assert.match(seen.said, /ELOOP/, 'the kernel refused to resolve the link');
+    assert.equal(readFileSync(target, 'utf-8'), '{"keep":"me"}',
+      'the link target must not be written through');
+    assert.equal(existsSync(dest), false, 'and the refusal leaves nothing at the destination');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Static, because the point is that there is ONE implementation. Six copies of
+// this line is how six of them came to be missing a flag the seventh had.
+//
+// Over the directory rather than over the list below: that list is the bridges
+// whose `--help` exits 0, which is a different question, and three of the six
+// that were missing the flag are not on it. A bridge added later is covered
+// here without this file being edited, which is the only version of this rule
+// worth having.
+test('no bridge writes a caller-supplied destination itself', () => {
+  const dir = path.join(here, '..', 'skills', 'adverse-review', 'scripts');
+  const offenders = [];
+  for (const file of readdirSync(dir).filter((f) => f.endsWith('.mjs')).sort()) {
+    if (file === 'bridge-io.mjs') continue;
+    const src = readFileSync(path.join(dir, file), 'utf-8');
+    for (const m of src.matchAll(/writeFileSync\(\s*values[.[][^\n]*/g)) {
+      offenders.push(`${file}:${src.slice(0, m.index).split('\n').length}: ${m[0].trim()}`);
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `these write an output path themselves instead of through writeOutput:\n  `
+    + `${offenders.join('\n  ')}\n`
+    + 'Use writeOutput (bridge-io.mjs), which carries the flags and the exit code.');
 });
 
 test('an ordinary destination is still written', () => {

@@ -18,10 +18,9 @@
 //   1  red — a check ran and said no. A claim about the change.
 //   2  usage, or the record could not be written. Nothing was established.
 
-import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { parseBridgeArgs, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, usage, writeOutput } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { DEFAULT_CHECK_TIMEOUT_MS, parseCheckSpec, runGate, worktreeDigest } = await importFromSrc('gate.mjs');
@@ -78,14 +77,10 @@ const worktree = worktreeDigest(repo);
 
 const gate = runGate(checks, { cwd: repo, head, worktree, timeoutMs });
 
-try {
-  writeFileSync(values.out, `${JSON.stringify(gate, null, 2)}\n`, 'utf-8');
-} catch (e) {
-  // Exit 2, not 1: a run that could not write its record established nothing,
-  // and exit 1 here would read as "the gate is red".
-  process.stderr.write(`gate: ${values.out}: cannot be written (${e.message.trim()})\n`);
-  process.exit(2);
-}
+// Exit 2, not 1, which `writeOutput` is where the reason for now lives: a run
+// that could not write its record established nothing, and exit 1 here would
+// read as "the gate is red".
+writeOutput('gate', values.out, `${JSON.stringify(gate, null, 2)}\n`);
 
 process.stdout.write(`gate: ${gate.status} (${gate.summary})`
   + `${gate.verified ? ' — verified' : ` — not verified: ${gate.why}`}\n`);

@@ -29,10 +29,9 @@
 //   1  the report was NOT published: the venue was refused, or the post failed
 //   2  usage, an unreadable report, or an unwritable --out
 
-import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, usage, writeOutput } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { checkCheckout, findMarkedComment, findPullRequest, publishComment, renderComment,
@@ -113,14 +112,7 @@ try {
   process.exit(1);
 }
 
-if (values.out) {
-  try {
-    writeFileSync(values.out, `${body}\n`, 'utf-8');
-  } catch (e) {
-    process.stderr.write(`publish: ${values.out}: cannot be written (${e.message.trim()})\n`);
-    process.exit(2);
-  }
-}
+if (values.out) writeOutput('publish', values.out, `${body}\n`);
 
 // Nowhere to publish, which is not a failure. Reviewing uncommitted changes on
 // a branch with no pull request is a first-class use of this tool, and the body

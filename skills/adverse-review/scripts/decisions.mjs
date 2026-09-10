@@ -9,10 +9,12 @@
 // so a single call cannot collide with itself; two calls in one iteration are
 // simply harder to read back.
 //
-// Exit codes follow the contract every other bridge here uses: 2 means it never
-// read a payload, 1 means it read one it cannot fold. The schema is one way to
-// earn a 1; a payload whose `id` and `title` name different briefing entries is
-// the other, and that one leaves no output file behind.
+// Exit codes follow the contract every other bridge here uses: 1 means it read
+// a payload it cannot fold, and 2 means it never got that far — or, at the very
+// end, that it could not write what it folded. The two ends of 2 have the same
+// consequence, which is what the code means here: nothing was recorded. The
+// schema is one way to earn a 1; a payload whose `id` and `title` name different
+// briefing entries is the other, and that one leaves no output file behind.
 //
 // The named-not-fixed block is echoed to stdout on purpose. Those items are
 // exactly the ones that get skimmed — they arrive at the end of a long report,
@@ -28,9 +30,9 @@
 // `fixed · declined · deferred` that named none of it and went stale the first
 // time a disposition was added.
 
-import { rmSync, statSync, writeFileSync } from 'node:fs';
+import { rmSync, statSync } from 'node:fs';
 
-import { CLAIMED_PATH_FLAGS, parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, usage, writeOutput } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
@@ -134,23 +136,39 @@ function identity(file) {
     // not exist on the first fold, and an input that is missing is `readJson`'s
     // refusal a moment later, with a better sentence than this one.
     if (e.code === 'ENOENT') return null;
-    // Anything else is "cannot tell", which is not the same answer as "a
-    // different file" and must not be spelled the same way: the next thing this
-    // bridge does is delete `--out`, and it would be deleting it having failed
-    // to check the one thing this function is for.
-    refuse(2, `decisions: ${oneLine(file)}: cannot be identified (${oneLine(e.code)}), so this`
-      + ' run cannot tell whether it is the file `--out` names — which it is about to remove\n');
+    // Anything else is "cannot tell", and this function does not get to spell
+    // that the same way as "a different file": the next thing the bridge does is
+    // delete `--out`. It throws rather than returning a benign default, because
+    // the benign default here is the deletion this whole claim guards.
+    throw e;
   }
-  return null;
 }
 
-function sameFile(a, b) {
-  const x = identity(a);
-  return x !== null && x === identity(b);
+// `--out` gets no sentence of its own when it cannot be stat-ed. `rmSync` below
+// is about to hit the same wall and says so as "cannot be claimed for this run",
+// which names the flag the operator typed; a message from here instead asked
+// whether `--out` was `--out` — `--out blocker/decisions.json` against a regular
+// file named `blocker` reported ENOTDIR as a question about aliasing.
+function outIdentity() {
+  try {
+    return identity(values.out);
+  } catch {
+    return null;
+  }
 }
 
 function claimOut(inputs) {
-  const alias = inputs.find((f) => sameFile(f, values.out));
+  const target = outIdentity();
+  const alias = target === null ? undefined : inputs.find((f) => {
+    try {
+      return identity(f) === target;
+    } catch (e) {
+      refuse(2, `decisions: ${oneLine(f)}: cannot be identified (${oneLine(e.code)}), so this`
+        + ` run cannot tell whether it is the file --out names (${oneLine(values.out)}) — which`
+        + ' it is about to remove\n');
+    }
+    return false;
+  });
   if (alias) {
     process.stderr.write(`decisions: --out ${oneLine(values.out)} is an input of this run`
       + ` (${oneLine(alias)}). This bridge claims --out before reading anything, so folding`
@@ -172,7 +190,6 @@ function claimOut(inputs) {
 const clearedOut = claimOut([...values.fix, values.report, values.briefing].filter(Boolean));
 
 let wrote = false;
-let announced = false;
 
 // Gated on whether the fold WROTE, not on the exit code. The two are not the
 // same question and reading the second one inverts the notice: every exit after
@@ -181,8 +198,7 @@ let announced = false;
 // the operator is being told nothing was recorded. That is the exact claim this
 // notice exists to prevent, printed by the notice.
 function announceUnrecorded() {
-  if (announced || !clearedOut || wrote) return;
-  announced = true;
+  if (!clearedOut || wrote) return;
   process.stderr.write(`decisions: a file already at ${oneLine(values.out)} was removed when`
     + ' this run started, and this run wrote nothing: nothing it refused has been recorded\n');
 }
@@ -355,21 +371,13 @@ if (transposed.length) {
   refuse(1, 'decisions: a payload contradicts its own identity claims; refusing to fold it\n');
 }
 
-// The same flags the write queue in bridge-io.mjs uses, for the same reason:
-// this bridge claimed `--out` before reading anything, and a symlink planted at
-// it in the meantime would otherwise be followed — the class this run's own
-// claim is about, one step further along the same path. Exit 2 and a sentence,
-// not a stack trace: a fold that could not write its output made no decisions,
-// and `wrote` stays false so the notice above still tells the truth.
-try {
-  writeFileSync(values.out, JSON.stringify({ decisions }, null, 2), {
-    encoding: 'utf-8',
-    flag: CLAIMED_PATH_FLAGS,
-  });
-} catch (e) {
-  refuse(2, `decisions: ${oneLine(values.out)}: cannot be written`
-    + ` (${oneLine(e.message)})\n`);
-}
+// Through the shared write, for the same reason every other bridge's output
+// goes through it: this bridge claimed `--out` before reading anything, and a
+// symlink planted at it in the meantime would otherwise be followed — the class
+// this run's own claim is about, one step further along the same path. It
+// refuses at exit 2 rather than returning, so `wrote` stays false and the notice
+// above still tells the truth.
+writeOutput('decisions', values.out, JSON.stringify({ decisions }, null, 2));
 wrote = true;
 
 const where = (d) => (d.file

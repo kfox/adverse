@@ -39,7 +39,12 @@ function spawnFold(args) {
   const seen = { stderr: '' };
   child.stderr.setEncoding('utf-8');
   child.stderr.on('data', (chunk) => { seen.stderr += chunk; });
-  seen.status = new Promise((resolve) => child.on('exit', resolve));
+  // `close`, not `exit`: `exit` fires when the process ends, which is not when
+  // its stdio has drained, and every test here reads `seen.stderr` the moment
+  // this resolves. Node guarantees the ordering for `close` and not for `exit`,
+  // so an assertion on a message still in flight would fail on the machine that
+  // scheduled it differently rather than on the change that broke it.
+  seen.status = new Promise((resolve) => child.on('close', resolve));
   seen.child = child;
   return seen;
 }
@@ -1061,6 +1066,33 @@ test('a symlink planted at --out after the claim is not written through', async 
     assert.equal(status, 2, fold.stderr);
     assert.match(fold.stderr, /decisions\.json: cannot be written/);
     assert.equal(readFileSync(decoy, 'utf-8'), 'not this bridge\'s to write\n');
+    // And nothing readable is left at `--out`, which is what every other
+    // refusal here asserts and what the notice on the way out claims. A write
+    // that fails part way has already truncated the destination, so the failed
+    // write clears it — here that is the planted link, which is also the only
+    // reachable version of the case.
+    assert.equal(existsSync(out), false, 'a refused write left something at --out');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// An `--out` this run cannot stat is not an aliasing question, and it was
+// answered as one: the identity check reached its refusal with `--out` as the
+// path it could not identify, and asked whether `--out` was the file `--out`
+// names. `rmSync` is about to hit the same wall one line later and names the
+// flag the operator typed.
+test('an --out that cannot be stat-ed is refused as an --out, not as an alias', () => {
+  const dir = freshTmp();
+  try {
+    // A regular file where a directory would have to be: ENOTDIR, on `--out`.
+    writeFileSync(path.join(dir, 'blocker'), 'not a directory\n');
+    const r = run(['--fix', write(dir, 'fix-auth-guard.json', goodFix),
+      '--out', path.join(dir, 'blocker', 'decisions.json')]);
+
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /cannot be claimed for this run \(ENOTDIR\)/);
+    assert.doesNotMatch(r.stderr, /cannot be identified/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1070,7 +1102,13 @@ test('a symlink planted at --out after the claim is not written through', async 
 // is compared against `--out` by identity, and the next thing the bridge does is
 // delete `--out` — so a path it cannot stat is a check it did not perform, and
 // saying so is the only answer that is not a guess about the operator's tree.
-test('an input this run cannot stat is refused, not assumed to be another file', () => {
+// Skipped as root, where the premise does not hold: root bypasses the directory
+// permission check, `statSync` succeeds, the fold runs normally, and the failure
+// would read as this refusal being gone rather than as the test being unable to
+// set up. CI containers run as root often enough for that to matter.
+test('an input this run cannot stat is refused, not assumed to be another file', {
+  skip: process.getuid?.() === 0 ? 'root is not refused by a 0o000 directory' : false,
+}, () => {
   const dir = freshTmp();
   try {
     const walled = path.join(dir, 'walled');

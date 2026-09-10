@@ -8,7 +8,7 @@
 // exit 1 is a claim about a review, and this run could not read one" — so a
 // script that never got as far as reading its input exits 2, everywhere.
 
-import { constants, readFileSync, writeFileSync } from 'node:fs';
+import { constants, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import { importFromSrc } from './package-root.mjs';
@@ -85,13 +85,43 @@ export function requireKnownPersona(persona, { prefix, file, personas }) {
 // agent in the run, so a symlink can be planted at any output path after any
 // pre-write check has looked at it; O_NOFOLLOW fails the open itself (ELOOP)
 // instead of narrowing that window to something smaller than a scheduler tick.
-//
-// Exported because two bridges write output outside the queue below, and the
-// flag set is the whole of what makes such a write safe. Stated once: a second
-// copy of it is a copy that can be one flag short, which is what this
-// repository keeps finding wherever a rule was restated instead of shared.
-export const CLAIMED_PATH_FLAGS = constants.O_WRONLY | constants.O_CREAT
+const CLAIMED_PATH_FLAGS = constants.O_WRONLY | constants.O_CREAT
   | constants.O_TRUNC | constants.O_NOFOLLOW;
+
+// One output file, written the way the queue below writes its own.
+//
+// Seven bridges wrote a caller-supplied `--out` with their own
+// `writeFileSync(values.out, …, 'utf-8')`, and six of the seven followed a
+// symlink planted at it — including probe.mjs, whose header advertises
+// O_NOFOLLOW for the patch files it writes elsewhere. That is what a rule
+// restated at each site looks like after a while: the queue below has opened
+// with these flags since it was written, and it says why, and none of that
+// reached the bridges that do not use the queue.
+//
+// A bridge with several outputs still wants `makeWriteQueue`, which also
+// refuses to write one destination twice and holds every write until all of
+// them are judged. This is for the bridges that write exactly one file, and it
+// carries the exit code they had each chosen for themselves: exit 2 and a
+// sentence, never a stack trace under exit 1, because exit 1 is a claim about a
+// review and a run that could not write its output made none.
+export function writeOutput(prefix, dest, body) {
+  try {
+    writeFileSync(dest, body, { encoding: 'utf-8', flag: CLAIMED_PATH_FLAGS });
+  } catch (e) {
+    // Whatever reached the file is removed before the refusal. A write that
+    // fails PART WAY — ENOSPC, EDQUOT, EIO — has already truncated the
+    // destination and left some prefix of a JSON document at a path the next
+    // glob will pick up, which is the one outcome worse than not writing:
+    // unreadable is a refusal every reader here already handles, and
+    // half-readable is not. Best-effort, because the reason the write failed is
+    // often the reason the unlink will.
+    try {
+      rmSync(dest, { force: true });
+    } catch { /* named in the refusal below either way */ }
+    process.stderr.write(`${prefix}: ${dest}: cannot be written (${e.message.trim()})\n`);
+    process.exit(2);
+  }
+}
 
 // Refuses to write a destination this process has already written. Two
 // payloads naming one persona is a stale file or a spoof, never a legitimate

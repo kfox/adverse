@@ -2,10 +2,9 @@
 // Skill bridge: collect source code into a single text block + file list.
 // The same logic powers the standalone CLI (`adverse review`).
 
-import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { parseBridgeArgs, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, usage, writeOutput } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { collectDirectory, collectDiff } = await importFromSrc('collect.mjs');
@@ -37,8 +36,10 @@ try {
   } else {
     ({ block, files } = collectDirectory(target));
   }
-  writeFileSync(values.out, block, 'utf-8');
-  if (values['files-out']) writeFileSync(values['files-out'], JSON.stringify(files, null, 2), 'utf-8');
+  writeOutput('collect', values.out, block);
+  if (values['files-out']) {
+    writeOutput('collect', values['files-out'], JSON.stringify(files, null, 2));
+  }
   process.stdout.write(`collected ${files.length} files (${block.length} chars) -> ${values.out}\n`);
 } catch (e) {
   process.stderr.write(`collect: ${e.message}\n`);

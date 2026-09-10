@@ -27,9 +27,8 @@
 // re-cased name (`Auditor`) used to mint a phantom fifth reviewer whose
 // agreement with its own other half read as cross-lane consensus.
 
-import { writeFileSync } from 'node:fs';
 
-import { parseBridgeArgs, readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, readPlanLanes, reportRoster, usage, writeOutput } from './bridge-io.mjs';
 
 import { importFromSrc } from './package-root.mjs';
 
@@ -269,6 +268,6 @@ for (const { src, payload } of payloads) {
   combined[payload.persona] = existing ? merge(existing, payload) : payload;
 }
 
-writeFileSync(values.out, JSON.stringify(combined, null, 2), 'utf-8');
+writeOutput('combine', values.out, JSON.stringify(combined, null, 2));
 
 process.stdout.write(`combined ${inputs.length} reviews -> ${values.out}\n`);
