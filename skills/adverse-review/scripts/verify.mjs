@@ -49,6 +49,7 @@ import { makeWriteQueue, oneLine, parseBridgeArgs, readJson, requireKnownPersona
 import { importFromSrc } from './package-root.mjs';
 
 const { briefingEntries } = await importFromSrc('decisions.mjs');
+const { requireFindings } = await importFromSrc('ledger.mjs');
 const { validateVerify } = await importFromSrc('prompts.mjs');
 const { stampedFieldClaim } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
@@ -120,9 +121,29 @@ const REOPENED_FALLBACK = { severity: 'warning', kind: 'behavioral' };
 // meant is how a severity gets copied off the wrong finding. The null is a
 // sentinel, not a miss — a consumer must ask `has()` before falling back to
 // any other source, or the refusal it encodes silently becomes a guess.
+// Whatever this bridge could not read is refused here, at exit 2 and naming
+// the file. references/convergence-loop.md reserves exit 1 for a payload that
+// failed its schema — a claim about a review — and a run that could not read
+// one of its inputs has no claim to make. One helper, because two call sites
+// spelling the same refusal is how one of them came to be spelled `?? []`.
+const refuseUnreadable = (file, e) => {
+  process.stderr.write(`verify: ${oneLine(file)}: ${e.message}\n`);
+  process.exit(2);
+};
+
+// `requireFindings`, not `?? []`, and it is the same rule the briefing index
+// got: "I could not find the findings" must never come to mean "there were
+// none". Both halves of that were live one line from the guard that closed it
+// for the briefing. An object `findings` — a decisions.json, whose findings
+// are a `decisions` array, or a verify payload — reached `for (const f of …)`
+// as `object is not iterable` at exit 1, which is this bridge's code for a
+// payload that failed its schema. And a `--report` with no `findings` key at
+// all indexed to an empty map at exit 0: every round-2 addition then fell
+// through to REOPENED_FALLBACK with a null anchor, which is the silent
+// direction and reads exactly like a report that carried no additions.
 function indexByTitle(doc) {
   const byTitle = new Map();
-  for (const f of doc?.findings ?? []) {
+  for (const f of requireFindings(doc)) {
     if (!f) continue;
     const key = normalizeTitle(f.title);
     if (key) byTitle.set(key, byTitle.has(key) ? null : f);
@@ -151,12 +172,11 @@ if (values.briefing) {
   let entries = [];
   try {
     entries = briefingEntries(doc);
+    briefedByTitle = indexByTitle(doc);
   } catch (e) {
-    process.stderr.write(`verify: ${oneLine(values.briefing)}: ${e.message}\n`);
-    process.exit(2);
+    refuseUnreadable(values.briefing, e);
   }
   for (const f of entries) briefed.set(f.id, f);
-  briefedByTitle = indexByTitle(doc);
 }
 
 // The previous iteration's report.json, as the anchor source of last resort:
@@ -165,9 +185,15 @@ if (values.briefing) {
 // all. Title-bound with the same ambiguity rule as the briefing index, and
 // consulted after both briefing routes — a briefed finding is this iteration's
 // statement of the same finding and wins.
-const reportedByTitle = values.report
-  ? indexByTitle(readJson(values.report, 'verify'))
-  : new Map();
+let reportedByTitle = new Map();
+if (values.report) {
+  const doc = readJson(values.report, 'verify');
+  try {
+    reportedByTitle = indexByTitle(doc);
+  } catch (e) {
+    refuseUnreadable(values.report, e);
+  }
+}
 
 
 // The briefing entry a verification is actually ABOUT, or null.

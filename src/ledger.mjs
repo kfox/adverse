@@ -888,9 +888,26 @@ function notesMatching(ledger, decision) {
     && (scoreMatch(entry, decision)?.score ?? 0) >= SETTLING_SCORE);
 }
 
-// A `noted` entry whose identity the fold checked against a report and no lane
-// had filed. The fix batch chose every field on it, and nothing corrected them.
-const isSelfIdentified = (entry) => entry.reconciled === false;
+// The values a fold writes to `reconciled`, plus the absent one an older
+// ledger has because the field did not exist when it was written.
+const VOUCHING_RECONCILED = [true, null, undefined];
+
+// A `noted` entry that cannot vouch for a later decision. Two ways in, and
+// they are not the same fact.
+//
+// `false` is the fold's own statement that it checked this identity against a
+// report and no lane had filed it: the fix batch chose every field on it and
+// nothing corrected them, which is the laundered token this gate exists for.
+//
+// Anything else is a value no fold wrote, and reading it as one closed this
+// for the writer only. `recordDecisions` now refuses such a value, and
+// `loadLedger` validates `version` and nothing per-entry — so a row from
+// before that guard, or a hand-edited `"reconciled": "false"`, was "not
+// exactly false" and VOUCHED forever: the same laundering, spelled with two
+// quotes. The reader withholds on everything it cannot read as one of the
+// three, which is the direction whose failure is an operator reading a
+// sentence about their own ledger rather than a loop reporting clean.
+const cannotVouch = (entry) => !VOUCHING_RECONCILED.includes(entry?.reconciled);
 
 // What the check says about a decision whose only cover is such an entry. Its
 // own sentence rather than `whyUncovered`'s, because the remedy is different:
@@ -899,6 +916,14 @@ const isSelfIdentified = (entry) => entry.reconciled === false;
 const MINTED_NOTE_WHY = 'the only thing on record carrying this identity is a `noted` entry the '
   + 'fold checked against a report and no lane had filed, so a batch would be excusing its own '
   + 'decision with its own footnote';
+
+// And the other way a note stops vouching, which is a different sentence
+// because it is a different remedy: nothing here says a fold made any
+// statement about this identity, so there is nothing to tell the operator
+// about their payloads. The ledger is what they have to look at.
+const UNREADABLE_NOTE_WHY = 'the only thing on record carrying this identity is a `noted` entry '
+  + 'whose `reconciled` field holds a value no fold writes, so whether any lane had filed it '
+  + 'cannot be read off this ledger at all';
 
 // Decisions that will settle nothing, because nothing they could be answering
 // matches them at SETTLING_SCORE (kfox/adverse#58, item 1).
@@ -952,6 +977,8 @@ const MINTED_NOTE_WHY = 'the only thing on record carrying this identity is a `n
 // under review). The residue is a fold run without `--report`, which records
 // `null` and vouches; that invocation is the degraded mode both bridges already
 // warn about at length, and it is the orchestrator's to make, not the batch's.
+// Nothing else vouches — see `cannotVouch`, which withholds on any value this
+// tool did not write rather than on `false` alone.
 //
 // The whole report, never its `findings` array, for the reason `recordDecisions`
 // spells out: a caller doing the extraction itself spells "this is not a
@@ -970,11 +997,15 @@ export function uncoveredDecisions(decisions, report, { ledger = emptyLedger() }
     if (settlingMatches(d, findings).length) continue;
 
     const notes = notesMatching(ledger, d);
-    if (notes.some((entry) => !isSelfIdentified(entry))) continue;
+    if (notes.some((entry) => !cannotVouch(entry))) continue;
+    // Every note here failed to vouch, so which sentence they earn is which
+    // reason they failed for.
+    const noteWhy = notes.every((entry) => entry.reconciled === false)
+      ? MINTED_NOTE_WHY : UNREADABLE_NOTE_WHY;
     uncovered.push({
       title: clipReason(d.title ?? ''),
       disposition: d.disposition ?? null,
-      why: clipReason(notes.length ? MINTED_NOTE_WHY : whyUncovered(d, findings)),
+      why: clipReason(notes.length ? noteWhy : whyUncovered(d, findings)),
     });
   }
   return uncovered;
@@ -1153,21 +1184,25 @@ export function recordDecisions(ledger, decisions, {
     // the report, and a caller that supplies its own is supplying the field a
     // regression pass excuses a lane on — which is the one selection the party
     // whose commit is under review must not make.
-    // Three values, and the comment on `reconciled` below says so — but the
-    // field went in as `d.reconciled ?? null`, unchecked. `isSelfIdentified`
-    // reads `reconciled === false`, so anything that is not exactly `false`
-    // VOUCHES: the plausible hand-written `"reconciled": "false"` and a stray
-    // `0` both granted the exemption they were written to withhold, and
-    // converge's warning is about `null`, so neither bridge said a word.
-    if (![true, false, null, undefined].includes(d.reconciled)) {
-      throw new Error(`decision for ${JSON.stringify(d.title)} carries reconciled: `
-        + `${JSON.stringify(d.reconciled)}; the fold records true, false or null, and only `
-        + 'an exact `false` withholds the exemption a `noted` entry grants');
-    }
     if (d.reporters !== undefined) {
       throw new Error(`decision for ${JSON.stringify(d.title)} carries \`reporters\`; the `
         + 'reporting lanes are derived from the report this decision answers, not declared by '
         + 'whoever wrote the decision. Pass the report to --record instead');
+    }
+
+    // Three values, and the comment on `reconciled` below says so — but the
+    // field went in as `d.reconciled ?? null`, unchecked, and the reader then
+    // asked whether it was exactly `false`. So anything else VOUCHED: the
+    // plausible hand-written `"reconciled": "false"` and a stray `0` both
+    // granted the exemption they were written to withhold, and converge's
+    // warning is about `null`, so neither bridge said a word. Closed on both
+    // sides — the reader withholds on an unreadable value too
+    // (`cannotVouch`), and this refuses one at the door.
+    if (![true, false, null, undefined].includes(d.reconciled)) {
+      throw new Error(`decision for ${JSON.stringify(d.title)} carries reconciled: `
+        + `${JSON.stringify(d.reconciled)}; the field is the fold's own answer to whether a `
+        + 'report carried this identity, so it records true, false or null and nothing else '
+        + 'can be read as one of them');
     }
     // A fix commit on a decision that fixed nothing asserts the change the
     // decision says was not made — and `fixCommit` is what `closureOf` reads,
@@ -1209,7 +1244,7 @@ export function recordDecisions(ledger, decisions, {
       // reading of report.json rather than the batch's claim: `true` bound to a
       // finding, `false` checked and no finding carries it, `null` no report
       // reached the fold. A decision that never went through the fold has no
-      // statement to keep and records `null` — see `isSelfIdentified`.
+      // statement to keep and records `null` — see `cannotVouch`.
       reconciled: d.reconciled ?? null,
       agent: d.agent ?? null,
       // Which commit closed THIS finding, where `atCommit` below is the commit

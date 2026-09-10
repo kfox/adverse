@@ -581,8 +581,9 @@ export function foldFixPayloads(payloads, { report = null, briefing = null } = {
 // names it, while an unbound `noted` records fine and excuses nothing — the
 // fold's own `reconciled: false` is what `uncoveredDecisions` withholds its
 // exemption on. That is narrower than "only an identity the report carried
-// excuses anything": `isSelfIdentified` reads `reconciled === false`, so an
-// entry from a fold that consulted no report records `null` and still excuses.
+// excuses anything": `cannotVouch` withholds on `false` and on a value no fold
+// wrote, so an entry from a fold that consulted no report records `null` and
+// still excuses.
 // Withholding on `null` too would make a hand-written decisions.json unable to
 // excuse anything, and that call belongs to the orchestrator that chose to fold
 // without a report — which is why both bridges warn about it on stderr.
@@ -606,8 +607,9 @@ function payloadEntries(payload) {
 }
 
 // What made EVERY citation disagree at once, as far as the payloads and this
-// briefing can say: `'briefing'`, `'either'`, or null for "one wrong pair at a
-// time", which is the ordinary case and needs no paragraph of its own.
+// briefing can say: `'briefing'`, `'partial'`, `'either'`, or null for "one
+// wrong pair at a time", which is the ordinary case and needs no paragraph of
+// its own.
 //
 // The refusal is right in all three — an id and a title naming different
 // findings cannot both be honored — but the remedy is not, and pointing an
@@ -629,6 +631,17 @@ function payloadEntries(payload) {
 // briefing, which is true only of a briefing from an unrelated review and is
 // exactly the case that needs the least explaining.
 //
+// Between those two lies the shape a re-minted briefing actually tends to
+// have: SOME of the cited titles in it and some not, because two iterations of
+// the same review share most of their findings and not all of them. Answering
+// `'either'` there was a false claim and an impossible instruction — the
+// paragraph says every one of these titles is in this briefing under another
+// id, and offers a swap inside the payload as one of two remedies, when a
+// title this briefing never states cannot have been paired with another of its
+// entries. `'partial'` is that third state, and it points at the briefing:
+// whatever else is true, this one does not hold every finding these payloads
+// decided.
+//
 // One thing holds in every non-null answer, and it was the first way of
 // getting this wrong: every citation the check COULD contradict does. The
 // denominator is not every stated id — an id that resolves to nothing leaves
@@ -646,7 +659,9 @@ export function transpositionCause(changes, payloads, briefing) {
   if (transposed.length !== stated - unresolvable) return null;
 
   const titles = new Set(briefingEntries(briefing).map((e) => normalizeTitle(e.title)));
-  return transposed.every((c) => !titles.has(normalizeTitle(c.title))) ? 'briefing' : 'either';
+  const briefed = transposed.filter((c) => titles.has(normalizeTitle(c.title))).length;
+  if (briefed === 0) return 'briefing';
+  return briefed === transposed.length ? 'either' : 'partial';
 }
 
 export function reconciliations(payloads, report, briefing = null) {

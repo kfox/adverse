@@ -574,6 +574,49 @@ test('a swap inside this briefing is named as one of two answers, not as the bri
   }
 });
 
+test('a briefing holding some of these titles is named ahead of the payload', () => {
+  // The shape a re-minted briefing actually tends to have, and the one the
+  // two answers above had no state for: two iterations of the same review
+  // share most of their findings and not all of them, so SOME of the cited
+  // titles are in this briefing and some are not.
+  //
+  // Answering "either" there made a false claim and gave an impossible
+  // instruction — that every one of these titles is in this briefing under
+  // another id, and that the payload's pairs may be swapped — when a title
+  // this briefing never states cannot have been paired with another of its
+  // entries. Whatever else is true, this briefing does not hold every finding
+  // these payloads decided.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...twoCitations,
+      fixed: [{ ...twoCitations.fixed[0], id: 'F3', title: 'the budget is not enforced' }],
+      declined: [{
+        ...twoCitations.declined[0],
+        id: 'F1',
+        title: 'a finding this briefing does not carry at all',
+      }],
+    });
+    const out = path.join(dir, 'decisions.json');
+
+    const r = run(['--fix', src,
+      '--briefing', write(dir, 'briefing.json', twoEntryBriefing),
+      '--report', write(dir, 'report.json', mergedReport), '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, /EVERY id here disagrees/, r.stdout);
+    assert.match(r.stdout, /only SOME of these titles are in this briefing/, r.stdout);
+    assert.match(r.stdout, /No swap inside a payload\n    produces that/, r.stdout);
+    assert.doesNotMatch(r.stdout, /every one of these titles IS in this briefing/,
+      'not every one of them is, and offering a payload swap here is impossible');
+    assert.doesNotMatch(r.stdout, /not one of these titles is in this briefing/,
+      'one of them is, so the unrelated-briefing paragraph does not apply either');
+    assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a fold with no report warns that its noted entries still excuse', () => {
   // src/decisions.mjs grants the vouching exemption on `reconciled: null` and
   // says twice that the call belongs to "the orchestrator that chose to fold
@@ -762,7 +805,8 @@ test('a --briefing-only fold says nothing about identities no report was read fo
   // block fired on all of them: "the fold checked each of these against the
   // report and no lane had filed it", over a fold that read no report. Its
   // stated consequence is the inverse of what happens — `reconciled` is `null`
-  // here, and `isSelfIdentified` withholds the exemption only on `false`.
+  // here, and `cannotVouch` withholds the exemption on `false` and on a
+  // value no fold wrote — never on `null`.
   const dir = freshTmp();
   try {
     const src = write(dir, 'fix-auth-guard.json', {
@@ -1207,8 +1251,8 @@ test('a named-not-fixed identity in no finding is named, and excuses nothing', (
   // The consequence is pinned because the block used to state its inverse. It
   // promised that from the next iteration any decision with the same title,
   // kind and file is excused from the SETTLES NOTHING check — but the fold
-  // stamps `reconciled: false` on exactly this population, `isSelfIdentified`
-  // (src/ledger.mjs) is that field being false, and `uncoveredDecisions`
+  // stamps `reconciled: false` on exactly this population, `cannotVouch`
+  // (src/ledger.mjs) reads that field, and `uncoveredDecisions`
   // withholds its one exemption on it. A block whose stated consequence does
   // not happen teaches an operator who checks once to skip the block, which
   // costs the one read it exists to prompt.

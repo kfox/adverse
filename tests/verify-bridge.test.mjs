@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -547,6 +547,44 @@ test('a --briefing whose findings is not an array is exit 2, naming the file', (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+for (const [label, doc, reason] of [
+  ['whose findings is an object', { decisions: [] },
+   'it died with `object is not iterable` at exit 1, which is this bridge\'s'
+   + ' code for a payload that failed its schema'],
+  ['carrying no findings key at all', { version: 1 },
+   'it indexed to an empty map at exit 0, and every round-2 addition then fell'
+   + ' through to the reopened fallback with a null anchor'],
+]) {
+  // The same rule, one file over from the guard above: "I could not find the
+  // findings" must never come to mean "there were none". `--report` is the
+  // anchor source of last resort and the only file that holds a finding a
+  // round-2 reviewer ADDED, so an empty index there is exactly the silent
+  // failure that fallback exists to make loud.
+  test(`a --report ${label} is exit 2, naming the file`, () => {
+    const dir = freshTmp();
+    try {
+      const report = path.join(dir, 'report.json');
+      writeFileSync(report, JSON.stringify(doc));
+      const src = path.join(dir, 'verify-auditor.json');
+      writeFileSync(src, JSON.stringify({
+        persona: 'auditor',
+        verified: [{ id: 'F1', title: 'a title', status: 'open', reason: 'r' }],
+        added: [],
+      }));
+
+      const r = runVerify(['--verify', src, '--outdir', dir, '--report', report]);
+
+      assert.equal(r.status, 2, `${reason}\n${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /report\.json/, r.stderr);
+      assert.doesNotMatch(r.stderr, /at file:|not iterable|TypeError/, r.stderr);
+      assert.equal(existsSync(path.join(dir, 'round1-auditor.verified.json')), false,
+        'and nothing is written on an input it could not read');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
 
 test('a title-less briefing entry does not answer an id lookup here either', () => {
   // The sibling of the hole `briefingEntries` closes for decisions.mjs, in the

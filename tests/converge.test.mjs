@@ -741,8 +741,8 @@ test('an entry the fold checked against a report is not warned about', () => {
 });
 
 test('a reconciled the fold never writes is refused, not granted the exemption', () => {
-  // `isSelfIdentified` reads `reconciled === false`, so anything that is not
-  // exactly `false` VOUCHES — and the field went into the ledger as
+  // The reader asked whether `reconciled` was exactly `false`, so anything
+  // that is not VOUCHED — and the field went into the ledger as
   // `d.reconciled ?? null`, unchecked, while its own comment said three values.
   // A hand-written `"false"` is the string spelling of the one value that
   // withholds the exemption, and it granted it; converge's warning is about

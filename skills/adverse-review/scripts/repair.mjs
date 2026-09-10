@@ -77,13 +77,32 @@ try {
 const titleById = new Map(entries.map((f) => [f.id, f.title]));
 const reporterById = new Map(entries.map((f) => [f.id, f.reporter]));
 
-// Every id this briefing STATES, usable entry or not, so an id it does carry is
-// not reported as an id it does not — the same distinction decisions.mjs makes.
-// "Unresolvable" sends the reviewer to check their citation; for an entry this
-// tool skipped, there is nothing to check it against.
-const statedIds = new Set((briefing.findings ?? [])
-  .filter((f) => f && typeof f.id === 'string' && f.id).map((f) => f.id));
-const groupIds = new Set((briefing.groups ?? []).map((g) => g.id));
+// Every id one of this briefing's lists STATES, usable entry or not, so an id
+// it does carry is not reported as an id it does not — the same distinction
+// decisions.mjs makes. "Unresolvable" sends the reviewer to check their
+// citation; for an entry this tool skipped, there is nothing to check it
+// against.
+//
+// One helper for both lists, because the second copy of it was written without
+// the `f &&` guard the first has: `[null]` — a triage output one element short
+// of its shape — reached `.map((g) => g.id)` as a raw TypeError at exit 1, and
+// exit 1 is this bridge's code for a payload that failed its schema.
+//
+// A list that is not a list is REFUSED here rather than read as empty. Read as
+// empty, a malformed `groups` reports every group ruling in every payload as
+// unresolvable — which sends the reviewer to check citations that are correct,
+// and blames the payloads for the shape of the briefing.
+const statedIdsIn = (list, key) => {
+  if (list !== undefined && list !== null && !Array.isArray(list)) {
+    process.stderr.write(`repair: ${oneLine(values.briefing)}: \`${key}\` is not an array\n`);
+    process.exit(2);
+  }
+  return new Set((list ?? [])
+    .filter((e) => e && typeof e.id === 'string' && e.id).map((e) => e.id));
+};
+
+const statedIds = statedIdsIn(briefing.findings, 'findings');
+const groupIds = statedIdsIn(briefing.groups, 'groups');
 
 let repaired = 0, unresolved = 0, checked = 0;
 

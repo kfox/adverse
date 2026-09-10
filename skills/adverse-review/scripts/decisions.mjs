@@ -349,9 +349,9 @@ const isNamed = (c) => c.disposition === NAMED_NOT_FIXED_DISPOSITION;
 const transposed = changes.filter((c) => c.cause === 'briefing');
 
 // The extra paragraph for a batch where EVERY citation disagrees, keyed on what
-// `transpositionCause` could establish. Neither answer contradicts the refusal
-// above; they say which file to open first, which is the whole cost of getting
-// this wrong.
+// `transpositionCause` could establish. None of the three contradicts the
+// refusal above; they say which file to open first, which is the whole cost of
+// getting this wrong.
 const TRANSPOSITION_CAUSE = {
   briefing:
     '    EVERY id here disagrees, and not one of these titles is in this briefing\n'
@@ -359,6 +359,15 @@ const TRANSPOSITION_CAUSE = {
     + '    payload per citation. Triage re-mints ids positionally on every run and\n'
     + '    writes them to the same path. Check that this briefing.json is the one\n'
     + '    these payloads were authored against before correcting anything in them.\n',
+  partial:
+    '    EVERY id here disagrees, and only SOME of these titles are in this briefing\n'
+    + '    at all — the rest name findings it does not hold. No swap inside a payload\n'
+    + '    produces that, because a title this briefing never states cannot have been\n'
+    + '    paired with another of its entries. Start with this briefing.json and with\n'
+    + '    the citations above whose titles are missing from it: either it is not the\n'
+    + '    one these payloads were authored against — triage re-mints ids positionally\n'
+    + '    on every run, and two iterations of one review share most findings, not all\n'
+    + '    — or those titles were retyped rather than copied.\n',
   either:
     '    EVERY id here disagrees, and every one of these titles IS in this briefing,\n'
     + '    under another id. Two inputs look exactly like this and nothing here tells\n'
@@ -559,9 +568,9 @@ if (misanchored.length) {
 if (unreported.length) {
   // Its own heading, never folded into the blocks above: an unbound `noted`
   // entry is not the same accusation. It records fine and settles nothing by
-  // design, and it vouches for nothing either — `isSelfIdentified`
-  // (src/ledger.mjs) reads `reconciled === false`, which is the fold saying it
-  // looked this identity up in a report and no lane had filed it. This block is
+  // design, and it vouches for nothing either — `cannotVouch`
+  // (src/ledger.mjs) withholds on `reconciled === false`, which is the fold
+  // saying it looked this identity up in a report and no lane had filed it. This block is
   // built from the TITLE half of those, not all of them: cause `anchor` records
   // `false` too, and prints under its own heading above, which carries the same
   // consequence. It is NOT the wider claim that only an identity the report
@@ -580,7 +589,7 @@ if (unreported.length) {
        + '    The fold checked each of these against the report and no lane had filed it,\n'
        + '    which is the one fact `--record`\'s SETTLES NOTHING check withholds its\n'
        + '    exemption on: a later decision whose only cover is one of these entries is\n'
-       + '    named there anyway (`isSelfIdentified`, src/ledger.mjs). So what reaches the\n'
+       + '    named there anyway (`cannotVouch`, src/ledger.mjs). So what reaches the\n'
        + '    ledger is this batch\'s own claim about a finding no lane reported, on fields\n'
        + '    nothing corrected. Read each line against report.json before you record it:\n'
        + '    an item no lane filed is either a finding none of them has reported yet, or\n'

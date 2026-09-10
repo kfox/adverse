@@ -365,3 +365,59 @@ test('a refused payload leaves no half-published outdir', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a null entry in `groups` does not take the whole phase down', () => {
+  // The same `f &&` guard `findings` has, on the list that was indexed without
+  // it: `[null]` is a triage output one element short of its shape, and
+  // `.map((g) => g.id)` answered it with a raw TypeError at exit 1 — this
+  // bridge's code for a payload that failed its schema, on a briefing the
+  // payload did not write.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{ id: 'F1', title: 'Canonical Title', reporter: 'auditor' }],
+      groups: [null, { id: 'G1', title: 'one root cause' }],
+    }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward',
+      groups: [{ id: 'G1', ruling: 'accept' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /TypeError|unresolvable id/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a `groups` that is not an array is refused, not read as no groups at all', () => {
+  // Read as empty, it reports every group ruling in every payload as
+  // unresolvable — which sends the reviewer to check citations that are
+  // correct, and blames the payloads for the shape of the briefing.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{ id: 'F1', title: 'Canonical Title', reporter: 'auditor' }],
+      groups: { G1: 'one root cause' },
+    }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward',
+      groups: [{ id: 'G1', ruling: 'accept' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /briefing\.json: `groups` is not an array/, r.stderr);
+    assert.doesNotMatch(r.stderr, /unresolvable id/,
+      'the payload cited a group correctly; the briefing is what could not be read');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1591,6 +1591,42 @@ test('a note no fold ever checked still vouches, and records that nothing checke
   assert.deepEqual(uncoveredDecisions(later, unreportedReport, { ledger }), []);
 });
 
+test('a note whose reconciled no fold wrote does not vouch on the reader\'s side', () => {
+  // `recordDecisions` refuses such a value now, and that closed this for the
+  // writer only: `loadLedger` validates `version` and nothing per-entry, so a
+  // row written before that guard — or hand-edited, which is a thing an
+  // operator does to a ledger — carried `"false"`, the string spelling of the
+  // one value that withholds. Asked whether the field was exactly `false`, the
+  // reader said no and VOUCHED, which is the laundering this gate exists to
+  // refuse spelled with two quotes.
+  const ledger = notedLedger(false);
+  ledger.entries[0].reconciled = 'false';
+  const later = [{ ...mintedItem, disposition: 'fixed', reason: 'bounded it',
+                   fixCommit: 'bbb2222' }];
+
+  const [uncovered] = uncoveredDecisions(later, unreportedReport, { ledger });
+
+  assert.equal(uncovered?.disposition, 'fixed');
+  // Its own sentence, because it is its own remedy: nothing here says a fold
+  // made any statement about this identity, so there is nothing to tell the
+  // operator about their payloads.
+  assert.match(uncovered.why, /holds a value no fold writes/);
+  assert.doesNotMatch(uncovered.why, /excusing its own decision/);
+});
+
+test('a note from a ledger written before the field existed still vouches', () => {
+  // The other side of that, and the reason the withholding is keyed on the
+  // values this tool writes rather than on `!== false`: a row with no
+  // `reconciled` key at all is an older ledger at the same version, not a
+  // forged one, and it vouches exactly as the `null` a hand-written
+  // decisions.json records does.
+  const ledger = notedLedger(undefined);
+  delete ledger.entries[0].reconciled;
+  const later = [{ ...mintedItem, disposition: 'declined', reason: 'budgeted upstream' }];
+
+  assert.deepEqual(uncoveredDecisions(later, unreportedReport, { ledger }), []);
+});
+
 // --- the documented spelling of a decision's fix commit ---------------------
 
 test('a hand-written decision spelling its commit `commit` records it', () => {
