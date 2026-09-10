@@ -29,11 +29,11 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
+import { oneLine, parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
-  FIX_SUPPORT, UNREPORTED_DISPOSITION, checkBinding, clipReason, convergenceStatus,
+  FIX_SUPPORT, UNREPORTED_DISPOSITION, checkBinding, convergenceStatus,
   emptyLedger, loadLedger, recordDecisions, requireFindings, saveLedger,
   summarizeDispositions, uncoveredDecisions, unsupportedFixes,
 } = await importFromSrc('ledger.mjs');
@@ -95,15 +95,6 @@ function decisionsIn(payload) {
   if (Array.isArray(payload?.decisions)) return payload.decisions;
   return null;
 }
-
-// Both modes below render strings out of JSON read off disk — untrusted files —
-// as PLAIN TEXT to stdout, which is what the Skill tells the orchestrating agent
-// to read and act on. `clipReason` bounds length and strips control bytes but
-// deliberately keeps newlines, because a `reason` is prose and JSON-escaping
-// contains it in briefing.json. Here there is no JSON to escape it: a newline
-// ends the line and the next one can look like the tool speaking. So every
-// interpolated value is also flattened to one line.
-const oneLine = (v) => clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
 
 const repo = values.repo ?? process.cwd();
 const head = values.head ?? 'HEAD';

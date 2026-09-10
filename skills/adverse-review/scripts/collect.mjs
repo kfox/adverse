@@ -4,7 +4,7 @@
 
 import path from 'node:path';
 
-import { parseBridgeArgs, usage, writeOutput } from './bridge-io.mjs';
+import { makeWriteQueue, parseBridgeArgs, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { collectDirectory, collectDiff } = await importFromSrc('collect.mjs');
@@ -36,11 +36,19 @@ try {
   } else {
     ({ block, files } = collectDirectory(target));
   }
-  writeOutput('collect', values.out, block);
+  // Two outputs, so the queue rather than two single writes. `--out` and
+  // `--files-out` are a pair — a source block and the list of what is in it —
+  // and the caller supplies both paths independently, so nothing stops them
+  // naming one file. Written one after the other, that silently left the file
+  // list where the block was promised; queued, the second claim on a
+  // destination is refused before the first byte is written.
+  const out = makeWriteQueue('collect');
+  out.queue(values.out, 'source block', block);
   if (values['files-out']) {
-    writeOutput('collect', values['files-out'], JSON.stringify(files, null, 2));
+    out.queue(values['files-out'], 'file list', JSON.stringify(files, null, 2));
   }
-  process.stdout.write(`collected ${files.length} files (${block.length} chars) -> ${values.out}\n`);
+  out.flush('collected');
+  process.stdout.write(`collected ${files.length} files (${block.length} chars)\n`);
 } catch (e) {
   process.stderr.write(`collect: ${e.message}\n`);
   process.exit(1);

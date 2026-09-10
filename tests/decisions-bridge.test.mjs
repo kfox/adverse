@@ -10,8 +10,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
-  chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync,
-  symlinkSync, writeFileSync, writeSync,
+  chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync,
+  rmSync, symlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -1066,12 +1066,15 @@ test('a symlink planted at --out after the claim is not written through', async 
     assert.equal(status, 2, fold.stderr);
     assert.match(fold.stderr, /decisions\.json: cannot be written/);
     assert.equal(readFileSync(decoy, 'utf-8'), 'not this bridge\'s to write\n');
-    // And nothing readable is left at `--out`, which is what every other
-    // refusal here asserts and what the notice on the way out claims. A write
-    // that fails part way has already truncated the destination, so the failed
-    // write clears it — here that is the planted link, which is also the only
-    // reachable version of the case.
-    assert.equal(existsSync(out), false, 'a refused write left something at --out');
+    // And the planted link is still there, because the open was refused and this
+    // run therefore touched nothing. That is not indifference to the mess: a
+    // refused OPEN and a refused WRITE are different (bridge-io.mjs), and only
+    // the second has truncated anything. Unlink permission comes from the
+    // directory, so a recovery that fires on every error deletes files this run
+    // was never allowed to open — an operator's own `--out` from the previous
+    // iteration among them.
+    assert.equal(lstatSync(out).isSymbolicLink(), true,
+      'a refusal that opened nothing must leave --out as it found it');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

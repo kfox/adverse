@@ -32,25 +32,16 @@
 
 import { rmSync, statSync } from 'node:fs';
 
-import { parseBridgeArgs, readJson, usage, writeOutput } from './bridge-io.mjs';
+import { oneLine, parseBridgeArgs, readJson, usage, writeOutput } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
   NAMED_NOT_FIXED_DISPOSITION, briefingEntries, foldFixPayloads, reconciliations,
 } = await importFromSrc('decisions.mjs');
 const {
-  clipReason, isSettled, requireFindings, summarizeDispositions,
+  isSettled, requireFindings, summarizeDispositions,
 } = await importFromSrc('ledger.mjs');
 const { validateFix } = await importFromSrc('prompts.mjs');
-
-// Everything this bridge prints renders strings read off disk to stdout, which
-// is what the Skill tells the orchestrating agent to read and act on.
-// `clipReason` bounds length and strips control bytes but keeps newlines,
-// because a reason is prose — so flatten too, or a newline ends the line and
-// the next one can look like the tool speaking. Defined up here because the
-// refusals below name the file they read, and a path is no more trustworthy
-// than a reason.
-const oneLine = (v) => clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
 
 // Positionals are fix payloads, so `--fix run/fix-*.json` works — the same
 // reason triage.mjs, repair.mjs and verify.mjs take them: strict parsing

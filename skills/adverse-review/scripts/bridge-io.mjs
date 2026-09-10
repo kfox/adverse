@@ -8,11 +8,12 @@
 // exit 1 is a claim about a review, and this run could not read one" — so a
 // script that never got as far as reading its input exits 2, everywhere.
 
-import { constants, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import { importFromSrc } from './package-root.mjs';
 
+const { clipReason } = await importFromSrc('ledger.mjs');
 const { parsePlan, splitLanes } = await importFromSrc('scaling.mjs');
 const { refuseDirectRun } = await importFromSrc('entryGuard.mjs');
 
@@ -21,6 +22,24 @@ const { refuseDirectRun } = await importFromSrc('entryGuard.mjs');
 // Unlike package-root.mjs beside it, this file has already located src/ and can
 // use the shared guard.
 refuseDirectRun(import.meta.url);
+
+// One sentence, on one line, bounded — for every value a bridge interpolates
+// into what it prints.
+//
+// What these bridges print is what the Skill tells the orchestrating agent to
+// read and act on, and every string in it came off disk or off argv: a finding's
+// `reason`, a file path, an errno message. `clipReason` bounds the length and
+// maps control bytes to spaces, but deliberately keeps newlines, because a
+// reason is prose and JSON-escaping contains it in briefing.json. Printed as
+// plain text there is nothing to contain it: a newline ends this tool's
+// sentence, and the next line can look like the tool speaking.
+//
+// Here rather than in two private copies: converge.mjs and decisions.mjs each
+// carried this line, which is two chances for one of them to drift from the
+// class `clipReason` covers.
+export function oneLine(value) {
+  return clipReason(String(value ?? '')).replace(/\s+/g, ' ').trim();
+}
 
 export function readJson(file, prefix) {
   try {
@@ -88,6 +107,44 @@ export function requireKnownPersona(persona, { prefix, file, personas }) {
 const CLAIMED_PATH_FLAGS = constants.O_WRONLY | constants.O_CREAT
   | constants.O_TRUNC | constants.O_NOFOLLOW;
 
+// The open and the write are two different failures, and only one of them has
+// touched the destination.
+//
+// A refused OPEN — EACCES on a read-only file, ELOOP on a symlink, ENOTDIR,
+// EISDIR — leaves whatever was there exactly as it was, and it must: the file
+// at `--out` may be the previous iteration's output, or an operator's own
+// `latest.json` symlink, and a run that wrote nothing does not get to delete
+// either. Unlink permission comes from the DIRECTORY, so a `writeFileSync` that
+// cleans up after any error will happily remove a file it was not allowed to
+// open.
+//
+// A refused WRITE has already truncated it, because the open did that. Some
+// prefix of a JSON document at a path the next glob reads is the one outcome
+// worse than not writing at all: unreadable is a refusal every reader here
+// handles, and half-readable is not. So that one is cleared, best-effort — the
+// reason the write failed is often the reason the unlink will.
+//
+// Splitting the two is why this opens the file itself instead of asking
+// `writeFileSync` to. An errno list would be the same judgment with a worse
+// failure mode: an error nobody enumerated defaults to whichever branch was
+// written first.
+function writeClaimed(dest, body) {
+  const fd = openSync(dest, CLAIMED_PATH_FLAGS);
+  try {
+    writeFileSync(fd, body, 'utf-8');
+  } catch (e) {
+    try {
+      rmSync(dest, { force: true });
+    } catch { /* named in the caller's refusal either way */ }
+    e.truncated = true;
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch { /* the write above is what this call is about */ }
+  }
+}
+
 // One output file, written the way the queue below writes its own.
 //
 // Seven bridges wrote a caller-supplied `--out` with their own
@@ -106,19 +163,17 @@ const CLAIMED_PATH_FLAGS = constants.O_WRONLY | constants.O_CREAT
 // review and a run that could not write its output made none.
 export function writeOutput(prefix, dest, body) {
   try {
-    writeFileSync(dest, body, { encoding: 'utf-8', flag: CLAIMED_PATH_FLAGS });
+    writeClaimed(dest, body);
   } catch (e) {
-    // Whatever reached the file is removed before the refusal. A write that
-    // fails PART WAY — ENOSPC, EDQUOT, EIO — has already truncated the
-    // destination and left some prefix of a JSON document at a path the next
-    // glob will pick up, which is the one outcome worse than not writing:
-    // unreadable is a refusal every reader here already handles, and
-    // half-readable is not. Best-effort, because the reason the write failed is
-    // often the reason the unlink will.
-    try {
-      rmSync(dest, { force: true });
-    } catch { /* named in the refusal below either way */ }
-    process.stderr.write(`${prefix}: ${dest}: cannot be written (${e.message.trim()})\n`);
+    // Which of the two failures this was, in the operator's terms. The errno is
+    // the cause and this is the consequence, and they are the reason to split
+    // the two at all: whether the file that was at `--out` is still there is
+    // not something anyone should have to infer from ELOOP versus ENOSPC.
+    process.stderr.write(`${prefix}: ${oneLine(dest)}: cannot be written`
+      + ` (${oneLine(e.message)})\n`
+      + (e.truncated
+        ? '    the write had already truncated it, so it was cleared\n'
+        : '    nothing was written, and what was there is unchanged\n'));
     process.exit(2);
   }
 }
@@ -180,17 +235,27 @@ export function makeWriteQueue(prefix) {
       const done = [];
       for (const { dest, src, body } of queued) {
         try {
-          writeFileSync(dest, body, { encoding: 'utf-8', flag: CLAIMED_PATH_FLAGS });
+          writeClaimed(dest, body);
         } catch (e) {
-          process.stderr.write(`${prefix}: ${dest}: cannot be written (${e.message.trim()})\n`
+          // "Nothing was written" was said on the strength of `done` being
+          // empty, which is a claim about the OTHER files. A write that failed
+          // part way through the first one had already emptied its destination
+          // and left a prefix of the new body there — measured under `ulimit
+          // -f`, an EFBIG four kilobytes in — so stderr announced nothing was
+          // written over a truncated payload the next glob reads as a whole one.
+          // `writeClaimed` clears that file; what is left to say is which files
+          // are on disk.
+          process.stderr.write(`${prefix}: ${oneLine(dest)}: cannot be written`
+            + ` (${oneLine(e.message)})\n`
             + (done.length
-              ? `    ${done.join(', ')} ${done.length === 1 ? 'was' : 'were'} already written,`
+              ? `    ${done.map(oneLine).join(', ')} ${done.length === 1 ? 'was' : 'were'}`
+                + ' already written,'
                 + ' so this outdir is partial: clear it or fold into a fresh one\n'
               : '    nothing was written\n'));
           process.exit(2);
         }
         done.push(dest);
-        process.stdout.write(`${verb} ${src} -> ${dest}\n`);
+        process.stdout.write(`${verb} ${src} -> ${oneLine(dest)}\n`);
       }
     },
   };

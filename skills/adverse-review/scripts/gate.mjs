@@ -77,9 +77,9 @@ const worktree = worktreeDigest(repo);
 
 const gate = runGate(checks, { cwd: repo, head, worktree, timeoutMs });
 
-// Exit 2, not 1, which `writeOutput` is where the reason for now lives: a run
-// that could not write its record established nothing, and exit 1 here would
-// read as "the gate is red".
+// Through `writeOutput` for the exit code as much as for the flags: a run that
+// could not write its record established nothing, and exit 1 here would read as
+// "the gate is red" — the one thing this bridge must never say by accident.
 writeOutput('gate', values.out, `${JSON.stringify(gate, null, 2)}\n`);
 
 process.stdout.write(`gate: ${gate.status} (${gate.summary})`
