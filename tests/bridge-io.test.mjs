@@ -287,7 +287,19 @@ const NOT_A_MEMBER = '(?<![\\w$])(?<!(?<!\\.)\\.)';
 // teaching only the first left an owner one level in — `state.files`, spelled
 // `state?.files` — matching nothing at all. The one-level case hid it, because
 // a bare `alias` has no dot for the difference to show up in.
-const optionalDots = (pattern) => pattern.replace(/\\\./g, '\\??\\.');
+//
+// Whitespace around the `?.`, because `state ?. files` is legal and the
+// sibling pattern below already tolerated it — three patterns disagreeing
+// about one spelling is the shape of every silent pass on this list. Not
+// BETWEEN the `?` and the `.`: that is one token, and `a ? . b` is a
+// conditional rather than an optional read.
+//
+// `memberOf` uses this for consistency and nothing more: it is called only on
+// `objects`, whose every dotted member is also in `names` by the time it
+// matters, so no fixture distinguishes a `memberOf` that spells `?.` from one
+// that does not. Said here rather than left as a mutation nobody could make
+// red.
+const optionalDots = (pattern) => pattern.replace(/\\\./g, '\\s*\\??\\.\\s*');
 const spelled = (name) => optionalDots(quoted(name));
 const boundary = (name) => new RegExp(`${NOT_A_MEMBER}${spelled(name)}(?![\\w$])`);
 const memberOf = (name) => new RegExp(`${NOT_A_MEMBER}${spelled(name)}\\s*\\??\\s*[.[]`);
@@ -1048,6 +1060,11 @@ for (const [label, src, dest] of [
   ['an alias of an inner object reached through an optional chain',
     'state.files.out = values.out;\nconst f = state?.files;\n'
     + 'writeFileSync(f.out, body);', 'f.out'],
+  // A space either side of the dot is legal JavaScript, and one pattern here
+  // already tolerated it while the other two did not.
+  ['an alias reached through an optional chain with spaces around the dot',
+    'state.files.out = values.out;\nconst f = state ?. files;\n'
+    + 'writeFileSync(f.out, body);', 'f.out'],
   // And the fallback, on a literal this cannot read pair by pair: a shorthand
   // property has no `:`, so which key holds the caller's path is unknown and
   // the whole name is tainted rather than the one pair it could read.
@@ -1163,6 +1180,11 @@ for (const [label, src] of [
   ['a fixed destination read off an optional chain',
     'const config = { out: \'x.json\', input: values.in };\n'
     + 'writeFileSync(config?.out, body);'],
+  // And the same read spaced out, which the exemption has to see as naming a
+  // property just as the offender pattern above has to see it as one.
+  ['a fixed destination read off a spaced-out optional chain',
+    'const config = { out: \'x.json\', input: values.in };\n'
+    + 'writeFileSync(config ?. out, body);'],
   // A configuration object holding a fixed path beside a caller-supplied one,
   // which is one line away from the `{ out: values.out }` fixture above and
   // the reason an object literal binds its properties instead of its name.
