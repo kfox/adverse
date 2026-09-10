@@ -521,6 +521,52 @@ test('a briefed finding cited by an id the briefing does not carry binds by titl
   }
 });
 
+test('a title-less briefing entry does not answer an id lookup here either', () => {
+  // The sibling of the hole `briefingEntries` closes for decisions.mjs, in the
+  // guard that file's comments name. Indexed on `id` alone, a title-less entry
+  // answered `v.id`'s lookup, its empty title disagreed with the verification's
+  // real one, and the binding was dropped with `id "F1" is undefined in the
+  // briefing` — a payload accused for a field triage failed to write. What the
+  // drop costs is the anchor: a still-open critical came back at the reopened
+  // fallback, `warning` with no file and no line, so the loop stopped reporting
+  // a blocking finding as blocking.
+  //
+  // Skipping the entry lets the title route run, and the title is the join key
+  // every downstream edge already rides on.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: [
+      // Triage wrote this one without a title. It carries the id the reviewer
+      // cited, so it is what the id index answered with.
+      { id: 'F1', severity: 'info', kind: 'design', file: 'src/nit.mjs', line: 2,
+        counterpart: null, fix: null },
+      { id: 'F2', severity: 'critical', kind: 'defect', file: 'src/auth.mjs', line: 88,
+        counterpart: null, title: 'Auth bypass in token check', fix: null },
+    ] }));
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F1', title: 'Auth bypass in token check',
+        status: 'open', reason: 'still bypassable' }],
+      added: [],
+    }));
+
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /is undefined in the briefing/, r.stderr);
+    assert.doesNotMatch(r.stderr, /anchor not inherited/, r.stderr);
+    const [f] = JSON.parse(
+      readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
+    assert.equal(f.severity, 'critical', 'a still-open critical comes back blocking');
+    assert.equal(f.file, 'src/auth.mjs');
+    assert.equal(f.line, 88);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an anchor document whose findings carry no id is still reachable by title', () => {
   // The early return that guards `bindToBriefing` used to test `briefed.size`
   // alone. A document whose findings carry no `id` fills `briefedByTitle` and

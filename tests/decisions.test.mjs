@@ -402,7 +402,7 @@ test('a mis-copied title cannot move a decision onto the finding it names', () =
   // gap names the field the guard actually read.
   assert.deepEqual(reconciliations([payload({ fixed: [], declined: [transposed] })], report),
     [{ agent: 'fix-auth-guard', title: 'the retry loop never exits', disposition: 'declined',
-       bound: false, cause: 'anchor', staleId: null,
+       bound: false, cause: 'anchor', staleId: null, unusableId: false,
        gap: 'the files differ (src/a.c here, src/b.c in the report)', fields: [] }]);
 
   // And it is reported rather than silently settling the wrong finding.
@@ -830,6 +830,6 @@ test('an unbound named-not-fixed entry is reported as unbound, not as corrected'
   // all, which is the one case the title remedy is right for.
   assert.deepEqual(reconciliations(p, merged), [{
     agent: 'fix-auth-guard', title: 'preflight_emu is not budgeted', disposition: 'noted',
-    bound: false, cause: 'title', gap: null, staleId: null, fields: [],
+    bound: false, cause: 'title', gap: null, staleId: null, unusableId: false, fields: [],
   }]);
 });

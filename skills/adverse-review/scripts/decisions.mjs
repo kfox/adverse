@@ -36,7 +36,8 @@ import { oneLine, parseBridgeArgs, readJson, usage, writeOutput } from './bridge
 import { importFromSrc } from './package-root.mjs';
 
 const {
-  NAMED_NOT_FIXED_DISPOSITION, briefingEntries, foldFixPayloads, reconciliations,
+  NAMED_NOT_FIXED_DISPOSITION, briefingEntries, foldFixPayloads, foreignBriefing,
+  reconciliations,
 } = await importFromSrc('decisions.mjs');
 const {
   isSettled, requireFindings, summarizeDispositions,
@@ -347,19 +348,6 @@ const isNamed = (c) => c.disposition === NAMED_NOT_FIXED_DISPOSITION;
 // batch — see `bindingFor`'s `statesId` (src/decisions.mjs).
 const transposed = changes.filter((c) => c.cause === 'briefing');
 
-// How many citations the briefing check could have contradicted, counted off
-// the payloads rather than off `changes`: a citation that binds cleanly leaves
-// no row there, so `changes` cannot tell "one of four disagreed" from "the only
-// one did".
-//
-// The distinction is the whole of the finding below. `briefing.mjs` re-mints
-// ids positionally on every triage run and the loop writes them to the same
-// path, so handing this bridge an iteration's other briefing makes EVERY
-// citation disagree at once — and the refusal diagnosed that as N payloads
-// contradicting themselves, which is the one thing it cannot be.
-const citations = payloads
-  .flatMap((p) => [...(p?.fixed ?? []), ...(p?.declined ?? [])])
-  .filter((d) => d && d.id !== null && d.id !== undefined && d.id !== '').length;
 
 // A transposed pair is the one answer this bridge REFUSES on, and the refusal
 // is why the check exists rather than being the check's report of itself.
@@ -386,13 +374,14 @@ if (transposed.length) {
     + '    both be right. Find which finding was actually decided and correct the\n'
     + '    payload: `converge.mjs --record` takes no --briefing, so it would bind\n'
     + '    each of these by its title and settle whichever finding that names.\n'
-    + (transposed.length === citations && citations > 1
-      ? '    EVERY id in these payloads disagrees, which is more likely to be one wrong\n'
-        + '    --briefing than one wrong payload per citation: triage re-mints ids\n'
-        + '    positionally on every run and writes them to the same path, so a briefing\n'
-        + '    from another iteration disagrees with all of them at once. Check that this\n'
-        + '    briefing.json is the one these payloads were authored against before\n'
-        + '    correcting anything in them.\n'
+    + (foreignBriefing(changes, payloads, briefing)
+      ? '    EVERY id here disagrees, and not one of these titles is in this briefing\n'
+        + '    at all — which is more likely to be one wrong --briefing than one wrong\n'
+        + '    payload per citation. Triage re-mints ids positionally on every run and\n'
+        + '    writes them to the same path, so a briefing from another iteration\n'
+        + '    disagrees with all of them at once. Check that this briefing.json is the\n'
+        + '    one these payloads were authored against before correcting anything in\n'
+        + '    them.\n'
       : ''));
   refuse(1, 'decisions: a payload contradicts its own identity claims; refusing to fold it\n');
 }
@@ -470,6 +459,17 @@ function staleIdOutcome(c) {
   return STALE_ID_OUTCOME[c.cause]
     ?? `unbound, for a reason this block has no wording for (${oneLine(c.cause)})`;
 }
+
+// Why the id resolved to nothing, which is two different things and only one of
+// them is the payload's. An id this briefing does STATE, on an entry the tool
+// skipped as unusable, was reported as a stale citation — sending the operator
+// to check an id against a file that plainly carries it.
+function staleIdCause(c) {
+  return c.unusableId
+    ? ' — this briefing states that id, on an entry with no usable title'
+    : '';
+}
+
 // Gated on the CAUSE its prose describes, not on boundness. `changes` is
 // computed whenever either document was given, so on a `--briefing`-only fold
 // every named entry arrives unbound carrying `cause: 'unchecked'` — and this
@@ -511,11 +511,17 @@ if (staleIds.length) {
   out += `  ID NAMES NO BRIEFING ENTRY — the id/title check could not run on these`
        + ` (${staleIds.length}):\n`
        + staleIds.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}] states id`
-           + ` ${oneLine(c.staleId)}, ${staleIdOutcome(c)}\n`).join('')
+           + ` ${oneLine(c.staleId)}, ${staleIdOutcome(c)}${staleIdCause(c)}\n`).join('')
        + '    Briefing ids are re-minted every triage run, so one copied from an\n'
        + '    earlier iteration names nothing in this briefing. Check the id against\n'
        + '    briefing.json — the title may well be right, and the title is what binds\n'
-       + '    a decision here. Each line above says what the title did.\n';
+       + '    a decision here. Each line above says what the title did.\n'
+       + (staleIds.some((c) => c.unusableId)
+         ? '    A line saying this briefing states the id is not a payload problem: the\n'
+           + '    entry it names carries no usable title, so there was nothing to check\n'
+           + '    the citation against. That is a triage output to look at, not a\n'
+           + '    citation to correct.\n'
+         : '');
 }
 if (misanchored.length) {
 

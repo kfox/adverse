@@ -309,6 +309,11 @@ function toNamedNotFixed(item, { agent, n, finding = null, checked = false }) {
 // calls F3 undefined` — a payload blamed, in a sentence built to quote a title,
 // for a field the briefing did not have.
 //
+// Through `normalizeTitle`, which is what the comparison uses. Truthiness alone
+// closed the instance and left the class: `title: "   "` and `title: "."` both
+// pass `typeof === 'string' && e.title`, normalize to `''`, and refuse the batch
+// with `the briefing calls F3 " "`.
+//
 // The refusal is `requireFindings`' sibling and for the same reason: the bridge
 // needs this exact list to decide whether the file it was handed is a briefing
 // at all, and it had grown a hand-typed copy of the predicate. Two copies is
@@ -320,13 +325,29 @@ export function briefingEntries(briefing) {
   }
   return briefing.findings.filter((e) => e
     && typeof e.id === 'string' && e.id
-    && typeof e.title === 'string' && e.title);
+    && normalizeTitle(e.title));
 }
 
 function briefingIndex(briefing) {
   const byId = new Map();
   for (const e of briefingEntries(briefing)) byId.set(e.id, e);
   return byId;
+}
+
+// Every id the briefing STATES, usable entry or not.
+//
+// The difference matters to the operator and only to the operator: an id that
+// names nothing in this briefing is a citation from an earlier iteration, and
+// an id that names an entry this tool could not use is this tool's own briefing
+// being incomplete. Both leave the id/title check with nothing to compare, and
+// the bridge told the operator to "check the id against briefing.json" in both
+// — advice that sends them looking for an id the file plainly carries.
+function briefingIds(briefing) {
+  const ids = new Set();
+  for (const e of briefing?.findings ?? []) {
+    if (e && typeof e.id === 'string' && e.id) ids.add(e.id);
+  }
+  return ids;
 }
 
 // Which report finding a decision may be bound to, and why not when the answer
@@ -386,6 +407,7 @@ function briefingIndex(briefing) {
 function bindingFor(report, briefing) {
   const haveBriefing = briefing !== null && briefing !== undefined;
   const briefed = haveBriefing ? briefingIndex(briefing) : new Map();
+  const stated = haveBriefing ? briefingIds(briefing) : new Set();
   const haveReport = report !== null && report !== undefined;
   const byTitle = new Map();
   if (haveReport) {
@@ -419,33 +441,45 @@ function bindingFor(report, briefing) {
     // references/convergence-loop.md tells an operator to pass on every fold.
     // It travels as `staleId` so binding and reporting can both happen.
     let staleId = null;
+    let unusableId = false;
     if (statesId && haveBriefing && d.id !== null && d.id !== undefined && d.id !== '') {
       const entry = briefed.get(d.id) ?? null;
-      if (!entry) staleId = d.id;
+      if (!entry) {
+        staleId = d.id;
+        // Which of the two it is, for the bridge's wording. `stated` carries
+        // the ids of entries this tool skipped as unusable, and telling an
+        // operator to check an id that briefing.json does carry is advice that
+        // cannot be followed.
+        unusableId = stated.has(d.id);
+      }
       else if (normalizeTitle(entry.title) !== normalizeTitle(d.title)) {
         return {
           finding: null,
           cause: 'briefing',
           staleId: null,
+          unusableId: false,
           gap: `the briefing calls ${d.id} ${JSON.stringify(entry.title)}`,
         };
       }
     }
-    if (!haveReport) return { finding: null, cause: 'unchecked', gap: null, staleId };
+    if (!haveReport) {
+      return { finding: null, cause: 'unchecked', gap: null, staleId, unusableId };
+    }
     const finding = byTitle.get(normalizeTitle(d.title)) ?? null;
-    if (!finding) return { finding: null, cause: 'title', gap: null, staleId };
+    if (!finding) return { finding: null, cause: 'title', gap: null, staleId, unusableId };
     if (!anchorsAgree(d, finding)) {
       return {
         finding: null,
         cause: 'anchor',
         staleId,
+        unusableId,
         // The same tolerance `anchorsAgree` applies, handed to the walk with
         // the same field list: a message that can name a field this guard
         // waved through is the defect one field over.
         gap: identityGap(d, finding, ANCHOR_FIELDS, { tolerateNullClaims: true }),
       };
     }
-    return { finding, cause: null, gap: null, staleId };
+    return { finding, cause: null, gap: null, staleId, unusableId };
   };
 }
 
@@ -571,16 +605,54 @@ function payloadEntries(payload) {
   ];
 }
 
+// Is the BRIEFING the likelier explanation for every citation disagreeing at
+// once, rather than every payload contradicting itself?
+//
+// `briefing.mjs` re-mints ids positionally on every triage run and the loop
+// writes them to the same path, so handing the fold another iteration's
+// briefing makes every citation disagree together. The refusal is right either
+// way — there is no correct fold — but the diagnosis is not, and "N payloads
+// each got their own pair wrong" is the least likely reading of "all of them".
+//
+// Two things have to hold, and each was a way of getting this wrong:
+//
+// - Every citation the check COULD contradict does. The denominator is not
+//   every stated id: an id that resolves to nothing leaves the check with
+//   nothing to compare and can never land in `transposed`, so counting those
+//   suppressed this whole diagnosis on any batch that also carried one stale
+//   citation — which a foreign briefing, being a different length, tends to
+//   produce.
+// - None of the disagreeing titles is in this briefing at all. A payload that
+//   transposes two titles between two entries also makes every citation
+//   disagree, and it is the canonical case this guard was built for: the
+//   titles are this briefing's own, paired with each other's ids. Sending that
+//   operator to check their briefing sends them away from the payload that is
+//   wrong.
+export function foreignBriefing(changes, payloads, briefing) {
+  const transposed = changes.filter((c) => c.cause === 'briefing');
+  if (transposed.length < 2) return false;
+
+  const stated = payloads
+    .flatMap((p) => [...(p?.fixed ?? []), ...(p?.declined ?? [])])
+    .filter((d) => d && d.id !== null && d.id !== undefined && d.id !== '').length;
+  const unresolvable = changes.filter((c) => c.staleId !== null && c.staleId !== undefined).length;
+  if (transposed.length !== stated - unresolvable) return false;
+
+  const titles = new Set(briefingEntries(briefing).map((e) => normalizeTitle(e.title)));
+  return transposed.every((c) => !titles.has(normalizeTitle(c.title)));
+}
+
 export function reconciliations(payloads, report, briefing = null) {
   const findingFor = bindingFor(report, briefing);
   const changes = [];
   for (const payload of payloads) {
     const agent = payload?.agent ?? null;
     for (const { d, disposition, statesId } of payloadEntries(payload)) {
-      const { finding, cause, gap, staleId } = findingFor(d, { statesId });
+      const { finding, cause, gap, staleId, unusableId } = findingFor(d, { statesId });
       if (!finding) {
         changes.push({
-          agent, title: d.title, disposition, bound: false, cause, gap, staleId, fields: [],
+          agent, title: d.title, disposition, bound: false, cause, gap, staleId,
+          unusableId, fields: [],
         });
         continue;
       }
@@ -594,7 +666,8 @@ export function reconciliations(payloads, report, briefing = null) {
       // cleanly — and silence there reads as an id that resolved.
       if (fields.length || staleId !== null) {
         changes.push({
-          agent, title: d.title, disposition, bound: true, cause, gap, staleId, fields,
+          agent, title: d.title, disposition, bound: true, cause, gap, staleId,
+          unusableId, fields,
         });
       }
     }

@@ -355,6 +355,10 @@ test('a transposed id and title are refused, and nothing is written', () => {
     assert.doesNotMatch(r.stdout, /ANCHOR DISAGREES WITH THE REPORT/);
     assert.doesNotMatch(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
     assert.doesNotMatch(r.stdout, /SETTLES A QUESTION/);
+    // And not the foreign-briefing paragraph: one citation disagreeing is not
+    // "every id here", and the denominator alone cannot tell them apart —
+    // one of one is all of them.
+    assert.doesNotMatch(r.stdout, /EVERY id here disagrees/, r.stdout);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -465,8 +469,9 @@ test('a briefing that disagrees with every citation is named as a cause', () => 
 
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
-    assert.match(r.stdout, /EVERY id in these payloads disagrees/, r.stdout);
-    assert.match(r.stdout, /re-mints ids\n    positionally/, r.stdout);
+    assert.match(r.stdout, /EVERY id here disagrees/, r.stdout);
+    assert.match(r.stdout, /not one of these titles is in this briefing/, r.stdout);
+    assert.match(r.stdout, /re-mints ids positionally on every run/, r.stdout);
     assert.equal(existsSync(out), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -491,7 +496,67 @@ test('one transposed citation among two is not blamed on the briefing', () => {
 
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
-    assert.doesNotMatch(r.stdout, /EVERY id in these payloads disagrees/, r.stdout);
+    assert.doesNotMatch(r.stdout, /EVERY id here disagrees/, r.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a stale citation beside the transposed ones does not suppress the cause', () => {
+  // The denominator is every citation the check COULD contradict, not every
+  // citation. An id that resolves to nothing leaves the check with nothing to
+  // compare and can never land in `transposed`, so counting those made the
+  // diagnosis unreachable on any batch that also carried one stale id — and a
+  // briefing from another iteration, being a different length, is exactly the
+  // input that produces one.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...twoCitations,
+      declined: [...twoCitations.declined, {
+        ...twoCitations.declined[0],
+        id: 'F9', title: 'a title from an iteration with more findings',
+      }],
+    });
+    const out = path.join(dir, 'decisions.json');
+
+    const r = run(['--fix', src,
+      '--briefing', write(dir, 'briefing.json', twoEntryBriefing),
+      '--report', write(dir, 'report.json', mergedReport), '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    // Two of the three citations, which is what makes this the case above's
+    // near-miss: the refusal renders its own block alone, so the third
+    // citation is visible here only as the one the count leaves out.
+    assert.match(r.stdout, /one of the two fields is wrong \(2\)/, r.stdout);
+    assert.match(r.stdout, /EVERY id here disagrees/, r.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a swap between two entries of this briefing is not blamed on the briefing', () => {
+  // The other control, and the case the guard was built for: a payload that
+  // pairs each of two entries with the other's id makes every citation
+  // disagree at once, just as a foreign briefing does. The titles are this
+  // briefing's own, so telling the operator to check their briefing sends them
+  // away from the payload that is wrong.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...twoCitations,
+      fixed: [{ ...twoCitations.fixed[0], id: 'F3', title: 'the budget is not enforced' }],
+      declined: [{ ...twoCitations.declined[0], id: 'F1', title: 'the guard is unreachable' }],
+    });
+    const out = path.join(dir, 'decisions.json');
+
+    const r = run(['--fix', src,
+      '--briefing', write(dir, 'briefing.json', twoEntryBriefing),
+      '--report', write(dir, 'report.json', mergedReport), '--out', out]);
+
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
+    assert.doesNotMatch(r.stdout, /EVERY id here disagrees/, r.stdout);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -551,22 +616,79 @@ test('a stray id on a named_not_fixed item does not refuse the batch', () => {
   }
 });
 
-test('a briefing entry with no title is skipped, not blamed on the payload', () => {
-  // The id route reads `entry.title`, and `normalizeTitle(undefined)` is `''`,
-  // so every decision naming a title-less entry read as transposed. The batch
-  // was refused with `the briefing calls F3 undefined` — a payload blamed, in a
-  // sentence built to quote a title, for a field the briefing did not have.
-  // `briefing.mjs` copies the titles, so a missing one is this tool's own bug.
+// A briefing whose F3 entry this tool cannot use, beside one entry it can —
+// because a briefing with NO usable entry is a different claim, and the bridge
+// refuses that one at exit 2 by name.
+const unusableF3 = (title) => ({
+  findings: [
+    { id: 'F3', title, kind: 'design', severity: 'warning', file: null, line: null },
+    { ...briefingDoc.findings[0], id: 'F1', title: 'an entry with a title' },
+  ],
+});
+
+// `undefined` writes no `title` key at all; the other two write one that passes
+// a truthiness check and still normalizes to `''`, which is the comparison the
+// id route actually makes. Truthiness alone closed the instance and left the
+// class: both of those refused the batch with `the briefing calls F3 " "`.
+for (const title of [undefined, '   ', '.']) {
+  test(`a briefing entry titled ${JSON.stringify(title)} is skipped, not blamed on the payload`, () => {
+    // The id route reads `entry.title`, and `normalizeTitle(undefined)` is `''`,
+    // so every decision naming a title-less entry read as transposed. The batch
+    // was refused with `the briefing calls F3 undefined` — a payload blamed, in
+    // a sentence built to quote a title, for a field the briefing did not have.
+    // `briefing.mjs` copies the titles, so a missing one is this tool's own bug.
+    const dir = freshTmp();
+    try {
+      const src = write(dir, 'fix-auth-guard.json', briefedFix);
+      const briefing = write(dir, 'briefing.json', unusableF3(title));
+      const report = write(dir, 'report.json', mergedReport);
+      const out = path.join(dir, 'decisions.json');
+
+      const r = run(['--fix', src, '--briefing', briefing, '--report', report, '--out', out]);
+
+      assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+      assert.doesNotMatch(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/, r.stdout);
+      assert.doesNotMatch(`${r.stdout}${r.stderr}`, /the briefing calls F3/,
+        'and no message quotes a title the briefing never usably carried');
+      assert.equal(existsSync(out), true, 'the fold ran');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('an id this briefing does state is not reported as a citation to correct', () => {
+  // The stale-id block's remedy is "check the id against briefing.json", and
+  // for an id the file plainly carries — on an entry this tool skipped as
+  // unusable — that is advice nobody can follow. Two different things resolve
+  // to nothing here and only one of them is the payload's.
   const dir = freshTmp();
   try {
     const src = write(dir, 'fix-auth-guard.json', briefedFix);
-    // One usable entry beside it, because a briefing with NO usable entry is a
-    // different claim and the bridge refuses that one at exit 2 by name.
+    const briefing = write(dir, 'briefing.json', unusableF3(undefined));
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+
+    const r = run(['--fix', src, '--briefing', briefing, '--report', report, '--out', out]);
+
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /ID NAMES NO BRIEFING ENTRY/, r.stdout);
+    assert.match(r.stdout, /this briefing states that id, on an entry with no usable title/,
+      r.stdout);
+    assert.match(r.stdout, /not a payload problem/, r.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an id that names nothing at all is still a citation to correct', () => {
+  // The control for the sentence above: a briefing this id is absent from gets
+  // the ordinary remedy and none of the triage-output wording.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', briefedFix);
     const briefing = write(dir, 'briefing.json', {
-      findings: [
-        { id: 'F3', kind: 'design', severity: 'warning', file: null, line: null },
-        { ...briefingDoc.findings[0], id: 'F1', title: 'an entry with a title' },
-      ],
+      findings: [{ ...briefingDoc.findings[0], id: 'F9' }],
     });
     const report = write(dir, 'report.json', mergedReport);
     const out = path.join(dir, 'decisions.json');
@@ -574,10 +696,9 @@ test('a briefing entry with no title is skipped, not blamed on the payload', () 
     const r = run(['--fix', src, '--briefing', briefing, '--report', report, '--out', out]);
 
     assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
-    assert.doesNotMatch(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/, r.stdout);
-    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /undefined/,
-      'and no message quotes a title the briefing never carried');
-    assert.equal(existsSync(out), true, 'the fold ran');
+    assert.match(r.stdout, /ID NAMES NO BRIEFING ENTRY/, r.stdout);
+    assert.doesNotMatch(r.stdout, /this briefing states that id/, r.stdout);
+    assert.doesNotMatch(r.stdout, /not a payload problem/, r.stdout);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

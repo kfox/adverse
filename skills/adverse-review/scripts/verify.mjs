@@ -47,6 +47,7 @@ import { makeWriteQueue, parseBridgeArgs, readJson, requireKnownPersona, usage }
 
 import { importFromSrc } from './package-root.mjs';
 
+const { briefingEntries } = await importFromSrc('decisions.mjs');
 const { validateVerify } = await importFromSrc('prompts.mjs');
 const { stampedFieldClaim } = await importFromSrc('synthesis.mjs');
 const { DEFAULT_PERSONAS } = await importFromSrc('personas.mjs');
@@ -132,9 +133,13 @@ const briefed = new Map();
 let briefedByTitle = new Map();
 if (values.briefing) {
   const doc = readJson(values.briefing, 'verify');
-  for (const f of doc?.findings ?? []) {
-    if (f && typeof f.id === 'string') briefed.set(f.id, f);
-  }
+  // The same list decisions.mjs binds an id against, imported rather than
+  // spelled again. Hand-written here, this index took an entry on its `id`
+  // alone: a title-less entry then answered `v.id`'s lookup, `anchorOf` read
+  // `undefined` as the briefing's anchor, and a still-open critical was
+  // re-emitted at `warning` with no file and no line — with `id "F3" is
+  // undefined in the briefing` on stderr and exit 1, blaming the payload.
+  for (const f of briefingEntries(doc)) briefed.set(f.id, f);
   briefedByTitle = indexByTitle(doc);
 }
 
