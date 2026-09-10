@@ -28,7 +28,7 @@
 // `fixed · declined · deferred` that named none of it and went stale the first
 // time a disposition was added.
 
-import { writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 
 import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
@@ -80,13 +80,40 @@ if (!values.fix.length || !values.out) {
   usage(USAGE);
 }
 
+// Every refusal in this file exits without writing `--out`, and the loop folds
+// each iteration to ONE fixed path (references/convergence-loop.md), so a
+// refusal that leaves the previous iteration's file sitting there hands
+// `--record` a batch it has already recorded: appended again to an append-only
+// ledger, the iteration counter advanced, its findings re-settled, and this
+// iteration's payloads never recorded at all. Reproduced by folding a good
+// batch and then re-running with a payload this bridge refuses.
+//
+// This bridge owns `--out` — every run that gets that far overwrites it — so a
+// refused run clears it. Both outcomes are said out loud, because a stale file
+// left behind is the one an operator has to know about, and "nothing was
+// written" reads exactly like "nothing is there".
+function refuse(code, message) {
+  process.stderr.write(message);
+  try {
+    rmSync(values.out);
+    process.stderr.write(`decisions: removed ${oneLine(values.out)}, which a previous fold`
+      + ' left there; nothing in this batch has been recorded\n');
+  } catch (e) {
+    if (e.code !== 'ENOENT') {
+      process.stderr.write(`decisions: could not remove ${oneLine(values.out)}`
+        + ` (${oneLine(e.code)}). A file a previous fold left there is still on disk, and`
+        + ' `converge.mjs --record` would append that batch a second time\n');
+    }
+  }
+  process.exit(code);
+}
+
 const payloads = [];
 for (const src of values.fix) {
   const payload = readJson(src, 'decisions');
   const err = validateFix(payload);
   if (err) {
-    process.stderr.write(`decisions: ${src}: ${err}\n`);
-    process.exit(1);
+    refuse(1, `decisions: ${src}: ${err}\n`);
   }
   payloads.push(payload);
 }
@@ -111,8 +138,7 @@ if (values.report) {
   try {
     requireFindings(report);
   } catch (e) {
-    process.stderr.write(`decisions: ${oneLine(values.report)}: ${e.message}\n`);
-    process.exit(2);
+    refuse(2, `decisions: ${oneLine(values.report)}: ${e.message}\n`);
   }
 } else {
   process.stderr.write(
@@ -145,13 +171,11 @@ if (values.briefing) {
   try {
     entries = briefingEntries(briefing);
   } catch (e) {
-    process.stderr.write(`decisions: ${oneLine(values.briefing)}: ${e.message}\n`);
-    process.exit(2);
+    refuse(2, `decisions: ${oneLine(values.briefing)}: ${e.message}\n`);
   }
   if (!entries.length) {
-    process.stderr.write(`decisions: ${oneLine(values.briefing)}: no briefing entry carries `
+    refuse(2, `decisions: ${oneLine(values.briefing)}: no briefing entry carries `
       + 'an `id`, so no decision can be bound to one; this is not a briefing.json\n');
-    process.exit(2);
   }
 } else {
   process.stderr.write(
@@ -169,8 +193,7 @@ try {
   // decision, which would be the two disagreeing rather than a bad payload.
   // Exit 1 either way: something was read and it does not describe repair work.
   // A bad --report is not among them; it was refused above, with exit 2.
-  process.stderr.write(`decisions: ${e.message}\n`);
-  process.exit(1);
+  refuse(1, `decisions: ${e.message}\n`);
 }
 
 // Reconciled BEFORE the output file exists, because one of the answers it
@@ -219,9 +242,7 @@ if (transposed.length) {
     + '    both be right. Find which finding was actually decided and correct the\n'
     + '    payload: `converge.mjs --record` takes no --briefing, so it would bind\n'
     + '    each of these by its title and settle whichever finding that names.\n');
-  process.stderr.write('decisions: a payload contradicts its own identity claims; refusing to'
-    + ' fold it\n');
-  process.exit(1);
+  refuse(1, 'decisions: a payload contradicts its own identity claims; refusing to fold it\n');
 }
 
 writeFileSync(values.out, JSON.stringify({ decisions }, null, 2), 'utf-8');
@@ -306,14 +327,15 @@ if (staleIds.length) {
   // briefing at all — what is lost is the transposition check, which has
   // nothing to compare an unresolvable id against. Said out loud because a
   // guard that is off for one entry reads like a guard that passed it.
-  out += `  ID NAMES NO BRIEFING ENTRY — bound by title instead, and the id/title check`
-       + ` could not run on these (${staleIds.length}):\n`
-       + staleIds.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}]`
-           + ` states id ${oneLine(c.staleId)}\n`).join('')
+  out += `  ID NAMES NO BRIEFING ENTRY — the id/title check could not run on these`
+       + ` (${staleIds.length}):\n`
+       + staleIds.map((c) => `    - ${oneLine(c.title)} [${oneLine(c.agent)}] states id`
+           + ` ${oneLine(c.staleId)}, ${c.bound ? 'bound by title' : 'and the title bound'
+             + ' nothing either'}\n`).join('')
        + '    Briefing ids are re-minted every triage run, so one copied from an\n'
        + '    earlier iteration names nothing in this briefing. Check the id against\n'
-       + '    briefing.json — the title may well be right, and it is the title these\n'
-       + '    were bound on.\n';
+       + '    briefing.json — the title may well be right, and the title is what binds\n'
+       + '    a decision here. Each line above says whether it did.\n';
 }
 if (misanchored.length) {
 
@@ -328,18 +350,24 @@ if (misanchored.length) {
            + `        ${oneLine(c.gap)}\n`).join('')
        + '    The title is already right. Either the decision was taken on a different\n'
        + '    finding than the one it names, or the anchor was copied from a stale\n'
-       + '    briefing — check which against report.json before recording.\n';
+       + '    briefing — check which against report.json before recording.\n'
+       + '    The fold looked each of these up and would not bind it, so what reaches the\n'
+       + '    ledger records `reconciled: false` — the same value as an unfiled title. A\n'
+       + `    later ${NAMED_NOT_FIXED_DISPOSITION} whose only cover is one of these is named at`
+       + ' `--record` anyway.\n';
 }
 if (unreported.length) {
   // Its own heading, never folded into the blocks above: an unbound `noted`
   // entry is not the same accusation. It records fine and settles nothing by
   // design, and it vouches for nothing either — `isSelfIdentified`
   // (src/ledger.mjs) reads `reconciled === false`, which is the fold saying it
-  // looked this identity up in a report and no lane had filed it, and this
-  // block is built from exactly those. It is NOT the wider claim that only an
-  // identity the report carried can vouch: an entry from a fold given no
-  // report records `null` and still vouches, which is why this block is gated
-  // on a report cause and not on boundness. What reaches the ledger is
+  // looked this identity up in a report and no lane had filed it. This block is
+  // built from the TITLE half of those, not all of them: cause `anchor` records
+  // `false` too, and prints under its own heading above, which carries the same
+  // consequence. It is NOT the wider claim that only an identity the report
+  // carried can vouch: an entry from a fold given no report records `null` and
+  // still vouches, which is why this block is gated on a report cause and not
+  // on boundness. What reaches the ledger is
   // therefore the batch's own claim about a finding no lane reported, on
   // fields nothing corrected, which is a thing only an operator holding the
   // report can check — which is why it is printed here rather than counted

@@ -336,6 +336,46 @@ test('a transposed id and title are refused, and nothing is written', () => {
   }
 });
 
+test('a refusal clears the decisions.json a previous fold left at --out', () => {
+  // The loop folds every iteration to one fixed path
+  // (references/convergence-loop.md: `"$ADVERSE_RUN"/decisions.json`), so a
+  // refusal that only declines to write leaves the PREVIOUS iteration's file
+  // sitting at exactly the path stdout just said nothing was written to. That
+  // file is a complete, valid batch, and `converge.mjs --record` has no dedup
+  // against a batch it already recorded — so an operator following the output
+  // records iteration N-1 a second time, advancing the iteration counter the
+  // cap terminates on and re-settling questions this fold never decided.
+  //
+  // Same directory for both folds, deliberately: the sibling test above runs in
+  // a fresh tmp dir, where nothing is at `--out` to begin with and this cannot
+  // be seen.
+  const dir = freshTmp();
+  try {
+    const out = path.join(dir, 'decisions.json');
+    const first = run(['--fix', write(dir, 'fix-auth-guard.json', goodFix), '--out', out]);
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(existsSync(out), true, 'the good fold writes the file this test is about');
+
+    const transposed = write(dir, 'fix-transposed.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], title: 'a title from the other finding' }],
+    });
+    const r = run([
+      '--fix', transposed,
+      '--briefing', write(dir, 'briefing.json', briefingDoc),
+      '--report', write(dir, 'report.json', mergedReport),
+      '--out', out,
+    ]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, /nothing written to/);
+    assert.equal(existsSync(out), false, 'the refusal removes the earlier fold\'s file');
+    assert.match(r.stderr, /removed .*decisions\.json, which a previous fold left there/);
+    assert.match(r.stderr, /nothing in this batch has been recorded/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a briefing without a report still refuses a transposed pair', () => {
   // The transposition check needs the briefing, not the report: an `id` and a
   // `title` naming different findings is the payload contradicting ITSELF, and
@@ -426,7 +466,7 @@ test('an id naming no briefing entry gets its own block, and still binds and cor
     const r = run(['--fix', src, '--briefing', briefing, '--report', report, '--out', out]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /ID NAMES NO BRIEFING ENTRY/);
-    assert.match(r.stdout, /states id F9/);
+    assert.match(r.stdout, /states id F9, bound by title/);
     assert.match(r.stdout, /re-minted every triage run/);
     assert.match(r.stdout, /identity corrected from the report/);
     assert.doesNotMatch(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
@@ -436,6 +476,37 @@ test('an id naming no briefing entry gets its own block, and still binds and cor
     assert.equal(d.file, 'src/auth.py', 'the report corrected it, stale citation and all');
     assert.equal(d.kind, 'defect');
     assert.equal(d.reconciled, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a stale id whose title binds nothing says so, and does not claim it bound', () => {
+  // Both blocks print for one entry, so the stale-id block cannot carry the
+  // outcome in its heading: gated on `staleId` alone it said "bound by title
+  // instead" over an entry MATCHES NO FINDING IN THE REPORT had just called
+  // unbound, two contradictory claims about the same line. The outcome belongs
+  // per line, because it differs per line.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [{ ...briefedFix.fixed[0], id: 'F9', title: 'a title no lane reported' }],
+    });
+    const briefing = write(dir, 'briefing.json', briefingDoc);
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--briefing', briefing, '--report', report, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ID NAMES NO BRIEFING ENTRY/);
+    assert.match(r.stdout, /states id F9, and the title bound nothing either/);
+    assert.doesNotMatch(r.stdout, /bound by title\n/);
+    // The title block is the one carrying the remedy, and it still prints.
+    assert.match(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
+    assert.doesNotMatch(r.stdout, /ID AND TITLE NAME DIFFERENT FINDINGS/);
+
+    const [d] = JSON.parse(readFileSync(out, 'utf-8')).decisions;
+    assert.equal(d.reconciled, false, 'checked against a report, and no lane filed it');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -544,6 +615,44 @@ test('a disagreeing anchor is not reported as a wrong title', () => {
     assert.match(r.stdout, /The title is already right/);
     // And NOT the other block, whose remedy is the title.
     assert.doesNotMatch(r.stdout, /MATCHES NO FINDING IN THE REPORT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a noted entry the anchor refused is told it excuses nothing either', () => {
+  // A `noted` entry with a disagreeing anchor prints HERE and not under
+  // UNREPORTED IDENTITY, whose prose says no lane filed it — a lane did, and
+  // one field of the citation is wrong. What did not travel with it was the
+  // ledger consequence that heading carried: the fold looked this up and would
+  // not bind it, so the entry records `reconciled: false`, which is exactly
+  // what `--record` withholds its exemption on. Printed under the only heading
+  // this entry reaches, or an operator reads a citation to correct and never
+  // learns the entry vouches for nothing.
+  const dir = freshTmp();
+  try {
+    const src = write(dir, 'fix-auth-guard.json', {
+      ...briefedFix,
+      fixed: [],
+      named_not_fixed: [{
+        title: 'the guard is unreachable', kind: 'defect',
+        file: 'src/authz.py', line: 88, counterpart: null,
+        detail: 'saw it while reproducing something else; left it alone',
+        suggestion: null,
+      }],
+    });
+    const report = write(dir, 'report.json', mergedReport);
+    const out = path.join(dir, 'decisions.json');
+    const r = run(['--fix', src, '--report', report, '--out', out]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ANCHOR DISAGREES WITH THE REPORT/);
+    assert.match(r.stdout, /records `reconciled: false`/);
+    assert.match(r.stdout, /named at `--record` anyway/);
+    assert.doesNotMatch(r.stdout, /UNREPORTED IDENTITY/);
+
+    const [d] = JSON.parse(readFileSync(out, 'utf-8')).decisions;
+    assert.equal(d.disposition, 'noted');
+    assert.equal(d.reconciled, false, 'the value the block now states');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
