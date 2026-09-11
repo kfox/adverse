@@ -381,9 +381,13 @@ async function cmdSynthesize(rest) {
         + ' so correct or remove it');
     if (!group || typeof group !== 'object' || Array.isArray(group)) {
       bad('', 'is not a group');
+      continue;
     }
     const citations = group.citations ?? [];
-    if (!Array.isArray(citations)) bad('.citations', 'is not a list');
+    if (!Array.isArray(citations)) {
+      bad('.citations', 'is not a list');
+      continue;
+    }
     for (const [j, c] of citations.entries()) {
       if (!c || typeof c !== 'object' || Array.isArray(c)) {
         bad(`.citations[${j}]`, 'is not a citation');

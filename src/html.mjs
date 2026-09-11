@@ -4,7 +4,7 @@
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import { ADVISORY_KINDS, PROVENANCE, assertCoversConfidences,
-         assertCoversStatuses } from './taxonomy.mjs';
+         assertCoversStatuses, citationReporter } from './taxonomy.mjs';
 import { probeState } from './probe.mjs';
 // Not wording — identity. Which half of a split lane made a ruling is a fact
 // about the run, and this renderer printed the lane's persona for both halves.
@@ -321,7 +321,7 @@ function renderRootCause(rc) {
     const against = c.counterpart
       ? ` <span class="loc">contradicts ${esc(c.counterpart)}</span>` : '';
     return `<li><strong>${esc(c.id)}</strong> `
-      + `<span class="cite-meta">${esc(c.reporter ?? 'no reporter')} · `
+      + `<span class="cite-meta">${esc(citationReporter(c))} · `
       + `${esc(c.severity ?? 'no severity')}·${esc(c.kind ?? 'unclassified')}</span> ${esc(c.title)}`
       + (loc ? ` <span class="loc">${esc(loc)}</span>` : '')
       + against

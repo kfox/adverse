@@ -38,7 +38,7 @@ import { fenced, flatten, quoted, verbatim, verbatimCell } from './markdown.mjs'
 import { isLaneAgent } from './personas.mjs';
 import { indexProbes, probeDeclaration, probeKey, probeState } from './probe.mjs';
 import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
-         assertCoversConfidences, assertCoversStatuses, citesLaneNames,
+         assertCoversConfidences, assertCoversStatuses, citationReporter, citesLaneNames,
          claimedLanes } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
@@ -1056,7 +1056,7 @@ function renderRootCauses(rootCauses) {
       // One span for the whole identity triple: all three arrive on a group
       // citation out of briefing.json, where nothing has gated them against
       // the taxonomy the way `buildFinding` gates a finding's own pair.
-      const who = verbatim(`${c.reporter ?? 'no reporter'}, `
+      const who = verbatim(`${citationReporter(c)}, `
         + `${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}`);
       lines.push(`- **${verbatim(c.id)}** (${who}) `
         + `${c.title}${loc}${against}`

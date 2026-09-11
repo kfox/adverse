@@ -1149,6 +1149,23 @@ test('both renderers say a citation names no reporter, rather than printing the 
   assert.match(renderHtml(syn), /no reporter · warning·defect/);
 });
 
+test('a citation that claimed nobody is named by what synthesis resolved', () => {
+  // `buildRootCauses` overwrites a resolved citation's `reporters` with the
+  // lanes of the finding it matched, and both renderers fell back on the
+  // singular claim alone — so a citation that omitted `reporter` and resolved
+  // anyway said "no reporter" in the same card whose header names the
+  // reviewers it came from. Words are the answer only when there is no other.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const unclaimed = [{ ...g, citations: g.citations.map((c) => ({ ...c, reporter: undefined })) }];
+  const syn = synthesize(round1, rulings('one'), { rootCauseGroups: unclaimed });
+
+  const md = renderMarkdown(syn);
+  assert.doesNotMatch(md, /no reporter/, md);
+  assert.match(md, /`auditor, warning·defect`/, md);
+  assert.match(renderHtml(syn), /auditor · warning·defect/);
+});
+
 test('both renderers show a contract citation\'s counterpart', () => {
   const { round1, groups } = oneGuard();
   const syn = synthesize(round1, rulings('one'), { rootCauseGroups: groups });

@@ -5,8 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ADVISORY_KINDS, CONFIDENCES, KINDS, ROOT_CAUSE_STATUSES, SEVERITIES,
-         SEVERITY_RANK, assertCoversConfidences, citesLaneNames,
-         claimedLanes } from '../src/taxonomy.mjs';
+         SEVERITY_RANK, assertCoversConfidences, citationReporter, citesLaneNames,
+         claimedLanes, isLaneList } from '../src/taxonomy.mjs';
 
 test('every advisory kind is a real kind', () => {
   for (const k of ADVISORY_KINDS) assert.ok(KINDS.includes(k), `${k} is not in KINDS`);
@@ -96,6 +96,9 @@ for (const [label, citation, expected] of [
   // that got a lane wrong, and reading it as "claims nobody" would have given
   // one file two answers, since the predicate below calls it what it is.
   ['a reporters holding an absence', { reporters: [null] }, null],
+  // A name of no characters is not a lane that declined to identify itself.
+  ['a reporter that is the empty string', { reporter: '' }, null],
+  ['a reporter that is only whitespace', { reporter: '  ' }, null],
 ]) test(`claimedLanes reads ${label}`, () => {
   assert.deepEqual(claimedLanes(citation), expected);
 });
@@ -116,19 +119,57 @@ for (const [label, citation, expected] of [
   ['a citation with a good list beside a junk singular',
     { reporters: ['auditor'], reporter: { lane: 'auditor' } }, false],
   ['a citation whose list holds an absence', { reporters: [null] }, false],
+  ['a citation whose reporter is the empty string', { reporter: '' }, false],
 ]) test(`citesLaneNames judges ${label}`, () => {
   assert.equal(citesLaneNames(citation), expected);
 });
 
-// The two answer the same question about absence, and a reader who takes
-// either one as the definition should not be wrong about the other.
-test('the reading and the judgement agree on which citations name nobody', () => {
+// One way, and only one. The judgement is the stricter of the two — it reads
+// the singular that the renderers print, which the reading skips whenever a
+// list is there — so a citation it accepts is always one the reading can read,
+// and that is the direction `buildRootCauses` depends on: it asks the
+// judgement first and then spreads the reading, which must not be `null`.
+//
+// The converse is false, and load-bearing that it is false: a good list beside
+// a junk singular reads as `['auditor']` and is judged not lane names, which
+// is the whole reason there are two of these. Asserted as an equivalence, this
+// loop would pass only for as long as nobody added that shape to it.
+test('a citation the judgement accepts is one the reading can read', () => {
   for (const citation of [
     {}, { reporters: null }, { reporter: null }, { reporter: 'auditor' },
     { reporters: [] }, { reporters: ['auditor'] }, { reporters: [null] },
     { reporters: 'auditor' }, { reporter: 42 }, { reporters: ['auditor', 7] },
+    { reporter: '' }, { reporters: ['auditor'], reporter: 42 },
   ]) {
-    assert.equal(claimedLanes(citation) !== null, citesLaneNames(citation),
-      JSON.stringify(citation));
+    if (!citesLaneNames(citation)) continue;
+    assert.notEqual(claimedLanes(citation), null, JSON.stringify(citation));
   }
+});
+
+test('the stricter of the two is the one the renderers read', () => {
+  const bothWays = { reporters: ['auditor'], reporter: 42 };
+  assert.deepEqual(claimedLanes(bothWays), ['auditor']);
+  assert.equal(citesLaneNames(bothWays), false);
+});
+
+// A lane list is what the ledger, the PR comment and the dashboard all read,
+// and a blank name cleared every one of them while printing as nothing.
+test('a lane name with no name in it is not a lane name', () => {
+  assert.equal(isLaneList(['auditor', '']), false);
+  assert.equal(isLaneList(['auditor', '  ']), false);
+  assert.equal(isLaneList(['auditor']), true);
+});
+
+// What a citation line says about who reported it: the claim, then what
+// synthesis resolved, then words. The middle one is why this exists — a
+// citation that claimed nobody and resolved anyway said "no reporter" in the
+// same card whose header named two reviewers.
+for (const [label, citation, expected] of [
+  ['the claim, where there is one', { reporter: 'auditor', reporters: ['steward'] }, 'auditor'],
+  ['what synthesis resolved, where there is no claim',
+    { reporters: ['auditor', 'steward'] }, 'auditor, steward'],
+  ['words, where there is neither', { reporters: [] }, 'no reporter'],
+  ['words, for a citation that is not there at all', undefined, 'no reporter'],
+]) test(`citationReporter names ${label}`, () => {
+  assert.equal(citationReporter(citation), expected);
 });

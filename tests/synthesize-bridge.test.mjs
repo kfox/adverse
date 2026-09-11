@@ -338,6 +338,10 @@ for (const [label, citation] of [
   // An absence inside the list, which is a list that got a lane wrong rather
   // than a citation that named nobody.
   ['a reporters holding an absence', { id: 'F1', title: 't', reporters: [null] }],
+  // A lane name with no name in it: it cleared every check on this path,
+  // printed as nothing beside the citation id, and was still counted in the PR
+  // comment's reviewer tally.
+  ['a reporter that is the empty string', { id: 'F1', title: 't', reporter: '' }],
 ]) test(`a briefing citation with ${label} is refused, naming the file`, () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'adverse-cite-'));
   const briefing = path.join(dir, 'briefing.json');

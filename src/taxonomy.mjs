@@ -90,8 +90,13 @@ export const PROVENANCE = Object.freeze({ review: 'review', regression: 'regress
 // `(rc.reporters ?? []).length` published "7 reviewers" and an entry carrying
 // one answered `closureOf` with the lanes a, d, i, o, r, t, u. Every reader
 // refuses it now, each in its own register.
-export const isLaneList = (value) => Array.isArray(value)
-  && value.every((lane) => typeof lane === 'string');
+// And a lane name has a name. `""` is not a lane that declined to identify
+// itself: it satisfied every check here, printed as nothing at all beside a
+// citation id, and was still counted in the PR comment's `N reviewers` tally —
+// a phantom reviewer, which is the same vouching the string case is on this
+// list for. Whitespace with it, since a name of spaces prints the same way.
+export const isLaneName = (value) => typeof value === 'string' && value.trim() !== '';
+export const isLaneList = (value) => Array.isArray(value) && value.every(isLaneName);
 
 // Which lanes a citation claims, or `null` for a claim that is not lane names
 // at all — one reading, for the two readers that would otherwise each have
@@ -123,8 +128,18 @@ export const claimedLanes = (citation) => {
   }
   const reporter = citation?.reporter;
   if (reporter === undefined || reporter === null) return [];
-  return typeof reporter === 'string' ? [reporter] : null;
+  return isLaneName(reporter) ? [reporter] : null;
 };
+
+// Who a citation line names, for the two renderers that print one. The CLAIM
+// first: that line reports what the briefing said, and where the claim and
+// what synthesis resolved disagree, the disagreement is the thing worth
+// seeing. Where the citation claimed NOBODY and synthesis resolved it anyway,
+// the resolved lanes are still an answer, and "no reporter" is a confident
+// wrong one — printed, as it was, in the same card whose header names two
+// reviewers.
+export const citationReporter = (citation) => citation?.reporter
+  ?? (citation?.reporters?.length ? citation.reporters.join(', ') : 'no reporter');
 
 // Whether a citation's reporter fields are lane names — BOTH of them, because
 // they are read by different things. `claimedLanes` prefers `reporters`, and
@@ -137,7 +152,7 @@ export const claimedLanes = (citation) => {
 // what a briefing writes for a finding synthesis did not build, and each
 // renderer says so in words rather than printing the absence.
 const laneOrAbsent = (value) => value === undefined || value === null
-  || typeof value === 'string';
+  || isLaneName(value);
 export const citesLaneNames = (citation) => laneOrAbsent(citation?.reporter)
   && (citation?.reporters === undefined || citation?.reporters === null
     || isLaneList(citation.reporters));
