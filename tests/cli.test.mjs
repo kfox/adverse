@@ -222,6 +222,110 @@ test('synthesize refuses a round-2 payload from a lane that does not cross-revie
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
+// The keys of --round1 and --round2 are the reviewer tally, and nothing
+// checked them. Measured before this: one lane keyed `auditor`, a bare
+// zero-width space, and `auditor` with one appended published
+// `SHIP (2/3 ship, 1/3 block)` over a live
+// critical, with a blank verdicts row and two rows both printing `auditor` —
+// the counterfeit a citation's `reporter` was closed against, in the field
+// that does the counting.
+//
+// A table rather than one case, because each of these is a different route to
+// the same phantom and the previous two attempts at this class each closed one
+// spelling short.
+for (const [label, key] of [
+  ['an invisible one', '\u200b'],
+  ['one that prints as a real lane', 'auditor\u200b'],
+  ['a re-cased one', 'Auditor'],
+  ['one in a shape agentNames cannot emit', 'auditor_a'],
+  ['a prototype key JSON.parse makes own', '__proto__'],
+  ['an empty one', ''],
+]) {
+  test(`synthesize refuses a round-1 reviewer key: ${label}`, () => {
+    const out = freshTmp();
+    try {
+      writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+        auditor: { persona: 'auditor', verdict: 'reject', summary: 'bug', findings: [] },
+        [key]: { persona: key, verdict: 'approve', summary: 'ok', findings: [] },
+      }));
+      const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json'),
+        '--out', path.join(out, 'report.md')]);
+      assert.equal(r.status, 2, r.stderr);
+      assert.match(r.stderr, /--round1 is keyed by reviewer/);
+      assert.match(r.stderr, /is not a lane name/);
+      assert.match(r.stderr, new RegExp(path.join(out, 'r1.json').replace(/[.\\]/g, '\\$&')));
+      assert.equal(existsSync(path.join(out, 'report.md')), false, 'nothing was published');
+    } finally { rmSync(out, { recursive: true, force: true }); }
+  });
+}
+
+// The round-2 keys are worse off than the round-1 keys, not better:
+// `crossReviews` answers `true` for any name outside the registry, so the
+// roster rule directly below this check passed a phantom through, and one
+// `challenge` from it relabels a cross-validated critical `disputed`.
+test('synthesize refuses a round-2 reviewer key that is not a lane name', () => {
+  const out = freshTmp();
+  try {
+    const finding = { severity: 'critical', kind: 'defect', file: 'x.py', line: 1,
+      title: 'B', detail: 'd', fix: null };
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+      auditor:   { persona: 'auditor', verdict: 'reject', summary: 'bug', findings: [finding] },
+      adversary: { persona: 'adversary', verdict: 'reject', summary: 'bug', findings: [finding] },
+    }));
+    writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
+      '\u200b': { persona: '\u200b', challenge: [{ title: 'B', reason: 'no' }] },
+    }));
+    const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json'),
+      '--round2', path.join(out, 'r2.json')]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /--round2 is keyed by reviewer/);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+// A refusal about a name that prints as nothing has to render it, or it reads
+// as a refusal of a name the operator can already see in the file.
+test('synthesize spells out an invisible reviewer key rather than printing it', () => {
+  const out = freshTmp();
+  try {
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+      'auditor\u200b': { persona: 'a', verdict: 'approve', summary: 'ok', findings: [] },
+    }));
+    const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json')]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /`auditor\\u\{200b\}`/);
+    assert.ok(!r.stderr.includes('\u200b'), 'the character itself is not in the message');
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+// A long key cannot push the rest of the refusal off the line it is read on.
+test('synthesize bounds the reviewer key it spells out', () => {
+  const out = freshTmp();
+  try {
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+      [`A${'b'.repeat(400)}`]: { persona: 'a', verdict: 'approve', summary: 'ok', findings: [] },
+    }));
+    const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json')]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /…/);
+    assert.ok(!r.stderr.includes('b'.repeat(100)), 'the key was clipped');
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+// A payload that is not an object at all reached `Object.entries` four frames
+// down and died naming neither the flag nor the path.
+for (const [label, doc] of [['null', null], ['a list', []], ['a number', 7]]) {
+  test(`synthesize names the file when --round1 holds ${label}`, () => {
+    const out = freshTmp();
+    try {
+      writeFileSync(path.join(out, 'r1.json'), JSON.stringify(doc));
+      const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json')]);
+      assert.equal(r.status, 2, r.stderr);
+      assert.match(r.stderr, /--round1 is not an object keyed by reviewer/);
+      assert.match(r.stderr, new RegExp(path.join(out, 'r1.json').replace(/[.\\]/g, '\\$&')));
+    } finally { rmSync(out, { recursive: true, force: true }); }
+  });
+}
+
 test('synthesize subcommand records --skipped, --degraded, and --round2-skipped', () => {
   const out = freshTmp();
   try {

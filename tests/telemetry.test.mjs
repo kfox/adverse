@@ -425,13 +425,20 @@ test('a hostile round-1 key never reaches the file', () => {
   // Measured end-to-end by the panel: `adverse synthesize --round1` validates
   // no persona name, so a key was a free string that landed verbatim in
   // `roster.reported` and as a key under `lanes`.
+  //
+  // The sentinel is spelled as a LANE NAME now, because `synthesize` refuses a
+  // key that is not one before any of this runs (src/cli.mjs) and a fixture it
+  // rejects would leave this layer untested. An unknown lane whose name IS
+  // well formed is still reachable — nothing here checks the roster — so this
+  // is the input that still gets to the writer. The case below pins the other
+  // half.
   const dir = freshTmp();
   const file = path.join(dir, 'runs.jsonl');
   const payload = path.join(dir, 'round1.json');
   writeFileSync(payload, JSON.stringify({
     auditor: review('auditor', [finding()]),
     steward: review('steward', []),
-    'SENTINEL-LEAK-9f2a1': review('auditor', [finding()]),
+    sentinelleak9f2a1: review('auditor', [finding()]),
   }));
 
   const r = runSynthesize(['--round1', payload, '--out', path.join(dir, 'r.md')],
@@ -439,10 +446,29 @@ test('a hostile round-1 key never reaches the file', () => {
   assert.equal(r.status, 0, r.stderr);
 
   const line = readFileSync(file, 'utf-8');
-  assert.doesNotMatch(line, /SENTINEL-LEAK-9f2a1/);
+  assert.doesNotMatch(line, /sentinelleak9f2a1/);
   const record = JSON.parse(line);
   assert.deepEqual(record.roster.reported, ['auditor', 'steward']);
   assert.equal(record.roster.unknown, 1, 'counted, not quoted');
+});
+
+test('a round-1 key that is not a lane name writes no telemetry line at all', () => {
+  // One layer earlier than the test above, and the reason that one's fixture
+  // changed: a key that cannot be a lane name is refused at the flag, so the
+  // run that would have recorded it never happens.
+  const dir = freshTmp();
+  const file = path.join(dir, 'runs.jsonl');
+  const payload = path.join(dir, 'round1.json');
+  writeFileSync(payload, JSON.stringify({
+    auditor: review('auditor', [finding()]),
+    'SENTINEL-LEAK-9f2a1': review('auditor', [finding()]),
+  }));
+
+  const r = runSynthesize(['--round1', payload, '--out', path.join(dir, 'r.md')],
+    { ADVERSE_TELEMETRY_FILE: file });
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /is not a lane name/);
+  assert.equal(existsSync(file), false, 'nothing was recorded');
 });
 
 test('the destination directory is not followed when it is a symlink', () => {

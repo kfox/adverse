@@ -55,7 +55,7 @@ import { statSync } from 'node:fs';
 import { refuseDirectRun } from './entryGuard.mjs';
 import { flatten, verbatim } from './markdown.mjs';
 import { probeState } from './probe.mjs';
-import { ADVISORY_KINDS, isLaneList } from './taxonomy.mjs';
+import { ADVISORY_KINDS, isLaneList, isLaneName } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -579,6 +579,23 @@ export function renderComment(report, { branch, head = null, base = null, iterat
       ? (!value || typeof value !== 'object' || Array.isArray(value))
       : !Array.isArray(value);
     if (wrong) throw new Error(`venue: this report.json has an unusable \`${k}\``);
+  }
+
+  // The KEYS of `verdicts`, not only its shape. This renderer prints
+  // `Object.keys(report.verdicts).length` as "N reviewers" in a comment that
+  // is public and permanent, and uses the same count to decide between "All
+  // reviewers reported clean" and "this is an empty review, not a clean one" —
+  // so one extra key is one reviewer nobody heard from, vouching. The shape
+  // check above passes any object, and `root_causes[].reporters` below is
+  // already held to this vocabulary; the map that does the counting was not.
+  //
+  // Counted rather than quoted, the same way the telemetry writer handles an
+  // unknown lane: the strings here are whatever a hand-edited file says, and
+  // this message is read on a terminal.
+  const strangers = Object.keys(report.verdicts).filter((k) => !isLaneName(k)).length;
+  if (strangers) {
+    throw new Error(`venue: this report.json keys \`verdicts\` by ${strangers} name(s)`
+      + ' that are not lane names, so the reviewer count it publishes is not one');
   }
 
   // A root cause's own lists, for the reason the top-level ones are checked and

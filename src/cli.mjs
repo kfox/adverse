@@ -18,7 +18,7 @@ import {
 import { AgentRunner, runParallel } from './runner.mjs';
 import { agentNames, parsePlan, runLanes } from './scaling.mjs';
 import { renderMarkdown, synthesize, toJsonReport } from './synthesis.mjs';
-import { citesLaneNames } from './taxonomy.mjs';
+import { citesLaneNames, isLaneName } from './taxonomy.mjs';
 import {
   appendRunRecord, buildRunRecord, repoIdentity, telemetryDisabled, telemetryPath,
 } from './telemetry.mjs';
@@ -322,6 +322,21 @@ function readJsonArg(file) {
   }
 }
 
+// A key that failed the lane-name check, rendered so the refusal can be read.
+// Almost everything this refuses is invisible, so a message that interpolated
+// the key would say `'auditor' is not a lane name` about a string that is not
+// `auditor` — the operator's next move is to search the file for a name that
+// is already there. Every codepoint outside printable ASCII becomes its
+// escape, and the result is bounded, because a key read off disk has no
+// length of its own.
+const MAX_KEY_CHARS = 60;
+const showKey = (key) => {
+  const shown = [...key]
+    .map((ch) => (ch >= ' ' && ch <= '~' ? ch : `\\u{${ch.codePointAt(0).toString(16)}}`))
+    .join('');
+  return shown.length > MAX_KEY_CHARS ? `${shown.slice(0, MAX_KEY_CHARS)}…` : shown;
+};
+
 async function cmdSynthesize(rest) {
   const { values } = parseArgs({
     args: rest,
@@ -350,6 +365,43 @@ async function cmdSynthesize(rest) {
   if (!values.round1) die('synthesize: --round1 is required');
   const round1 = readJsonArg(values.round1);
   const round2 = values.round2 ? readJsonArg(values.round2) : {};
+
+  // The keys of both files ARE the reviewer tally, so they get the shape check
+  // a briefing's citations get, at this same boundary and for the same reason.
+  // `verdicts` is built straight off round 1 (src/synthesis.mjs);
+  // `Object.keys(verdicts).length` is the "N reviewers" printed by report.md,
+  // by the dashboard and by the permanent PR comment, and
+  // `Object.values(verdicts)` is the consensus score's denominator. Measured
+  // before this: a round-1 file keyed `auditor` (reject, one critical),
+  // a zero-width space (approve) and `auditor` with one appended (approve)
+  // published
+  // `SHIP (2/3 ship, 1/3 block)` over that live critical, with one blank row
+  // in the verdicts table and two rows both printing `auditor`. That is the
+  // counterfeit a citation's `reporter` was closed against, one field over and
+  // in the field that does the counting.
+  //
+  // Before the round-2 rule below rather than folded into it, because
+  // `crossReviews` answers `true` for every name outside the registry —
+  // `advisoryOnlyLane` returns `false` for one — so a phantom key passed that
+  // rule too, and one `challenge` from it relabels a cross-validated critical
+  // `disputed` and moves it out of `Open blocking`.
+  for (const [flag, file, payload] of [['--round1', values.round1, round1],
+    ['--round2', values.round2, round2]]) {
+    // Walked here rather than reached at `Object.entries` in synthesis,
+    // because this is the only place that can name the file: a `--round1`
+    // holding `null` or a list died four frames down as "Cannot convert
+    // undefined or null to object", naming neither the flag nor the path.
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      die(`synthesize: ${file}: ${flag} is not an object keyed by reviewer`);
+    }
+    for (const persona of Object.keys(payload)) {
+      if (isLaneName(persona)) continue;
+      die(`synthesize: ${file}: ${flag} is keyed by reviewer and \`${showKey(persona)}\``
+        + ' is not a lane name — expected a lowercase persona, optionally with a split'
+        + " lane's half like `auditor-a`. Every key in this file is counted as one"
+        + ' reviewer, so correct or remove it');
+    }
+  }
 
   // The same rule src/roster.mjs applies in the Skill bridge. It lived only
   // there, so the shipped binary still accepted a round-2 payload from a lane

@@ -718,6 +718,36 @@ test('renderComment refuses a report whose list fields are not lists', () => {
   }
 });
 
+// The shape check above passes any object, and this is the map whose SIZE is
+// published as "N reviewers" and is the whole difference between "All
+// reviewers reported clean" and "this is an empty review, not a clean one".
+// `root_causes[].reporters` was already held to the lane-name vocabulary; the
+// map that does the counting was not, so a hand-edited report.json could put
+// a reviewer nobody heard from into a permanent public comment.
+for (const [label, verdicts] of [
+  ['one that prints as nothing', { auditor: 'approve', '\u200b': 'approve' }],
+  ['one that prints as a real lane', { auditor: 'approve', 'auditor\u200b': 'approve' }],
+  ['a re-cased one', { auditor: 'approve', Auditor: 'approve' }],
+  ['a shape agentNames cannot emit', { auditor: 'approve', auditor_a: 'approve' }],
+]) test(`renderComment refuses a verdicts map keyed by ${label}`, () => {
+  assert.throws(() => renderComment(report({ verdicts }), { branch: BRANCH }),
+    /keys `verdicts` by 1 name\(s\) that are not lane names/, JSON.stringify(verdicts));
+});
+
+test('renderComment counts the strangers in a verdicts map rather than quoting them', () => {
+  assert.throws(
+    () => renderComment(report({ verdicts: { auditor: 'approve', 'SENTINEL-LEAK-9f2a1': 'approve',
+      'Adversary': 'approve' } }), { branch: BRANCH }),
+    (e) => /by 2 name\(s\)/.test(e.message) && !e.message.includes('SENTINEL-LEAK-9f2a1'));
+});
+
+test('renderComment publishes a verdicts map keyed by the names this tool writes', () => {
+  const body = renderComment(report({
+    verdicts: { auditor: 'approve', 'adversary-a': 'approve', 'adversary-b': 'reject' },
+  }), { branch: BRANCH });
+  assert.match(body, /across 3 reviewers/);
+});
+
 // GitHub rejects an over-long body with a 422, which would land after a whole
 // run with the report nowhere. Dropping the tail of a list is recoverable;
 // silently dropping it is a report claiming there is nothing more to see.
