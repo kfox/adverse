@@ -311,7 +311,14 @@ test('synthesize asks whether the LANE cross-reviews, not the key', () => {
         '--round2', path.join(out, 'r2.json'),
         '--json-out', path.join(out, 'report.json')]);
       assert.equal(r.status, 2, `${key}: exit ${r.status}\n${r.stderr}`);
-      assert.match(r.stderr, /does not cross-review/, key);
+      // Quoting the key as the file writes it, not the lane it reduces to.
+      // The keys are lanes by the time the report is built, and reading them
+      // back from there told an operator whose file says `pragmatist-a` that
+      // `'pragmatist'` does not cross-review — a name to search the file for
+      // that is not in it.
+      assert.match(r.stderr, new RegExp(`'${key}' does not cross-review`), key);
+      assert.match(r.stderr, key === 'pragmatist' ? /every kind it owns/
+        : /every kind the pragmatist lane owns/, key);
       assert.equal(existsSync(path.join(out, 'report.json')), false, `${key} published`);
     }
   } finally { rmSync(out, { recursive: true, force: true }); }
@@ -550,6 +557,23 @@ test('--plan accounts a split lane under either spelling of its payloads', () =>
     const half = runCli(args('half.json'));
     assert.equal(half.status, 2, half.stderr);
     assert.match(half.stderr, /auditor-b/, 'the refusal names the missing half');
+
+    // The mirror: the plan ran the auditor as ONE agent and the payload is
+    // keyed by a half of it. `byLane` reads that payload as the auditor's, so
+    // the accounting has a payload for the lane and no name for it — refused,
+    // because agentNames writes `auditor` for a lane of one and the two files
+    // disagree about how many agents reviewed, but refused by a sentence that
+    // says so rather than by "no payload accounts for it" about a payload that
+    // is sitting right there.
+    writeFileSync(path.join(out, 'unsplit-plan.json'), JSON.stringify({
+      lanes: [{ persona: 'auditor', run: true }, { persona: 'steward', run: true }],
+    }));
+    const unsplit = runCli(['synthesize', '--round1', path.join(out, 'half.json'),
+      '--plan', path.join(out, 'unsplit-plan.json'), '--out', path.join(out, 'report.md')]);
+    assert.equal(unsplit.status, 2, unsplit.stderr);
+    assert.match(unsplit.stderr, /ran auditor as one agent/);
+    assert.doesNotMatch(unsplit.stderr, /no payload/,
+      'the refusal does not deny a payload that byLane accepted');
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
@@ -647,6 +671,69 @@ test('a lane that reviewed in halves is one reviewer, and cannot rule on itself'
       const sibling = synth('sibling.json', 'sibling-out.json');
       assert.equal(sibling.findings[0].confidence, 'disputed',
         `a sibling's ruling counts, ${label}`);
+    }
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+// Who wrote a review file is settled by how it is filed, and `agent` inside it
+// is that file's own account of itself. Believing the account cost a finding
+// in both directions, and the bridge is not exposed to either because
+// validate.mjs holds `agent` against the filename — nothing holds it here.
+test('the key says which half filed a round-1 payload, not the payload', () => {
+  const out = freshTmp();
+  try {
+    const finding = { severity: 'critical', kind: 'defect', file: 'x.py', line: 1,
+      title: 'B', detail: 'd', fix: null };
+    const synth = (r2, name) => {
+      const args = ['synthesize', '--round1', path.join(out, 'r1.json'),
+        '--json-out', path.join(out, name)];
+      if (r2) args.push('--round2', path.join(out, r2));
+      const r = runCli(args);
+      assert.ok(r.status === 0 || r.status === 1, r.stderr);
+      return JSON.parse(readFileSync(path.join(out, name), 'utf-8'));
+    };
+    writeFileSync(path.join(out, 'self.json'), JSON.stringify({
+      'auditor-a': { persona: 'auditor', challenge: [{ title: 'B', reason: 'no' }] },
+    }));
+    writeFileSync(path.join(out, 'sibling.json'), JSON.stringify({
+      'auditor-b': { persona: 'auditor', challenge: [{ title: 'B', reason: 'no' }] },
+    }));
+
+    // Every one of these is a payload filed as `auditor-a` saying it is
+    // something else. `"auditor-b"` is the sibling's id, which the lane check
+    // accepts because it IS this lane's, so the entry was attributed to the
+    // half that did not write it and `auditor-a`'s own round-2 challenge read
+    // as an independent reviewer's. The other four are the trap combine.mjs's
+    // `declaresAgent` is named for: an ill-formed `agent` is a declaration to
+    // `=== undefined`, so it suppressed the stamp, resolved the entry to the
+    // bare lane, and got `auditor-b`'s honest ruling discarded as the lane
+    // ruling on itself.
+    for (const [label, claim] of [
+      ["the sibling's id", 'auditor-b'],
+      ['a null one', null],
+      ['an empty one', ''],
+      ['a numeric one', 42],
+      ["another lane's id", 'steward'],
+    ]) {
+      writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+        'auditor-a': { persona: 'auditor', agent: claim, verdict: 'reject',
+          summary: 'bug', findings: [finding] },
+        steward: { persona: 'steward', verdict: 'reject', summary: 'bug',
+          findings: [finding] },
+      }));
+
+      const base = synth(null, 'base.json');
+      assert.equal(base.findings[0].confidence, 'cross-validated', label);
+      assert.equal(base.open_blocking.length, 1, label);
+
+      const self = synth('self.json', 'self-out.json');
+      assert.equal(self.findings[0].confidence, 'cross-validated',
+        `the lane cannot discard its own critical, declaring ${label}`);
+      assert.equal(self.open_blocking.length, 1, label);
+
+      const sibling = synth('sibling.json', 'sibling-out.json');
+      assert.equal(sibling.findings[0].confidence, 'disputed',
+        `the sibling's ruling still counts, declaring ${label}`);
     }
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
