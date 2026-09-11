@@ -387,16 +387,30 @@ const showKey = (key) => {
 // it when overwriting it can only cost that entry its independence, never
 // invent any.
 //
-// A payload filed under the BARE lane is left exactly as it is. Its file was
-// not written by one half, so it has no key to be held to, and its entries'
-// ids are combine.mjs's honest output: `mergeSplitReviews` stamps each half's
-// id onto that half's entries, which is what lets `auditor-b`'s ruling on
-// `auditor-a`'s finding count at all.
+// A payload filed under the BARE lane has its header overwritten like any
+// other — the key is the identity of the file — and its ENTRIES left alone. The
+// two differ because a lane-keyed file may legitimately hold both halves' work:
+// `mergeSplitReviews` stamps each half's id onto that half's entries, and those
+// ids are what let `auditor-b`'s ruling on `auditor-a`'s finding count at all.
+// A header is one claim about the whole file, and a file the whole lane is
+// accountable for is the lane's.
+//
+// Overwritten rather than refused, because combine.mjs copies a LONE half's
+// payload through untouched and keys it by the persona, so `agent: 'auditor-a'`
+// beside `persona: 'auditor'` is a shape the documented pipeline writes. The
+// overwrite is what that shape means: one agent reviewed, and it cannot rule on
+// its own finding. Believing it instead hands the lane two names under one key
+// — round 1 saying `auditor-a` and round 2 saying `auditor-b` took a
+// cross-validated critical to `disputed` and emptied `open_blocking`, and the
+// validate direction took a `solo` critical to `consensus`, on one lane's word.
+// Nothing in either file, and nothing in a `--plan` that is optional anyway,
+// can tell that apart from a split that happened; the key can, so the key does.
 const stampedAs = (lane, key, payload) => {
-  if (key === lane) return payload;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
 
   const stamped = { ...payload, agent: key };
+  if (key === lane) return stamped;
+
   for (const [field, value] of Object.entries(stamped)) {
     if (!Array.isArray(value)) continue;
     stamped[field] = value.map((entry) => (entry && typeof entry === 'object'

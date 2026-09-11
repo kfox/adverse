@@ -853,12 +853,13 @@ test('an entry is stamped with the key its file was filed under, not with what i
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
-// The other half of the same rule. A payload filed under the bare lane was not
-// written by one half, so it has no key to be held to — and the ids inside it
-// are combine.mjs's honest output, which `mergeSplitReviews` stamps onto each
-// half's own entries. Overwriting them with the lane is what makes
-// `auditor-b`'s ruling on `auditor-a`'s finding read as the lane ruling on
-// itself, which is a voice lost rather than minted, and still wrong.
+// The other half of the same rule, and it splits: under the bare lane the
+// ENTRIES keep their ids and the HEADER does not. A lane-keyed file may hold
+// both halves' work — `mergeSplitReviews` stamps each half's id onto that
+// half's entries, and overwriting those is what makes `auditor-b`'s ruling on
+// `auditor-a`'s finding read as the lane ruling on itself, a voice lost rather
+// than minted, and still wrong. A header is one claim about the whole file, and
+// a file the whole lane is accountable for is the lane's.
 test('a payload filed under the bare lane keeps the ids its entries carry', () => {
   const out = freshTmp();
   try {
@@ -881,6 +882,58 @@ test('a payload filed under the bare lane keeps the ids its entries carry', () =
     assert.equal(report.findings[0].confidence, 'consensus',
       "the sibling half's validate counts");
     assert.equal(report.open_blocking.length, 1);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+// combine.mjs copies a LONE half's payload through untouched and keys it by the
+// persona, so `agent: 'auditor-a'` beside `persona: 'auditor'` is a shape the
+// documented pipeline writes — and it means one agent reviewed, which cannot
+// rule on its own finding. Believing the claim instead hands one lane two names
+// under one key, which is the whole hole this branch exists to close, reopened
+// one field over. Both directions measured before this: `auditor-a` in round 1
+// against `auditor-b` in round 2 took a cross-validated critical to `disputed`
+// with nothing open, and took a solo critical to `consensus` with one.
+test('a bare-lane header names the lane, so one lane cannot cross-examine itself', () => {
+  const out = freshTmp();
+  try {
+    const finding = { severity: 'critical', kind: 'defect', file: 'x.py', line: 1,
+      title: 'B', detail: 'd', fix: null };
+    const half = (round) => ({
+      auditor: { persona: 'auditor', agent: 'auditor-a', verdict: 'reject',
+        summary: 'bug', findings: [finding] },
+      ...round,
+    });
+    const synth = (name) => {
+      const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json'),
+        '--round2', path.join(out, 'r2.json'), '--json-out', path.join(out, name)]);
+      assert.ok(r.status === 0 || r.status === 1, r.stderr);
+      return JSON.parse(readFileSync(path.join(out, name), 'utf-8'));
+    };
+
+    writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
+      auditor: { persona: 'auditor', agent: 'auditor-b',
+        challenge: [{ title: 'B', reason: 'no' }] },
+    }));
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify(half({
+      adversary: { persona: 'adversary', verdict: 'reject', summary: 'bug',
+        findings: [finding] },
+    })));
+    const challenged = synth('challenged.json');
+    assert.equal(challenged.findings[0].confidence, 'cross-validated',
+      'a second name under one key does not discard the lane\'s own critical');
+    assert.equal(challenged.open_blocking.length, 1);
+
+    writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
+      auditor: { persona: 'auditor', agent: 'auditor-b',
+        validate: [{ title: 'B', reason: 'yes' }] },
+    }));
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify(half({
+      adversary: { persona: 'adversary', verdict: 'approve', summary: 'ok', findings: [] },
+    })));
+    const validated = synth('validated.json');
+    assert.equal(validated.findings[0].confidence, 'solo',
+      'a second name under one key does not vouch for the lane\'s own critical');
+    assert.equal(validated.open_blocking.length, 0);
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
