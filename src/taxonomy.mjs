@@ -96,16 +96,27 @@ export const PROVENANCE = Object.freeze({ review: 'review', regression: 'regress
 // a phantom reviewer, which is the same vouching the string case is on this
 // list for.
 //
-// A name is what is left when nothing invisible is: `trim()` alone closed this
-// for spaces and left it open one codepoint away, since it strips only
-// whitespace and a zero-width space is a FORMAT character. `\u200b`,
-// `\u2060`, `\u180e` and a bare NUL each survived it, each printing as
-// nothing and each counting as a reviewer. So the test is what remains after
-// whitespace, format and control characters come out — the three categories
-// that render as no character at all.
-const INVISIBLE = /[\p{White_Space}\p{Cf}\p{Cc}]/gu;
-export const isLaneName = (value) => typeof value === 'string'
-  && value.replace(INVISIBLE, '') !== '';
+// Spelled as what a lane name MAY contain, because the other direction does
+// not close. `trim()` left it open at `\u200b`, a FORMAT character; naming
+// whitespace, format and control characters left it open at `\u3164` HANGUL
+// FILLER, which is a letter, `\u2800` BRAILLE PATTERN BLANK, which is a
+// symbol, and `\ufe0f`, which is a mark. Each prints as no character at all,
+// each passed as a lane name, each was counted in a permanent PR comment's
+// reviewer tally, and each is one codepoint past whatever the previous list
+// named. "The categories that render as nothing" is not a set anyone can
+// finish enumerating.
+//
+// What a lane name is instead: an identifier this tool writes — a persona, or
+// a persona and the letter of one half of a split lane. Anything else came
+// from a hand-edited file, and a refusal is the direction to fail in.
+//
+// This also settles IDENTITY, which a blocklist could not. `auditor` and
+// `auditor\u200b` both passed the old test, deduped as two entries, and
+// published "2 reviewers" with both printing as `auditor` — the same double
+// vouching, reached by duplication rather than by emptiness. There is one
+// spelling of a name now, so the set that counts them counts each once.
+const LANE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+export const isLaneName = (value) => typeof value === 'string' && LANE_NAME.test(value);
 export const isLaneList = (value) => Array.isArray(value) && value.every(isLaneName);
 
 // Which lanes a citation claims, or `null` for a claim that is not lane names

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 import { ADVISORY_KINDS, CONFIDENCES, KINDS, ROOT_CAUSE_STATUSES, SEVERITIES,
          SEVERITY_RANK, assertCoversConfidences, citationReporter, citesLaneNames,
-         claimedLanes, isLaneList } from '../src/taxonomy.mjs';
+         claimedLanes, isLaneList, isLaneName } from '../src/taxonomy.mjs';
 
 test('every advisory kind is a real kind', () => {
   for (const k of ADVISORY_KINDS) assert.ok(KINDS.includes(k), `${k} is not in KINDS`);
@@ -105,9 +105,21 @@ for (const [label, citation, expected] of [
   ['a reporter that is a word joiner', { reporter: '\u2060' }, null],
   ['a reporter that is a byte-order mark', { reporter: '\ufeff' }, null],
   ['a reporter that is a control character', { reporter: '\u0000' }, null],
-  // And a real name is still a name with one of those beside it.
-  ['a reporter carrying an invisible character', { reporter: 'auditor\u200b' },
-    ['auditor\u200b']],
+  // A name with one of those beside it is not the name it looks like. It
+  // deduped as a second entry against the real `auditor`, printed
+  // identically, and published "2 reviewers" — the same double vouching,
+  // reached by duplication rather than by emptiness.
+  ['a reporter carrying an invisible character', { reporter: 'auditor\u200b' }, null],
+  // The three that the category test still admitted, each of which prints as
+  // no character: a filler that is a LETTER, a blank that is a SYMBOL, and a
+  // variation selector that is a MARK.
+  ['a reporter that is a Hangul filler', { reporter: '\u3164' }, null],
+  ['a reporter that is a blank braille pattern', { reporter: '\u2800' }, null],
+  ['a reporter that is a variation selector', { reporter: '\ufe0f' }, null],
+  ['a reporter with a space inside it', { reporter: 'audi tor' }, null],
+  // And the names this tool actually writes.
+  ['a persona', { reporter: 'auditor' }, ['auditor']],
+  ['one half of a split lane', { reporter: 'auditor-b' }, ['auditor-b']],
 ]) test(`claimedLanes reads ${label}`, () => {
   assert.deepEqual(claimedLanes(citation), expected);
 });
@@ -169,16 +181,25 @@ test('a lane name with no name in it is not a lane name', () => {
   assert.equal(isLaneList(['auditor']), true);
 });
 
-// `trim()` strips whitespace, and a zero-width space is a FORMAT character —
-// so the first version of this closed the class for a name of spaces and left
-// it open for the four below, each of which prints as nothing and counts as
-// one reviewer in a permanent PR comment.
-test('a lane name of invisible characters is not a lane name either', () => {
+// Each of these prints as no character and counted as one reviewer in a
+// permanent PR comment. Two rounds of naming what a name may NOT contain each
+// closed the list one codepoint short — `trim()` at the format characters, and
+// the three invisible CATEGORIES at a filler that is a letter, a blank that is
+// a symbol and a selector that is a mark.
+test('a lane name of invisible characters is not a lane name', () => {
   for (const blank of ['\u200b', '\u2060', '\u180e', '\ufeff', '\u0000', '\u00a0',
-    '\u200b\u2060 ']) {
+    '\u3164', '\u2800', '\ufe0f', '\u115f', '\u200b\u2060 ', '  ', '']) {
     assert.equal(isLaneList([blank]), false, JSON.stringify(blank));
   }
-  assert.equal(isLaneList(['auditor\u200b']), true, 'a name with one beside it is a name');
+});
+
+// Identity, which no blocklist could settle: a name is one spelling, so the
+// set that counts reviewers counts each lane once. `auditor` and
+// `auditor\u200b` printed identically and were two.
+test('a lane has one spelling, so two of them are two lanes', () => {
+  assert.equal(isLaneList(['auditor\u200b']), false, 'not the name it looks like');
+  assert.equal(isLaneList([' auditor ']), false, 'nor is it padded');
+  assert.equal(new Set(['auditor', 'auditor-b'].filter(isLaneName)).size, 2);
 });
 
 // What a citation line says about who reported it: the claim, then what

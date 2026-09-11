@@ -345,6 +345,12 @@ for (const [label, citation] of [
   // One codepoint past what `trim` reaches, and the same phantom reviewer.
   ['a reporter that is a zero-width space',
     { id: 'F1', title: 't', reporter: '\u200b' }],
+  // And one past the invisible CATEGORIES: a filler that is a letter.
+  ['a reporter that is a Hangul filler',
+    { id: 'F1', title: 't', reporter: '\u3164' }],
+  // A name that prints as a real one and is not it.
+  ['a reporter carrying an invisible character',
+    { id: 'F1', title: 't', reporter: 'auditor\u200b' }],
 ]) test(`a briefing citation with ${label} is refused, naming the file`, () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'adverse-cite-'));
   const briefing = path.join(dir, 'briefing.json');
