@@ -54,7 +54,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, usage, writeOutput } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { DEFAULT_PROBE_TIMEOUT_MS, MAX_PROBES_PER_LANE, declinedProbe, parseProbeClaim, runProbe } =
@@ -331,13 +331,7 @@ const record = {
   probes,
 };
 
-try {
-  writeFileSync(values.out, `${JSON.stringify(record, null, 2)}\n`, 'utf-8');
-} catch (e) {
-  // Exit 2, not 1: a run that could not write its record established nothing.
-  process.stderr.write(`probe: ${values.out}: cannot be written (${e.message.trim()})\n`);
-  process.exit(2);
-}
+writeOutput('probe', values.out, `${JSON.stringify(record, null, 2)}\n`);
 
 const confirmed = probes.filter((p) => p.confirmed);
 const contradicted = probes.filter((p) => p.source === 'measured' && !p.confirmed);

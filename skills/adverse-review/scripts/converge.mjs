@@ -29,11 +29,11 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-import { parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
+import { oneLine, parseBridgeArgs, readJson, usage } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const {
-  FIX_SUPPORT, UNREPORTED_DISPOSITION, checkBinding, clipReason, convergenceStatus,
+  FIX_SUPPORT, UNREPORTED_DISPOSITION, checkBinding, convergenceStatus,
   emptyLedger, loadLedger, recordDecisions, requireFindings, saveLedger,
   summarizeDispositions, uncoveredDecisions, unsupportedFixes,
 } = await importFromSrc('ledger.mjs');
@@ -96,15 +96,6 @@ function decisionsIn(payload) {
   return null;
 }
 
-// Both modes below render strings out of JSON read off disk — untrusted files —
-// as PLAIN TEXT to stdout, which is what the Skill tells the orchestrating agent
-// to read and act on. `clipReason` bounds length and strips control bytes but
-// deliberately keeps newlines, because a `reason` is prose and JSON-escaping
-// contains it in briefing.json. Here there is no JSON to escape it: a newline
-// ends the line and the next one can look like the tool speaking. So every
-// interpolated value is also flattened to one line.
-const oneLine = (v) => clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
-
 const repo = values.repo ?? process.cwd();
 const head = values.head ?? 'HEAD';
 
@@ -136,7 +127,7 @@ function refuseBinding(problems, lead, tail = '') {
 // across repositories, so they are the binding.
 const bindingProblems = checkBinding(ledger, resolveHere);
 if (bindingProblems.length) {
-  refuseBinding(bindingProblems, 'this ledger does not belong to this repository:');
+  refuseBinding(bindingProblems, 'this ledger is not one this tool wrote for this tree:');
 }
 
 // --- record mode -------------------------------------------------------------
@@ -180,6 +171,37 @@ if (values.record) {
       + '  from "the fix did not take" and will report them REGRESSED. They will\n'
       + '  also name no reporting lane, so a regression pass on these fix commits\n'
       + '  cannot derive who must not run it.\n');
+  }
+
+  // Keyed on the decisions, not on this bridge's `--report`. Whether an entry
+  // can excuse the next decision that matches it was decided at FOLD time, by
+  // `decisions.mjs`'s `--report`, and travels in `reconciled` — so a fold WITH
+  // a report recorded here without one carries `reconciled: false`, which is
+  // exactly the value the ledger withholds the exemption on, and warning about
+  // it would state the opposite of the truth. Gated on the entries that
+  // actually vouch, so a batch with none of them is not warned about one.
+  // `?? null` because that is how `recordDecisions` normalizes the field on the
+  // way into the ledger, and the ledger is what grants the exemption: an entry
+  // that omits `reconciled` is stored as `null` and vouches exactly like one
+  // that states it, so a strict `=== null` warned about the spelling
+  // `decisions.mjs` writes and stayed silent on the one a hand-written batch
+  // uses.
+  //
+  // `d &&` because a decisions array holding null gets its own refusal by name
+  // a few lines down, and a TypeError from a WARNING would arrive before it —
+  // under exit 1, which is a claim about a review this run never read.
+  const vouching = decisions.filter((d) => d && d.disposition === UNREPORTED_DISPOSITION
+    && (d.reconciled ?? null) === null);
+  if (vouching.length) {
+    process.stderr.write(
+      `converge: ${vouching.length} ${UNREPORTED_DISPOSITION} `
+      + `${vouching.length === 1 ? 'entry was' : 'entries were'} folded with no report, so\n`
+      + `  ${vouching.length === 1 ? 'it keeps' : 'they keep'} the exemption that excuses the`
+      + ' next decision matching\n'
+      + `  ${vouching.length === 1 ? 'it' : 'them'}: this ledger withholds that only where`
+      + ' the fold checked the identity\n'
+      + '  against a report and no lane had filed it. Re-fold with\n'
+      + '  `decisions.mjs --report` to have it checked.\n');
   }
 
   // Computed BEFORE the write, because it is the report these decisions answer

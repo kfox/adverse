@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -251,7 +251,9 @@ test('two verify payloads for one persona refuse to collide', () => {
     const r = runVerify(['--verify', mk('verify-auditor.json'),
                          '--verify', mk('verify-auditor-stale.json'), '--outdir', dir]);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /already written this run/);
+    assert.match(r.stderr, /already claimed this run/);
+    assert.doesNotMatch(r.stderr, /already written/,
+      'nothing has been written yet: the claim is made at queue time');
     // Claimed at QUEUE time, so the collision is refused before the first file
     // is written rather than after the colliding payload's sibling is on disk.
     assert.throws(() => readFileSync(path.join(dir, 'round1-auditor.verified.json')));
@@ -514,6 +516,117 @@ test('a briefed finding cited by an id the briefing does not carry binds by titl
     assert.equal(f.severity, 'info');
     assert.equal(f.file, 'src/a.mjs');
     assert.equal(f.line, 5);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --briefing whose findings is not an array is exit 2, naming the file', () => {
+  // `briefingEntries` THROWS on a document with no `findings` array — a
+  // decisions.json or a verify payload handed to `--briefing` by mistake — and
+  // this call site had no guard, so it was a raw Node stack at exit 1. For this
+  // bridge exit 1 means it read a payload that failed its schema. The sibling
+  // call in decisions.mjs is wrapped; the guard did not travel with the import.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ decisions: [] }));
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F1', title: 'a title', status: 'open', reason: 'r' }],
+      added: [],
+    }));
+
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /briefing\.json/, r.stderr);
+    assert.doesNotMatch(r.stderr, /at file:|not iterable|TypeError/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const [label, doc, reason] of [
+  ['whose findings is an object', { decisions: [] },
+   'it died with `object is not iterable` at exit 1, which is this bridge\'s'
+   + ' code for a payload that failed its schema'],
+  ['carrying no findings key at all', { version: 1 },
+   'it indexed to an empty map at exit 0, and every round-2 addition then fell'
+   + ' through to the reopened fallback with a null anchor'],
+]) {
+  // The same rule, one file over from the guard above: "I could not find the
+  // findings" must never come to mean "there were none". `--report` is the
+  // anchor source of last resort and the only file that holds a finding a
+  // round-2 reviewer ADDED, so an empty index there is exactly the silent
+  // failure that fallback exists to make loud.
+  test(`a --report ${label} is exit 2, naming the file`, () => {
+    const dir = freshTmp();
+    try {
+      const report = path.join(dir, 'report.json');
+      writeFileSync(report, JSON.stringify(doc));
+      const src = path.join(dir, 'verify-auditor.json');
+      writeFileSync(src, JSON.stringify({
+        persona: 'auditor',
+        verified: [{ id: 'F1', title: 'a title', status: 'open', reason: 'r' }],
+        added: [],
+      }));
+
+      const r = runVerify(['--verify', src, '--outdir', dir, '--report', report]);
+
+      assert.equal(r.status, 2, `${reason}\n${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /report\.json/, r.stderr);
+      assert.doesNotMatch(r.stderr, /at file:|not iterable|TypeError/, r.stderr);
+      assert.equal(existsSync(path.join(dir, 'round1-auditor.verified.json')), false,
+        'and nothing is written on an input it could not read');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('a title-less briefing entry does not answer an id lookup here either', () => {
+  // The sibling of the hole `briefingEntries` closes for decisions.mjs, in the
+  // guard that file's comments name. Indexed on `id` alone, a title-less entry
+  // answered `v.id`'s lookup, its empty title disagreed with the verification's
+  // real one, and the binding was dropped with `id "F1" is undefined in the
+  // briefing` — a payload accused for a field triage failed to write. What the
+  // drop costs is the anchor: a still-open critical came back at the reopened
+  // fallback, `warning` with no file and no line, so the loop stopped reporting
+  // a blocking finding as blocking.
+  //
+  // Skipping the entry lets the title route run, and the title is the join key
+  // every downstream edge already rides on.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: [
+      // Triage wrote this one without a title. It carries the id the reviewer
+      // cited, so it is what the id index answered with.
+      { id: 'F1', severity: 'info', kind: 'design', file: 'src/nit.mjs', line: 2,
+        counterpart: null, fix: null },
+      { id: 'F2', severity: 'critical', kind: 'defect', file: 'src/auth.mjs', line: 88,
+        counterpart: null, title: 'Auth bypass in token check', fix: null },
+    ] }));
+    const src = path.join(dir, 'verify-auditor.json');
+    writeFileSync(src, JSON.stringify({
+      persona: 'auditor',
+      verified: [{ id: 'F1', title: 'Auth bypass in token check',
+        status: 'open', reason: 'still bypassable' }],
+      added: [],
+    }));
+
+    const r = runVerify(['--verify', src, '--outdir', dir, '--briefing', briefing]);
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /is undefined in the briefing/, r.stderr);
+    assert.doesNotMatch(r.stderr, /anchor not inherited/, r.stderr);
+    const [f] = JSON.parse(
+      readFileSync(path.join(dir, 'round1-auditor.verified.json'), 'utf8')).findings;
+    assert.equal(f.severity, 'critical', 'a still-open critical comes back blocking');
+    assert.equal(f.file, 'src/auth.mjs');
+    assert.equal(f.line, 88);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

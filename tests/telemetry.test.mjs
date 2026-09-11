@@ -422,27 +422,49 @@ test('every --iteration that is not a pass number is refused', () => {
 });
 
 test('a hostile round-1 key never reaches the file', () => {
-  // Measured end-to-end by the panel: `adverse synthesize --round1` validates
+  // Measured end-to-end by the panel: `adverse synthesize --round1` validated
   // no persona name, so a key was a free string that landed verbatim in
   // `roster.reported` and as a key under `lanes`.
-  const dir = freshTmp();
-  const file = path.join(dir, 'runs.jsonl');
-  const payload = path.join(dir, 'round1.json');
-  writeFileSync(payload, JSON.stringify({
+  //
+  // Asserted against the WRITER rather than through the CLI, because the CLI
+  // now refuses a key that names no lane before any of this runs and no
+  // fixture can reach this code through it. `buildRunRecord` is also fed
+  // in-process by `adverse review`, so the property is still the writer's to
+  // hold: a name it cannot place is counted, never quoted. The case below
+  // pins the refusal that made this one unreachable.
+  const round1 = {
     auditor: review('auditor', [finding()]),
     steward: review('steward', []),
     'SENTINEL-LEAK-9f2a1': review('auditor', [finding()]),
-  }));
+  };
+  const record = buildRunRecord({ syn: synthesize(round1), round1 });
 
-  const r = runSynthesize(['--round1', payload, '--out', path.join(dir, 'r.md')],
-    { ADVERSE_TELEMETRY_FILE: file });
-  assert.equal(r.status, 0, r.stderr);
-
-  const line = readFileSync(file, 'utf-8');
+  const line = JSON.stringify(record);
   assert.doesNotMatch(line, /SENTINEL-LEAK-9f2a1/);
-  const record = JSON.parse(line);
   assert.deepEqual(record.roster.reported, ['auditor', 'steward']);
   assert.equal(record.roster.unknown, 1, 'counted, not quoted');
+});
+
+test('a round-1 key that names no lane writes no telemetry line at all', () => {
+  // One layer earlier than the test above, and the reason that one moved off
+  // the CLI: a key that names no lane is refused at the flag, so the run that
+  // would have recorded it never happens. `referee` is the case a shape check
+  // cannot reach — a well-formed lane name for no lane.
+  for (const key of ['SENTINEL-LEAK-9f2a1', 'referee']) {
+    const dir = freshTmp();
+    const file = path.join(dir, 'runs.jsonl');
+    const payload = path.join(dir, 'round1.json');
+    writeFileSync(payload, JSON.stringify({
+      auditor: review('auditor', [finding()]),
+      [key]: review('auditor', [finding()]),
+    }));
+
+    const r = runSynthesize(['--round1', payload, '--out', path.join(dir, 'r.md')],
+      { ADVERSE_TELEMETRY_FILE: file });
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /names no review lane/, key);
+    assert.equal(existsSync(file), false, `${key} recorded a line`);
+  }
 });
 
 test('the destination directory is not followed when it is a symlink', () => {

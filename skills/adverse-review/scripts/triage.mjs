@@ -35,10 +35,9 @@
 // reviewer ("does the finding say why this diff puts it in play?"), not a
 // verdict.
 
-import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { parseBridgeArgs, readJson, readPlanLanes, reportRoster, usage } from './bridge-io.mjs';
+import { parseBridgeArgs, readJson, readPlanLanes, reportRoster, usage, writeOutput } from './bridge-io.mjs';
 import { importFromSrc } from './package-root.mjs';
 
 const { ADVISORY_KINDS } = await importFromSrc('taxonomy.mjs');
@@ -160,7 +159,7 @@ if (values.ledger) {
   // it" and puts its own text in front of every reviewer.
   const problems = checkBinding(ledger, (ref) => resolveRef(repo, ref));
   if (problems.length) {
-    process.stderr.write('triage: this ledger does not belong to this repository:\n'
+    process.stderr.write('triage: this ledger is not one this tool wrote for this tree:\n'
       + problems.map((p) => `  - ${p}\n`).join(''));
     process.exit(1);
   }
@@ -203,7 +202,7 @@ const { briefing, stats } = buildBriefing(reviews, {
   traceFor: makeAnchorTracer({ repo, to: 'HEAD' }),
 });
 
-writeFileSync(values.out, JSON.stringify(briefing, null, 2), 'utf-8');
+writeOutput('triage', values.out, JSON.stringify(briefing, null, 2));
 
 const ids = (list) => (list.length ? ` (${list.map((f) => f.id ?? f).join(', ')})` : '');
 process.stdout.write(

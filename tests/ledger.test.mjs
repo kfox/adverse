@@ -18,6 +18,7 @@ import {
   normalizeTitle, recordDecisions, saveLedger, scoreMatch, summarizeDispositions,
   uncoveredDecisions, unsupportedFixes,
 } from '../src/ledger.mjs';
+import { MAX_REASON_CHARS } from '../src/limits.mjs';
 
 const finding = (over = {}) => ({
   severity: 'critical', kind: 'defect', file: 'app.py', line: 20,
@@ -315,6 +316,39 @@ test('a ledger from a future version is refused, not guessed at', () => {
   }
 });
 
+for (const [label, json, shown] of [
+  ['an entries that is not an array', '{"version":1,"entries":{}}', '{}'],
+  // The spelling `??=` swallowed: it replaced `null` before anything looked at
+  // it, so the one shape a serializer actually writes for a list it had no
+  // value for was the one shape these checks could not see.
+  ['an entries that is null', '{"version":1,"entries":null}', 'null'],
+  ['an iterations that is null', '{"version":1,"iterations":null}', 'null'],
+  ['an entry that is not an object', '{"version":1,"entries":[null]}', 'null'],
+  ['an iterations that is not an array', '{"version":1,"iterations":5}', '5'],
+  ['an iteration that is not an object', '{"version":1,"iterations":["1"]}', '"1"'],
+]) {
+  // Both lists are walked by every reader in that file, and `checkBinding` —
+  // the pass that refuses a ledger this tool did not write — is called OUTSIDE
+  // the try/catch that wraps `loadLedger` in all three bridges. So `[null]` was
+  // not a refusal but an uncaught `Cannot read properties of null`, at an exit
+  // code that means something else entirely.
+  test(`a ledger with ${label} is refused by shape`, () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'adverse-ledger-'));
+    try {
+      const file = path.join(dir, 'l.json');
+      writeFileSync(file, json, 'utf-8');
+      assert.throws(() => loadLedger(file), (e) => {
+        assert.match(e.message, /refusing to guess at its shape/);
+        assert.ok(e.message.includes(shown), `named as ${shown}: ${e.message}`);
+        assert.ok(e.message.includes(file), 'and the file is named');
+        return true;
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('a ledger file that is not an object is refused by shape, not by version', () => {
   // `null` came back as `Cannot read properties of null (reading 'version')`,
   // which names neither the file nor what is wrong with it, and the three
@@ -440,6 +474,144 @@ test('a ledger naming another repository is refused, not adjudicated from', () =
   assert.match(problems[0], /not a commit in this repository/);
 
   assert.deepEqual(checkBinding(l, (r) => `sha-for-${r}`), [], 'a ledger that resolves here is accepted');
+});
+
+test('a reconciled no fold writes is named by the check that reads the ledger', () => {
+  // The same evidence as a disposition outside the vocabulary, and it was
+  // caught only reactively: `cannotVouch` withholds the exemption from such an
+  // entry, but only if some later decision happens to match it — and if none
+  // ever does, the forged value is never mentioned at all. This is the pass
+  // whose job is refusing a ledger that did not come from this tool.
+  const entry = { title: 't', kind: 'defect', file: 'x.py', line: 1,
+                  disposition: 'noted', reason: 'r', atCommit: 'deadbeef' };
+  const l = { ...emptyLedger(), entries: [{ ...entry, reconciled: 'false' }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.match(problem, /has reconciled "false", which is not one of true, false, null/);
+  // And what to do about it. Everything else this pass reports is a ref that
+  // does not resolve, where "wrong repository" is the obvious next move; a
+  // `reconciled` outside the vocabulary is a field of the operator's own
+  // ledger, and a refusal that names it without saying so leaves a run with
+  // nothing to try but deleting the file.
+  assert.match(problem, /the fold writes that field.*correct or remove that entry/);
+  assert.deepEqual(
+    checkBinding({ ...emptyLedger(), entries: [{ ...entry, reconciled: false }] },
+      (r) => `sha-for-${r}`),
+    [], 'and a value the fold does write is not a problem');
+});
+
+// Every value one of these problems interpolates comes off the ledger file the
+// problem is about, so any of them can be as long as its writer likes. converge
+// re-clips the finished sentence at MAX_REASON_CHARS, which cuts the words
+// AFTER the long field — the remedy, or what the ref was wrong about — and
+// triage and regression print it raw, where the same field buries the sentence
+// instead. Bounding the title alone fixed the one field that was measured.
+for (const [label, over, base, keeps] of [
+  ['title', { title: 'T'.repeat(600), reconciled: 'false' }, null,
+   /correct or remove that entry$/],
+  ['reconciled', { reconciled: 'F'.repeat(600) }, null,
+   /correct or remove that entry$/],
+  ['disposition', { disposition: 'D'.repeat(600) }, null,
+   /which is not one of fixed, declined, deferred, noted$/],
+  ['reporters', { reporters: 'R'.repeat(600) }, null,
+   /correct or remove that entry$/],
+  // Two quoted fields at once, which is the case that actually bounds the
+  // wording: each is clipped to 121 by `brief`, so a message with both in it
+  // is the longest this pass can emit. The `reconciled` overflow one row up
+  // got in because only one field at a time was ever measured.
+  ['title beside reporters', { title: 'T'.repeat(600), reporters: 'R'.repeat(600) }, null,
+   /correct or remove that entry$/],
+  ['atCommit', { atCommit: 'A'.repeat(600) }, null,
+   /which is not a commit in this repository$/],
+  ['fixCommit', { disposition: 'fixed', fixCommit: 'F'.repeat(600) }, null,
+   /which is not a commit in this repository$/],
+  ['base', {}, 'B'.repeat(600), /is not a commit in this repository$/],
+]) test(`an over-long ${label} does not push a problem's own words off the end`, () => {
+  const l = { ...emptyLedger(), base,
+              entries: [{ title: 't', kind: 'defect', file: 'x.py', line: 1,
+                          disposition: 'noted', reason: 'r', atCommit: 'deadbeef', ...over }] };
+
+  const [problem] = checkBinding(l, (r) => (r === 'deadbeef' ? 'sha-for-deadbeef' : null));
+
+  assert.ok(problem.length <= MAX_REASON_CHARS,
+    `it survives converge's own clip: ${problem.length}`);
+  assert.match(problem, keeps);
+  assert.match(problem, /[A-Z]{40}/, 'and enough of the long field to recognize it');
+});
+
+test('an entry whose title is not a string is named as what it is', () => {
+  // The identifier is the whole reason these messages quote a title, and this
+  // branch reports entries a fix agent wrote by hand — where a title that is
+  // an object is exactly the kind of thing worth seeing. Flattening it first
+  // rendered every one of them as `[object Object]`, which is what the
+  // disposition branch beside it says not to do.
+  const l = { ...emptyLedger(),
+              entries: [{ kind: 'defect', file: 'x.py', line: 1, title: { a: 1, b: 'x' },
+                          disposition: 'noted', reason: 'r' }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.match(problem, /^entry \{"a":1,"b":"x"\} carries no atCommit/, problem);
+});
+
+test('an entry with no title is still named, rather than named nothing', () => {
+  // `JSON.stringify(undefined)` is the value `undefined`, which flattens to
+  // the empty string — so the problem read `entry  carries no atCommit`, with
+  // the identifier gone, on the branch whose whole subject is an entry that
+  // did not come from this tool.
+  const l = { ...emptyLedger(),
+              entries: [{ kind: 'defect', file: 'x.py', line: 1,
+                          disposition: 'noted', reason: 'r' }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.match(problem, /^entry "" carries no atCommit/, problem);
+});
+
+test('a title of quote characters is bounded after escaping, not before', () => {
+  // The budget is spent on what gets PRINTED, and escaping doubles every
+  // character it touches: bounding first and stringifying second let a title
+  // of 600 quotes come back 243 characters long — a problem of 522 against a
+  // cap of 500, cutting the remedy off the very branch this bound was added to
+  // protect. Both fields are long here because one is not enough to cross it,
+  // which is exactly why the plain-fill table above did not catch this.
+  const l = { ...emptyLedger(),
+              entries: [{ title: '"'.repeat(600), kind: 'defect', file: 'x.py', line: 1,
+                          disposition: 'noted', reason: 'r', atCommit: 'deadbeef',
+                          reconciled: 'F'.repeat(600) }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.ok(problem.length <= MAX_REASON_CHARS,
+    `it survives converge's own clip: ${problem.length}`);
+  assert.match(problem, /correct or remove that entry$/);
+});
+
+for (const [label, reporters] of [
+  ['a string', 'auditor'],
+  ['a number', 5],
+  ['a list holding something that is not a lane name', ['auditor', 7]],
+]) test(`a reporters that is ${label} is refused with the ledger, not at the read`, () => {
+  // `lanesOf` catches it only when someone asks about that entry's fix commit,
+  // so a forged `reporters` loaded, recorded and saved clean — and became a
+  // refusal an iteration later, if ever. It is a field the fold derives,
+  // which is exactly what this pass is for. The remedy has to survive
+  // converge's clip, so it stays at the end: see the over-long table above.
+  const l = { ...emptyLedger(),
+              entries: [{ title: 't', kind: 'defect', file: 'x.py', line: 1,
+                          disposition: 'noted', reason: 'r', atCommit: 'deadbeef', reporters }] };
+
+  const [problem] = checkBinding(l, (r) => `sha-for-${r}`);
+
+  assert.match(problem, /which is not a list of lane names/);
+  assert.match(problem, /correct or remove that entry$/);
+  assert.deepEqual(
+    checkBinding({ ...emptyLedger(),
+                   entries: [{ title: 't', kind: 'defect', file: 'x.py', line: 1,
+                               disposition: 'noted', reason: 'r', atCommit: 'deadbeef',
+                               reporters: ['auditor'] }] }, (r) => `sha-for-${r}`),
+    [], 'and the shape the fold does write is not a problem');
 });
 
 test('a binding problem is one bounded line, whichever bridge prints it', () => {
@@ -1419,6 +1591,54 @@ test('only a fixed decision closes a finding, whatever else names a commit', () 
     { recorded: false, closed: 0, unattributed: 0, lanes: [] });
 });
 
+for (const [label, reporters] of [
+  // The one that fabricates rather than crashing, and the reason this is a
+  // refusal and not a tolerant read: a string is iterable, so `"auditor"`
+  // answered with the seven lanes a, d, i, o, r, t, u — an exclusion list for
+  // a regression pass, minted out of a typo, in the one place whose contract
+  // is that no lane is excluded without a recorded reason.
+  ['a string', 'auditor'],
+  ['a number', 5],
+  // `recordDecisions` writes an array on every entry, so a null here did not
+  // come from this tool either — and reading it as "nobody" is the same
+  // fail-open one field along.
+  ['null', null],
+  ['a list holding something that is not a lane name', [{ persona: 'auditor' }]],
+]) test(`closureOf refuses a reporters that is ${label}, rather than reading it`, () => {
+  assert.throws(() => closureOf(ledgerWith(closed({ reporters })), 'fix1', resolve),
+    (e) => {
+      assert.match(e.message, /which is not a list of lane names/);
+      assert.match(e.message, /Off-by-one in the loop bound/, 'the entry is named');
+      return true;
+    });
+});
+
+test('the lanes a decision is recorded with are refused the same way', () => {
+  // Same field, same fabrication, one layer up: `reporters` on a REPORT
+  // finding is what `recordDecisions` derives an entry's lanes from, and a
+  // report is as model-written as a payload.
+  const report = { findings: [{ ...finding(), reporters: 'auditor' }] };
+
+  assert.throws(
+    () => recordDecisions(emptyLedger(), [{ ...finding(), disposition: 'declined', reason: 'r' }],
+      { atCommit: 'reviewed', report }),
+    /which is not a list of lane names/);
+});
+
+test('a thrown lane-shape refusal bounds its identifier too', () => {
+  // The same bound-then-escape inversion `named` was fixed for lived at both
+  // `lanesOf` call sites, one layer along: a title `oneLine` had just clipped
+  // to 500 characters was stringified afterwards into roughly a thousand,
+  // ahead of the reason — and converge and regression print this raw.
+  const l = ledgerWith(closed({ title: '"'.repeat(600), reporters: 'R'.repeat(600) }));
+
+  assert.throws(() => closureOf(l, 'fix1', resolve), (e) => {
+    assert.ok(e.message.length <= MAX_REASON_CHARS, `bounded: ${e.message.length}`);
+    assert.match(e.message, /which is not a list of lane names$/);
+    return true;
+  });
+});
+
 test('closureOf throws on a commit that resolves nowhere rather than answering', () => {
   // Every honest return value here says something about a commit, and there is
   // nothing to say about one that does not exist. "It closed nothing" is what
@@ -1588,6 +1808,59 @@ test('a note no fold ever checked still vouches, and records that nothing checke
   const later = [{ ...mintedItem, disposition: 'declined', reason: 'budgeted upstream after all' }];
 
   assert.equal(ledger.entries[0].reconciled, null);
+  assert.deepEqual(uncoveredDecisions(later, unreportedReport, { ledger }), []);
+});
+
+test('a note whose reconciled no fold wrote does not vouch on the reader\'s side', () => {
+  // `recordDecisions` refuses such a value now, and that closed this for the
+  // writer only: `loadLedger` validates `version` and nothing per-entry, so a
+  // row written before that guard — or hand-edited, which is a thing an
+  // operator does to a ledger — carried `"false"`, the string spelling of the
+  // one value that withholds. Asked whether the field was exactly `false`, the
+  // reader said no and VOUCHED, which is the laundering this gate exists to
+  // refuse spelled with two quotes.
+  const ledger = notedLedger(false);
+  ledger.entries[0].reconciled = 'false';
+  const later = [{ ...mintedItem, disposition: 'fixed', reason: 'bounded it',
+                   fixCommit: 'bbb2222' }];
+
+  const [uncovered] = uncoveredDecisions(later, unreportedReport, { ledger });
+
+  assert.equal(uncovered?.disposition, 'fixed');
+  // Its own sentence, because it is its own remedy: nothing here says a fold
+  // made any statement about this identity, so there is nothing to tell the
+  // operator about their payloads.
+  assert.match(uncovered.why, /holds a value no fold writes/);
+  assert.doesNotMatch(uncovered.why, /excusing its own decision/);
+});
+
+test('a note that says no lane filed it is named as that, beside an unreadable one', () => {
+  // Where the matching notes hold both reasons for not vouching, the report
+  // gets the one that is TRUE of them. Keyed on `every`, a single unreadable
+  // note demoted the whole answer to "whether any lane had filed it cannot be
+  // read off this ledger at all" — while the note beside it said exactly that
+  // — and suppressed the accusation an operator can act on.
+  const ledger = notedLedger(false);
+  ledger.entries.push({ ...ledger.entries[0], reconciled: 'false' });
+  const later = [{ ...mintedItem, disposition: 'fixed', reason: 'bounded it',
+                   fixCommit: 'bbb2222' }];
+
+  const [uncovered] = uncoveredDecisions(later, unreportedReport, { ledger });
+
+  assert.match(uncovered.why, /a batch would be excusing its own decision with its own footnote/);
+  assert.doesNotMatch(uncovered.why, /cannot be read off this ledger/);
+});
+
+test('a note from a ledger written before the field existed still vouches', () => {
+  // The other side of that, and the reason the withholding is keyed on the
+  // values this tool writes rather than on `!== false`: a row with no
+  // `reconciled` key at all is an older ledger at the same version, not a
+  // forged one, and it vouches exactly as the `null` a hand-written
+  // decisions.json records does.
+  const ledger = notedLedger(undefined);
+  delete ledger.entries[0].reconciled;
+  const later = [{ ...mintedItem, disposition: 'declined', reason: 'budgeted upstream' }];
+
   assert.deepEqual(uncoveredDecisions(later, unreportedReport, { ledger }), []);
 });
 

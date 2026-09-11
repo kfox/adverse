@@ -7,7 +7,7 @@ import process from 'node:process';
 
 import { collectDirectory, collectDiff } from './collect.mjs';
 import { refuseDirectRun } from './entryGuard.mjs';
-import { PERSONAS, DEFAULT_PERSONAS, crossReviews } from './personas.mjs';
+import { PERSONAS, DEFAULT_PERSONAS, crossReviews, isLaneAgent, laneOf } from './personas.mjs';
 import { normalizeProbes } from './probe.mjs';
 import {
   buildPhase1Prompt,
@@ -18,6 +18,7 @@ import {
 import { AgentRunner, runParallel } from './runner.mjs';
 import { agentNames, parsePlan, runLanes } from './scaling.mjs';
 import { renderMarkdown, synthesize, toJsonReport } from './synthesis.mjs';
+import { citesLaneNames } from './taxonomy.mjs';
 import {
   appendRunRecord, buildRunRecord, repoIdentity, telemetryDisabled, telemetryPath,
 } from './telemetry.mjs';
@@ -321,6 +322,121 @@ function readJsonArg(file) {
   }
 }
 
+// A key that failed the lane-name check, rendered so the refusal can be read.
+// Almost everything this refuses is invisible, so a message that interpolated
+// the key would say `'auditor' is not a lane name` about a string that is not
+// `auditor` — the operator's next move is to search the file for a name that
+// is already there. Every codepoint outside printable ASCII becomes its
+// escape, and the result is bounded, because a key read off disk has no
+// length of its own.
+const MAX_KEY_CHARS = 60;
+const showKey = (key) => {
+  const shown = [...key]
+    .map((ch) => (ch >= ' ' && ch <= '~' ? ch : `\\u{${ch.codePointAt(0).toString(16)}}`))
+    .join('');
+  return shown.length > MAX_KEY_CHARS ? `${shown.slice(0, MAX_KEY_CHARS)}…` : shown;
+};
+
+// A payload re-keyed from a split lane's half to the lane itself, carrying the
+// half it was filed under.
+//
+// `synthesize` counts one reviewer per KEY, which is why SKILL.md's guarantee
+// — "the synthesizer counts distinct personas, not agents, so a split lane
+// cannot inflate consensus" — held only on the bridge path, where combine.mjs
+// unions halves under the bare persona. On this path the key was whatever the
+// file said: `auditor` plus `auditor-a` published "2 reviewers" and rendered a
+// finding both reported as `cross-validated`, and a `--round2` keyed
+// `auditor-a` against a `--round1` keyed `auditor` slipped past
+// `reportedBy`'s self-ruling guard and let the auditor discard its own
+// critical. Both are one lane wearing two names.
+//
+// The half is not discarded, it moves to `agent`, which is the field
+// `claimedAgent` already reads and the one round 2's self-validation guard
+// needs to tell `auditor-a` from `auditor-b`.
+//
+// The KEY decides which half, and nothing inside the file gets a vote on it.
+// Filing is what says who wrote a file; an `agent` inside it is that file's own
+// account of itself. Letting the account win bought two things, both of them a
+// finding leaving `Open blocking`: a payload filed as `auditor-a` saying
+// `"agent": "auditor-b"` is counted as the SIBLING's work, so a round-2 payload
+// under the same key `auditor-a` rules on it as an independent half; and an
+// `agent` that is null, empty or a number is an account too, so believing it
+// suppressed the stamp, resolved the entry to the bare lane, and got
+// `auditor-b`'s honest ruling discarded as the lane ruling on itself. The
+// bridge is exposed to neither, because validate.mjs holds `agent` against the
+// filename. Nothing holds it to anything here.
+//
+// Every ENTRY is stamped, and that is the stamp that matters: `claimedAgent`
+// reads an entry's `agent` BEFORE the payload's, so a header that agrees with
+// the key closes nothing one level down. A finding carrying
+// `"agent": "auditor-b"` inside a file filed as `auditor-a` mints a validator
+// for itself out of its own lane, and the same claim on a round-2 entry empties
+// `open_blocking`. Both measured. `stampAgent` in src/synthesis.mjs overwrites
+// entries unconditionally for this and says why; this is the same rule at the
+// other end of the same pipe. Stamped by walking the payload's lists rather
+// than by naming `findings`, `validate`, `challenge`, `added` and `groups`, so
+// a list this schema grows later cannot arrive unstamped.
+//
+// Entries are overwritten; a HEADER that contradicts the key is refused in
+// `byLane` below, and this only fills one in that is absent. They are different
+// claims. One `agent` beside `persona` is the file's whole account of who wrote
+// it, and a file filed as one half while calling itself the other is wrong in a
+// way nothing here can resolve — so it stops, which is also what validate.mjs
+// does when it holds `agent` against the filename. A stray id on one finding
+// among forty is data, and a lane's whole review is not worth discarding over
+// it when overwriting it can only cost that entry its independence, never
+// invent any.
+//
+// A payload filed under the BARE lane is left exactly as it is, header and
+// entries. Its file was not written by one half, so there is no key to hold it
+// to, and the ids inside it are combine.mjs's honest output — `mergeSplitReviews`
+// stamps each half's id onto that half's entries, and those ids are what let
+// `auditor-b`'s ruling on `auditor-a`'s finding count at all.
+//
+// Which also means nothing IN the file can check them, in either direction:
+// overwriting them discards a real validator on the documented lone-half path,
+// and believing them hands one lane two names under one key. `byLane` below is
+// where that is settled, against the plan, because the plan is the only
+// evidence `synthesize` has that is not the file itself.
+const stampedAs = (lane, key, payload) => {
+  if (key === lane) return payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+
+  // The header is not stamped, only the entries. `byLane` refuses a header that
+  // disagrees with the key, so by here it is the key or it is absent — and
+  // `claimedAgent` reads an entry's `agent` before the payload's, so a header
+  // written in either case is a value no reader can reach.
+  const stamped = { ...payload };
+  for (const [field, value] of Object.entries(stamped)) {
+    if (!Array.isArray(value)) continue;
+    stamped[field] = value.map((entry) => (entry && typeof entry === 'object'
+      && !Array.isArray(entry) ? { ...entry, agent: key } : entry));
+  }
+  return stamped;
+};
+
+// Every half of `lane` a payload says had a hand in writing it — its header
+// `agent`, and each entry's, which is where a merge puts them. Deduplicated,
+// because one claim repeated on forty findings is one claim, and bounded by
+// `isLaneAgent`, whose suffix is a single letter.
+const claimedHalves = (lane, payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return [];
+
+  const claims = new Set();
+  const claim = (id) => {
+    if (id !== lane && isLaneAgent(lane, id)) claims.add(id);
+  };
+
+  claim(payload.agent);
+  for (const value of Object.values(payload)) {
+    if (!Array.isArray(value)) continue;
+    for (const entry of value) {
+      if (entry && typeof entry === 'object' && !Array.isArray(entry)) claim(entry.agent);
+    }
+  }
+  return [...claims];
+};
+
 async function cmdSynthesize(rest) {
   const { values } = parseArgs({
     args: rest,
@@ -347,18 +463,156 @@ async function cmdSynthesize(rest) {
     return 0;
   }
   if (!values.round1) die('synthesize: --round1 is required');
-  const round1 = readJsonArg(values.round1);
-  const round2 = values.round2 ? readJsonArg(values.round2) : {};
+  let round1 = readJsonArg(values.round1);
+  let round2 = values.round2 ? readJsonArg(values.round2) : {};
+
+  // The keys of both files ARE the reviewer tally, so they get the shape check
+  // a briefing's citations get, at this same boundary and for the same reason.
+  // `verdicts` is built straight off round 1 (src/synthesis.mjs);
+  // `Object.keys(verdicts).length` is the "N reviewers" printed by report.md,
+  // by the dashboard and by the permanent PR comment, and
+  // `Object.values(verdicts)` is the consensus score's denominator. Measured
+  // before this: a round-1 file keyed `auditor` (reject, one critical),
+  // a zero-width space (approve) and `auditor` with one appended (approve)
+  // published
+  // `SHIP (2/3 ship, 1/3 block)` over that live critical, with one blank row
+  // in the verdicts table and two rows both printing `auditor`. That is the
+  // counterfeit a citation's `reporter` was closed against, one field over and
+  // in the field that does the counting.
+  //
+  // Before the round-2 rule below rather than folded into it, because
+  // `crossReviews` answers `true` for every name outside the registry —
+  // `advisoryOnlyLane` returns `false` for one — so a phantom key passed that
+  // rule too, and one `challenge` from it relabels a cross-validated critical
+  // `disputed` and moves it out of `Open blocking`.
+  //
+  // And the keys are reduced to LANES here, so what is counted downstream is
+  // lanes: one spelling per reviewer, the shape combine.mjs produces, and the
+  // shape every reader from `verdicts` to `reportedBy` was written against.
+  // Two keys for one lane are refused rather than merged — choosing which
+  // half's verdict and summary survive is combine.mjs's `--merge-personas`,
+  // and a second copy of that policy here is how two copies of one rule
+  // drift.
+  const reviewerKeys = (flag, file, payload) => {
+    // Walked here rather than reached at `Object.entries` in synthesis,
+    // because this is the only place that can name the file: a `--round1`
+    // holding `null` or a list died four frames down as "Cannot convert
+    // undefined or null to object", naming neither the flag nor the path.
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      die(`synthesize: ${file}: ${flag} is not an object keyed by reviewer`);
+    }
+    return Object.keys(payload);
+  };
+
+  // Parsed ONCE, and the parsed form is what its four readers share: the
+  // roster check, the report's depth, and the telemetry row. Parsing it twice —
+  // or handing one reader the raw JSON and another the parsed object — lets
+  // them describe different plans, and `parsePlan` is where a lane's `agents`
+  // count and the run's depth are normalized.
+  let plan = null;
+  if (values.plan) {
+    try {
+      plan = parsePlan(readJsonArg(values.plan));
+    } catch (e) {
+      die(`synthesize: --plan ${values.plan}: ${e.message}`);
+    }
+  }
+
+  // Which lanes the plan says reviewed in halves. A lane-keyed payload naming a
+  // half of itself is a claim about how the review was staffed, and this is the
+  // only thing `synthesize` can check it against that the file's own author did
+  // not write. Absent a plan the claim is unverifiable, and unverifiable is
+  // refused rather than guessed at in either direction: believing it lets one
+  // lane cross-examine itself, and overwriting it throws away a lone half's
+  // genuine id on the path combine.mjs documents.
+  const splitLanes = new Set(runLanes(plan?.lanes ?? [])
+    .filter((lane) => agentNames([lane]).length > 1)
+    .map((lane) => lane.persona));
+
+  const byLane = (flag, file, payload, keys) => {
+    const lanes = Object.create(null);
+    const spelledAs = Object.create(null);
+    for (const key of keys) {
+      const lane = laneOf(key);
+      if (!lane) {
+        die(`synthesize: ${file}: ${flag} is keyed by reviewer and \`${showKey(key)}\``
+          + ` names no review lane — expected one of ${DEFAULT_PERSONAS.join(', ')},`
+          + " or a split lane's half like `auditor-a`. Every key in this file is counted"
+          + ' as one reviewer, so correct or remove it');
+      }
+      if (spelledAs[lane] !== undefined) {
+        die(`synthesize: ${file}: ${flag} carries two payloads for the ${lane} lane,`
+          + ` \`${showKey(spelledAs[lane])}\` and \`${showKey(key)}\`, and every key`
+          + ' here is counted as one reviewer. A lane reviewed in halves is one'
+          + ` reviewer: union the two with combine.mjs --merge-personas ${lane}, which`
+          + " is where the rule for whose verdict and whose summary survive lives");
+      }
+      const halves = claimedHalves(lane, payload[key]);
+      if (key === lane && halves.length && !splitLanes.has(lane)) {
+        const shown = halves.slice(0, 3).map((half) => `\`${half}\``).join(', ')
+          + (halves.length > 3 ? ', …' : '');
+        const because = plan
+          ? `the plan ran ${lane} as one agent`
+          : 'no --plan was passed that could';
+        die(`synthesize: ${file}: ${flag}'s \`${lane}\` payload is filed under the lane and`
+          + ` says ${shown} had a hand in writing it. A lane's halves cross-examine each`
+          + " other as independent reviewers, and under the lane's own name nothing here can"
+          + ` check that claim — ${because}. Pass the --plan that split the lane, or file`
+          + ` each half's payload under its own key (\`${lane}-a\`), which is what a claim`
+          + ' like this is held against');
+      }
+
+      const claim = payload[key]?.agent;
+      if (key !== lane && claim !== undefined && claim !== key) {
+        die(`synthesize: ${file}: ${flag} is keyed by reviewer, \`${showKey(key)}\` says`
+          + ` its \`agent\` is ${showKey(JSON.stringify(claim) ?? String(claim))}, and one`
+          + ' of those two is wrong. The key is which half of the lane wrote the file and'
+          + ' the field is what the file says about itself; nothing here can tell which to'
+          + ' believe, and believing the field hands a lane an independent-looking vote on'
+          + ' its own finding. Correct the key or the field');
+      }
+      lanes[lane] = stampedAs(lane, key, payload[key]);
+      spelledAs[lane] = key;
+    }
+    return lanes;
+  };
+
+  // Captured BEFORE the reduction, because the two questions below want
+  // different spellings. Counting reviewers wants lanes. The --plan accounting
+  // wants the spelling the payloads actually arrived under: a plan that split
+  // the auditor in two against a run that produced only `auditor-a` is half
+  // the files reviewed by nobody, and a lane-keyed set reads that as the lane
+  // fully accounted for — the silent direction, and the exact gap --plan
+  // exists to close.
+  const round1Keys = reviewerKeys('--round1', values.round1, round1);
+  const round2Keys = reviewerKeys('--round2', values.round2, round2);
+  round1 = byLane('--round1', values.round1, round1, round1Keys);
+  round2 = byLane('--round2', values.round2, round2, round2Keys);
 
   // The same rule src/roster.mjs applies in the Skill bridge. It lived only
   // there, so the shipped binary still accepted a round-2 payload from a lane
   // that never cross-reviews — and a single such `challenge` moves a critical
   // reported by two lanes out of `Open blocking`. Two paths, one rule.
-  for (const persona of Object.keys(round2)) {
-    if (!crossReviews(persona, 2)) {
-      die(`synthesize: ${values.round2}: '${persona}' does not cross-review: every kind it`
-        + ` owns is advisory, so it has no blocking claim to validate or challenge.`
-        + ` A round-2 payload under its name is a stale round-1 file or a spoof.`);
+  //
+  // Asked about the LANE, not about the key. `crossReviews` answers `true` for
+  // any name it does not recognize, so it answered `true` for `pragmatist-a`:
+  // the payload keyed `pragmatist` exited 2 as a spoof, and the identical
+  // payload keyed `pragmatist-a` exited 0, relabeled a critical that `auditor`
+  // and `adversary` both reported as `disputed`, and emptied `open_blocking`.
+  // Two characters walked around the refusal whose own comment describes that
+  // outcome.
+  //
+  // Walked over the keys AS WRITTEN, because the refusal names one: reading
+  // them back off the reduced map quoted `pragmatist` at an operator whose
+  // file says `pragmatist-a`, which is the search-for-a-name-that-is-not-there
+  // failure `showKey` above exists to prevent.
+  for (const key of round2Keys) {
+    const lane = laneOf(key);
+    if (!crossReviews(lane, 2)) {
+      die(`synthesize: ${values.round2}: '${key}' does not cross-review: every kind`
+        + ` ${lane === key ? 'it' : `the ${lane} lane`} owns is advisory, so it has no`
+        + ' blocking claim to validate or challenge.'
+        + ' A round-2 payload under its name is a stale round-1 file or a spoof.');
     }
   }
 
@@ -368,6 +622,32 @@ async function cmdSynthesize(rest) {
   const briefing = values.briefing ? readJsonArg(values.briefing) : null;
   if (briefing && !Array.isArray(briefing.groups)) {
     die(`synthesize: ${values.briefing}: not a briefing.json (no \`groups\` array)`);
+  }
+  // The one place that can name the file a value came from, so it walks the
+  // whole shape rather than the one field: a group or a citation that is not
+  // an object reached `buildRootCauses` instead and died there reading a
+  // property of null, naming neither the file nor which citation.
+  for (const [i, group] of (briefing?.groups ?? []).entries()) {
+    const bad = (where, what) =>
+      die(`synthesize: ${values.briefing}: \`groups[${i}]${where}\` ${what};`
+        + ' triage writes this file and that is not a value it writes,'
+        + ' so correct or remove it');
+    if (!group || typeof group !== 'object' || Array.isArray(group)) {
+      bad('', 'is not a group');
+      continue;
+    }
+    const citations = group.citations ?? [];
+    if (!Array.isArray(citations)) {
+      bad('.citations', 'is not a list');
+      continue;
+    }
+    for (const [j, c] of citations.entries()) {
+      if (!c || typeof c !== 'object' || Array.isArray(c)) {
+        bad(`.citations[${j}]`, 'is not a citation');
+      } else if (!citesLaneNames(c)) {
+        bad(`.citations[${j}]`, 'claims a reporter that is not a lane name');
+      }
+    }
   }
 
   // --skipped auditor="reason" records a lane that was deliberately not run, so
@@ -390,40 +670,59 @@ async function cmdSynthesize(rest) {
   // do by hand through --skipped/--degraded; with the plan on disk it is
   // checked instead.
   //
-  // Parsed ONCE, and the parsed form is what the three readers below share: the
-  // roster check, the report's depth, and the telemetry row. Parsing it twice —
-  // or handing one reader the raw JSON and another the parsed object — lets
-  // them describe different plans, and `parsePlan` is where a lane's `agents`
-  // count and the run's depth are normalized.
-  let plan = null;
-  if (values.plan) {
-    try {
-      plan = parsePlan(readJsonArg(values.plan));
-    } catch (e) {
-      die(`synthesize: --plan ${values.plan}: ${e.message}`);
-    }
-  }
-
   if (plan) {
     const planned = runLanes(plan.lanes);
     const accounted = new Set([
-      ...Object.keys(round1),
+      ...round1Keys,
       ...skippedPersonas.map((s) => s.persona),
       ...failedPersonas,
     ]);
-    // A split lane is accounted under either spelling: combine.mjs unions its
-    // halves under the bare persona, while raw per-agent payloads and the
+    // A split lane is accounted under either spelling, so this reads
+    // `round1Keys` — the spelling the payloads ARRIVED under, captured above
+    // before they were reduced to lanes. combine.mjs unions halves under the
+    // bare persona and a lone half arrives as `auditor-a`; the
     // --skipped/--degraded flags speak agentNames' persona-a/-b. Requiring one
-    // spelling false-refuses the other's fully reported lane.
+    // spelling false-refuses the other's fully reported lane, and reading the
+    // reduced map instead reports a plan that split the auditor in two against
+    // a run that produced only `auditor-a` as fully accounted for.
     const unaccounted = planned.flatMap((lane) => {
       if (accounted.has(lane.persona)) return [];
       return agentNames([lane]).filter((name) => !accounted.has(name));
     });
-    if (unaccounted.length) {
-      die(`synthesize: the plan ran ${unaccounted.join(', ')} but no payload, --skipped, or`
+
+    // A lane the plan ran as ONE agent whose payload is keyed by a half of it:
+    // one auditor planned, a file keyed `auditor-a`. `byLane` three frames up
+    // read that payload as the auditor's, so "no payload accounts for it" would
+    // send an operator looking for a file that is sitting there under another
+    // name, which is the failure `showKey` exists to prevent. Still refused,
+    // because `agentNames` never writes that key for a lane of one and the two
+    // files disagree about how many agents ran — refused by a sentence that
+    // says which disagreement it is.
+    const misspelled = planned
+      .filter((lane) => !accounted.has(lane.persona)
+        && agentNames([lane]).length === 1
+        && round1Keys.some((key) => laneOf(key) === lane.persona))
+      .map((lane) => lane.persona);
+
+    // Both, in one refusal, worst first. A lane that produced nothing at all is
+    // the more serious of the two and it is the one that hides: refusing on the
+    // misspelling alone named the auditor's key and said nothing about the
+    // adversary, whose files no reviewer opened, until the whole run had been
+    // repeated once to find out.
+    const silent = unaccounted.filter((name) => !misspelled.includes(name));
+    const problems = [];
+    if (silent.length) {
+      problems.push(`the plan ran ${silent.join(', ')} but no payload, --skipped, or`
         + ' --degraded accounts for it — a lane that failed did not find nothing, it did not'
         + ' look');
     }
+    if (misspelled.length) {
+      problems.push(`the plan ran ${misspelled.join(', ')} as one agent and the round-1`
+        + ' payload for it is keyed by a half of the lane — the plan and the payloads'
+        + ' disagree about how many agents reviewed, and a lane reported by fewer agents'
+        + ' than were planned is files nobody read');
+    }
+    if (problems.length) die(`synthesize: ${problems.join('. Also, ')}`);
   }
 
   // An EMPTY --round2-skipped value is a silent undeclared skip wearing a

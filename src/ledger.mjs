@@ -41,7 +41,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import { MAX_REASON_CHARS } from './limits.mjs';
-import { ADVISORY_KINDS } from './taxonomy.mjs';
+import { ADVISORY_KINDS, isLaneList } from './taxonomy.mjs';
 import { isBlocking, isOpenBlocking } from './synthesis.mjs';
 
 refuseDirectRun(import.meta.url);
@@ -176,6 +176,38 @@ function oneLine(v) {
   return clipReason(String(v ?? '')).replace(/\s+/g, ' ').trim();
 }
 
+// A value a refusal quotes, bounded well below the line's own budget, and the
+// identifier form of the same thing.
+//
+// Every value these messages interpolate comes off the JSON file the message
+// is about, so any of them can be as long as its writer likes — and `oneLine`
+// alone bounds each at the width of the whole line. converge re-clips a
+// finished problem at `MAX_REASON_CHARS`, which cuts the words AFTER the long
+// field: the remedy, or what a ref was wrong about. triage and regression
+// print it raw, where the same field buries the sentence instead.
+//
+// `named` stringifies and THEN bounds, because escaping doubles every
+// character it touches: bounding first spent the budget twice, and a title of
+// 600 quotes came back 243 characters long. It stringifies the title ITSELF
+// rather than a flattened copy, for the reason the disposition branch below
+// gives: a title that is not a string at all is a thing these messages exist
+// to make recognizable, and `String(…)` renders every object among them as the
+// same `[object Object]`. The one value `JSON.stringify` does not render is
+// `undefined`, which is an absent title and reads as `""`, rather than as
+// nothing at all — an entry named nothing, on the branch whose whole subject
+// is an entry this tool did not write.
+//
+// A value here is for recognizing a thing in a file the reader has open, which
+// does not take 500 characters. Local to this module rather than in
+// src/limits.mjs by that file's own test: nothing outside it has to agree.
+const MAX_PROBLEM_FIELD_CHARS = 120;
+const brief = (value) => {
+  const flat = oneLine(value);
+  return flat.length > MAX_PROBLEM_FIELD_CHARS
+    ? `${flat.slice(0, MAX_PROBLEM_FIELD_CHARS)}…` : flat;
+};
+const named = (title) => brief(JSON.stringify(title) ?? '""');
+
 // What a value is, for a refusal that has to say why it is not the shape asked
 // for. `JSON.stringify` renders `null`, a number and a string faithfully and an
 // array as its whole contents, which is the one case worth naming by shape.
@@ -200,8 +232,32 @@ export function loadLedger(file) {
   if (raw.version !== LEDGER_VERSION) {
     throw new Error(`ledger version ${raw.version} is not ${LEDGER_VERSION}; refusing to guess at its shape`);
   }
-  raw.entries ??= [];
-  raw.iterations ??= [];
+  // Absent is empty; `null` is not absent. `??=` treated them alike, so the
+  // one spelling a serializer actually writes for a list it had no value for
+  // was the one spelling these checks could not see — and this same tree
+  // refuses it on the other side of the bridge, in `repair.mjs`, for that
+  // reason. Two readers disagreeing about the likeliest malformed shape is how
+  // the hole stays open.
+  if (raw.entries === undefined) raw.entries = [];
+  if (raw.iterations === undefined) raw.iterations = [];
+  // Both lists are walked by every reader in this file, and `checkBinding` —
+  // the pass that refuses a ledger this tool did not write — is called OUTSIDE
+  // the try/catch that wraps this function in all three bridges. So an
+  // `entries` holding `[null]` was not a refusal but an uncaught `Cannot read
+  // properties of null`, at exit 1, which is the code converge reserves for a
+  // batch that IS in the ledger. Same shape as the object check above, one
+  // level down.
+  for (const [name, list] of [['entries', raw.entries], ['iterations', raw.iterations]]) {
+    if (!Array.isArray(list)) {
+      throw new Error(`ledger ${oneLine(file)} holds ${shapeOf(list)} for \`${name}\`, `
+        + 'not an array; refusing to guess at its shape');
+    }
+    const at = list.findIndex((e) => !e || typeof e !== 'object' || Array.isArray(e));
+    if (at >= 0) {
+      throw new Error(`ledger ${oneLine(file)} holds ${shapeOf(list[at])} at `
+        + `\`${name}[${at}]\`, not an entry; refusing to guess at its shape`);
+    }
+  }
   return raw;
 }
 
@@ -225,13 +281,21 @@ function memoizeResolve(resolve) {
   };
 }
 
-// Refuse a ledger that does not belong to this repository.
+// Refuse a ledger this tool did not write for this tree.
 //
-// `loadLedger` checks only `version`, so a ledger naming another repo entirely
-// loaded fine and its entries adjudicated findings they had never seen. Commits
-// are the one field that cannot be faked across repositories: if `base` or an
-// entry's `atCommit` does not resolve here, this ledger is not about this tree.
-// `resolve` is injected rather than imported so this module stays pure.
+// `loadLedger` checks the shape and the version, so a ledger naming another
+// repo entirely loaded fine and its entries adjudicated findings they had never
+// seen. Commits are the one field that cannot be faked across repositories: if
+// `base` or an entry's `atCommit` does not resolve here, this ledger is not
+// about this tree. `resolve` is injected rather than imported so this module
+// stays pure.
+//
+// The other half is the fields only `recordDecisions` writes — `disposition`,
+// `reconciled` — holding values it never writes, which says the same thing
+// about the WRITER rather than the tree. Both are reported here, so the
+// sentence a bridge puts above this list has to cover both: "not this
+// repository" was already false of a bad disposition before it was false of a
+// bad reconciled.
 export function checkBinding(ledger, resolve) {
   const problems = [];
 
@@ -245,7 +309,7 @@ export function checkBinding(ledger, resolve) {
   const resolveOnce = memoizeResolve(resolve);
 
   if (ledger.base && !resolveOnce(ledger.base)) {
-    problems.push(`base ${oneLine(ledger.base)} is not a commit in this repository`);
+    problems.push(`base ${brief(ledger.base)} is not a commit in this repository`);
   }
   for (const e of ledger.entries ?? []) {
     // The caller refuses the ledger on the first problem, so listing every one
@@ -259,11 +323,11 @@ export function checkBinding(ledger, resolve) {
     // and it passed clean. `recordDecisions` always writes one, so an entry
     // without it did not come from this tool.
     if (!e.atCommit) {
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} carries no atCommit; every recorded decision has one`);
+      problems.push(`entry ${named(e.title)} carries no atCommit; every recorded decision has one`);
       continue;
     }
     if (!resolveOnce(e.atCommit)) {
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} is anchored at ${oneLine(e.atCommit)}, which is not a commit in this repository`);
+      problems.push(`entry ${named(e.title)} is anchored at ${brief(e.atCommit)}, which is not a commit in this repository`);
     }
     // Validity when present, not presence. `atCommit` above is required
     // because every entry carries one; `fixCommit` is null on every
@@ -274,14 +338,49 @@ export function checkBinding(ledger, resolve) {
     // silence: the ledger would answer "this commit closed nothing", which is
     // the derived form of `--closed-by-none`.
     if (e.fixCommit && !resolveOnce(e.fixCommit)) {
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} names fix commit ${oneLine(e.fixCommit)}, which is not a commit in this repository`);
+      problems.push(`entry ${named(e.title)} names fix commit ${brief(e.fixCommit)}, which is not a commit in this repository`);
     }
     if (e.disposition !== undefined && !DISPOSITIONS.includes(e.disposition)) {
       // Stringified first and bounded second, unlike the title beside it: a
       // disposition that is not a string at all is exactly what this branch
       // reports, and `String(…)` would render every such value as the same
       // `[object Object]`.
-      problems.push(`entry ${JSON.stringify(oneLine(e.title))} has disposition ${oneLine(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
+      problems.push(`entry ${named(e.title)} has disposition ${brief(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
+    }
+    // Refused here as well as at the read, and for the reason every other
+    // field on this list is: `recordDecisions` derives an array of lane names
+    // on every entry, so anything else did not come from today's fold.
+    // `lanesOf` alone caught it only when someone happened to ask about that
+    // entry's fix commit, so a forged `reporters` loaded, recorded and saved
+    // clean and became a refusal an iteration later, if ever.
+    //
+    // The message says "derives" rather than the "writes that field and this
+    // value is not one it writes" its two neighbors say, because that sentence
+    // is NOT true here: the fold copied `reporters` straight off the decision
+    // payload until `reportersOf` replaced it, so a ledger from a build before
+    // that can legitimately carry a fix batch's own label —
+    // `['fix-auth-guard']` is the example in `reportersOf`'s own comment. The
+    // remedy is the same either way, and a refusal that accuses the operator
+    // of forging their own file sends them looking for a forger.
+    //
+    // Kept SHORT, and the table in tests/ledger.test.mjs measures it with both
+    // quoted fields at full length. converge re-clips the finished sentence at
+    // MAX_REASON_CHARS, cutting the words after the last long field — so the
+    // remedy at the end is what a long message loses, and the first draft of
+    // this wording left one character of margin.
+    if (e.reporters !== undefined && !isLaneList(e.reporters)) {
+      problems.push(`entry ${named(e.title)} has reporters ${brief(JSON.stringify(e.reporters))}, which is not a list of lane names; the fold derives that field, so this came from a hand edit or a ledger older than it does — correct or remove that entry`);
+    }
+    // The same evidence as the disposition above, and it was only ever caught
+    // reactively: `reconciled` is a field `recordDecisions` writes and nothing
+    // else does, so a value it never writes says this entry was edited by
+    // something that is not this tool. `cannotVouch` withholds the exemption
+    // from such an entry, which is the consequence — but only if some later
+    // decision happens to match it at SETTLING_SCORE, and if none ever does
+    // the forged value is never mentioned at all. This is the pass whose job
+    // is refusing a ledger that did not come from here, so it says so here.
+    if (e.reconciled !== undefined && ![true, false, null].includes(e.reconciled)) {
+      problems.push(`entry ${named(e.title)} has reconciled ${brief(JSON.stringify(e.reconciled))}, which is not one of true, false, null; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
     }
   }
   return problems;
@@ -737,6 +836,29 @@ function requireDecision(d, i) {
   return d;
 }
 
+// The lanes a record attributes itself to, refusing anything that is not a
+// list of them.
+//
+// Thrown, not answered, for the same reason `closureOf` throws on a commit that
+// does not resolve: every honest answer here names lanes, and there is nothing
+// to say about a `reporters` that is not a list of names. A string is why this
+// exists — `reporters: "auditor"` iterates CHARACTER BY CHARACTER, so an entry
+// carrying one answered `closureOf` with the seven lanes a, d, i, o, r, t, u,
+// which become a regression pass's exclusion list. Silently, in the one place
+// whose whole contract is that no lane is excluded without a recorded reason.
+//
+// `undefined` is the only absence: `recordDecisions` writes an array on every
+// entry, so a null here did not come from this tool either.
+function lanesOf(record, where) {
+  const lanes = record?.reporters;
+  if (lanes === undefined) return [];
+  if (!isLaneList(lanes)) {
+    throw new TypeError(`${where} carries a reporters of ${brief(JSON.stringify(lanes))},`
+      + ' which is not a list of lane names');
+  }
+  return lanes;
+}
+
 // The report findings a decision matches strongly enough to settle.
 //
 // Lifted out of `reportersOf`, which computed exactly this list and then kept
@@ -774,27 +896,64 @@ function settlingMatches(decision, findings) {
 function reportersOf(decision, findings) {
   const lanes = new Set();
   for (const finding of settlingMatches(decision, findings)) {
-    for (const lane of finding.reporters ?? []) lanes.add(lane);
+    for (const lane of lanesOf(finding, `finding ${named(finding.title)}`)) {
+      lanes.add(lane);
+    }
   }
   return [...lanes].sort();
 }
 
-// Which of `scoreMatch`'s identity guards a title-equal pair fails.
+// Which of a title-equal pair's identity guards fails, in the caller's own
+// terms — the fields it names are the fields that caller actually guards on.
 //
 // `counterpart` is named only for a `contract` decision, because that is the
 // only kind whose match depends on it — reporting it for a `defect` would send
 // an operator to edit a field that changes nothing.
-function identityGap(decision, finding) {
+//
+// The field list is the caller's and the wording is shared, which is the only
+// arrangement that survives both callers. `scoreMatch` guards on `kind`, so
+// the ledger asks about it. `anchorsAgree` (src/decisions.mjs) deliberately
+// does NOT — `kind` is what synthesis rewrites, promoting a blocking kind over
+// an advisory one, and a decision that legitimately binds routinely disagrees
+// about it. A shared field list would therefore have this function tell the
+// decisions bridge's operator that the kinds differ, sending them to edit the
+// one field that path corrects on purpose. That is the misdirection #96 is
+// about, reintroduced one field over by fixing it. A shared *mechanism* cannot
+// do that: neither caller can name a field its own guard does not read.
+// `scoreMatch` reads `counterpart` only for a `contract` decision, so only then
+// can it be the field that refused the match — naming it for a `defect` would
+// send an operator to edit a field that changes nothing. The condition is the
+// CALLER's, and deliberately not part of the walk: `anchorsAgree`
+// (src/decisions.mjs) compares `counterpart` for every kind, so a walk that
+// skipped it there would answer "a field this check does not compare" about a
+// field the check had just compared and refused on. Measured before it was
+// moved out.
+export function scoreMatchAnchors(decision) {
+  return decision.kind === 'contract' ? ['kind', 'file', 'counterpart'] : ['kind', 'file'];
+}
+
+// `tolerateNullClaims` is the second half of "the condition is the caller's",
+// and it is not symmetric between the two callers: `scoreMatch` compares every
+// anchor by strict equality, while `anchorsAgree` (src/decisions.mjs) passes a
+// field the decision left `null` — a decision that states nothing about `file`
+// makes no claim there, so there is nothing to disagree with. Without it the
+// walk answers on a field the guard had waved through: a decision with
+// `file: null` and a stated, disagreeing `counterpart` was refused BY the
+// counterpart and told "the files differ (none here, src/auth.py in the
+// report)", sending its author to edit the one field that was already right.
+// That is verbatim the misdirection this shared walk exists to end, one field
+// over, so the tolerance travels with the field list rather than being
+// remembered by whoever reads the message.
+export function identityGap(decision, finding, fields = scoreMatchAnchors(decision),
+  { tolerateNullClaims = false } = {}) {
   const pair = (a, b) => `(${a ?? 'none'} here, ${b ?? 'none'} in the report)`;
-  if ((decision.kind ?? null) !== (finding.kind ?? null)) {
-    return `the kinds differ ${pair(decision.kind, finding.kind)}`;
-  }
-  if ((decision.file ?? null) !== (finding.file ?? null)) {
-    return `the files differ ${pair(decision.file, finding.file)}`;
-  }
-  if (decision.kind === 'contract'
-      && (decision.counterpart ?? null) !== (finding.counterpart ?? null)) {
-    return `the counterparts differ ${pair(decision.counterpart, finding.counterpart)}`;
+  const plural = { kind: 'kinds', file: 'files', counterpart: 'counterparts' };
+  for (const field of fields) {
+    const claimed = decision[field] ?? null;
+    if (tolerateNullClaims && claimed === null) continue;
+    if (claimed !== (finding[field] ?? null)) {
+      return `the ${plural[field] ?? `${field}s`} differ ${pair(decision[field], finding[field])}`;
+    }
   }
   return 'they differ in a field this check does not compare';
 }
@@ -853,9 +1012,26 @@ function notesMatching(ledger, decision) {
     && (scoreMatch(entry, decision)?.score ?? 0) >= SETTLING_SCORE);
 }
 
-// A `noted` entry whose identity the fold checked against a report and no lane
-// had filed. The fix batch chose every field on it, and nothing corrected them.
-const isSelfIdentified = (entry) => entry.reconciled === false;
+// The values a fold writes to `reconciled`, plus the absent one an older
+// ledger has because the field did not exist when it was written.
+const VOUCHING_RECONCILED = [true, null, undefined];
+
+// A `noted` entry that cannot vouch for a later decision. Two ways in, and
+// they are not the same fact.
+//
+// `false` is the fold's own statement that it checked this identity against a
+// report and no lane had filed it: the fix batch chose every field on it and
+// nothing corrected them, which is the laundered token this gate exists for.
+//
+// Anything else is a value no fold wrote, and reading it as one closed this
+// for the writer only. `recordDecisions` now refuses such a value, and
+// `loadLedger` validates `version` and nothing per-entry — so a row from
+// before that guard, or a hand-edited `"reconciled": "false"`, was "not
+// exactly false" and VOUCHED forever: the same laundering, spelled with two
+// quotes. The reader withholds on everything it cannot read as one of the
+// three, which is the direction whose failure is an operator reading a
+// sentence about their own ledger rather than a loop reporting clean.
+const cannotVouch = (entry) => !VOUCHING_RECONCILED.includes(entry?.reconciled);
 
 // What the check says about a decision whose only cover is such an entry. Its
 // own sentence rather than `whyUncovered`'s, because the remedy is different:
@@ -864,6 +1040,22 @@ const isSelfIdentified = (entry) => entry.reconciled === false;
 const MINTED_NOTE_WHY = 'the only thing on record carrying this identity is a `noted` entry the '
   + 'fold checked against a report and no lane had filed, so a batch would be excusing its own '
   + 'decision with its own footnote';
+
+// And the other way a note stops vouching, which is a different sentence
+// because it is a different remedy: nothing here says a fold made any
+// statement about this identity, so there is nothing to tell the operator
+// about their payloads. The ledger is what they have to look at.
+//
+// Unreachable through the bridges, deliberately: `checkBinding` refuses such a
+// ledger at startup, so by the time this function runs under `converge.mjs` no
+// entry can carry an unreadable `reconciled`. It is kept because
+// `uncoveredDecisions` is exported and this file's guarantees are its own — a
+// caller that skips the binding check gets the withholding anyway, which is
+// the whole point of closing this on the reader's side as well as the
+// writer's.
+const UNREADABLE_NOTE_WHY = 'the only thing on record carrying this identity is a `noted` entry '
+  + 'whose `reconciled` field holds a value no fold writes, so whether any lane had filed it '
+  + 'cannot be read off this ledger at all';
 
 // Decisions that will settle nothing, because nothing they could be answering
 // matches them at SETTLING_SCORE (kfox/adverse#58, item 1).
@@ -917,6 +1109,8 @@ const MINTED_NOTE_WHY = 'the only thing on record carrying this identity is a `n
 // under review). The residue is a fold run without `--report`, which records
 // `null` and vouches; that invocation is the degraded mode both bridges already
 // warn about at length, and it is the orchestrator's to make, not the batch's.
+// Nothing else vouches — see `cannotVouch`, which withholds on any value this
+// tool did not write rather than on `false` alone.
 //
 // The whole report, never its `findings` array, for the reason `recordDecisions`
 // spells out: a caller doing the extraction itself spells "this is not a
@@ -935,11 +1129,21 @@ export function uncoveredDecisions(decisions, report, { ledger = emptyLedger() }
     if (settlingMatches(d, findings).length) continue;
 
     const notes = notesMatching(ledger, d);
-    if (notes.some((entry) => !isSelfIdentified(entry))) continue;
+    if (notes.some((entry) => !cannotVouch(entry))) continue;
+    // Every note here failed to vouch, so which sentence they earn is which
+    // reason they failed for — and where the set holds both reasons, the one
+    // that is TRUE of it wins. Keyed on `every`, a single unreadable note
+    // demoted the whole report to "whether any lane had filed it cannot be
+    // read off this ledger at all" while a note beside it said exactly that,
+    // which suppressed the actionable accusation in favor of a false
+    // sentence. That is the shape the transposition cause one file over was
+    // wrong about, polarity reversed.
+    const noteWhy = notes.some((entry) => entry.reconciled === false)
+      ? MINTED_NOTE_WHY : UNREADABLE_NOTE_WHY;
     uncovered.push({
       title: clipReason(d.title ?? ''),
       disposition: d.disposition ?? null,
-      why: clipReason(notes.length ? MINTED_NOTE_WHY : whyUncovered(d, findings)),
+      why: clipReason(notes.length ? noteWhy : whyUncovered(d, findings)),
     });
   }
   return uncovered;
@@ -1123,6 +1327,21 @@ export function recordDecisions(ledger, decisions, {
         + 'reporting lanes are derived from the report this decision answers, not declared by '
         + 'whoever wrote the decision. Pass the report to --record instead');
     }
+
+    // Three values, and the comment on `reconciled` below says so — but the
+    // field went in as `d.reconciled ?? null`, unchecked, and the reader then
+    // asked whether it was exactly `false`. So anything else VOUCHED: the
+    // plausible hand-written `"reconciled": "false"` and a stray `0` both
+    // granted the exemption they were written to withhold, and converge's
+    // warning is about `null`, so neither bridge said a word. Closed on both
+    // sides — the reader withholds on an unreadable value too
+    // (`cannotVouch`), and this refuses one at the door.
+    if (![true, false, null, undefined].includes(d.reconciled)) {
+      throw new Error(`decision for ${JSON.stringify(d.title)} carries reconciled: `
+        + `${JSON.stringify(d.reconciled)}; the field is the fold's own answer to whether a `
+        + 'report carried this identity, so it records true, false or null and nothing else '
+        + 'can be read as one of them');
+    }
     // A fix commit on a decision that fixed nothing asserts the change the
     // decision says was not made — and `fixCommit` is what `closureOf` reads,
     // so the assertion would excuse a lane from reviewing a commit that closed
@@ -1163,7 +1382,7 @@ export function recordDecisions(ledger, decisions, {
       // reading of report.json rather than the batch's claim: `true` bound to a
       // finding, `false` checked and no finding carries it, `null` no report
       // reached the fold. A decision that never went through the fold has no
-      // statement to keep and records `null` — see `isSelfIdentified`.
+      // statement to keep and records `null` — see `cannotVouch`.
       reconciled: d.reconciled ?? null,
       agent: d.agent ?? null,
       // Which commit closed THIS finding, where `atCommit` below is the commit
@@ -1325,7 +1544,9 @@ export function fixCommitsIn(ledger, { iteration = null } = {}) {
 // An entry whose own `fixCommit` resolves nowhere silently fails to match and
 // would push a caller toward `closed: 0`. That is closed one layer up:
 // `checkBinding` refuses such a ledger outright, and every bridge that reads
-// one runs it first.
+// one runs it first. That is true of `fixCommit` and it was not true of
+// `reporters`, which nothing upstream inspects at all — see `lanesOf`, which
+// is where this function's guarantee about that field actually lives.
 export function closureOf(ledger, commit, resolve) {
   const resolveOnce = memoizeResolve(resolve);
 
@@ -1340,13 +1561,14 @@ export function closureOf(ledger, commit, resolve) {
 
   const fixes = (ledger.entries ?? []).filter((e) => e.disposition === 'fixed' && e.fixCommit);
   const closed = fixes.filter((e) => resolveOnce(e.fixCommit) === target);
+  const lanesFor = (e) => lanesOf(e, `entry ${named(e.title)}`);
   const lanes = new Set();
-  for (const e of closed) for (const lane of e.reporters ?? []) lanes.add(lane);
+  for (const e of closed) for (const lane of lanesFor(e)) lanes.add(lane);
 
   return {
     recorded: fixes.length > 0,
     closed: closed.length,
-    unattributed: closed.filter((e) => !(e.reporters ?? []).length).length,
+    unattributed: closed.filter((e) => !lanesFor(e).length).length,
     lanes: [...lanes].sort(),
   };
 }
@@ -1465,8 +1687,8 @@ export function convergenceStatus(report, ledger, traceFor = () => null,
   // and match no bucket. That is why the stop condition does not depend on
   // this being empty: such a finding is counted and blocks either way, and
   // surfaces here instead of disappearing.
-  const named = new Set([...open, ...unexamined, ...disputed]);
-  const other = unsettled.filter((f) => !named.has(f));
+  const bucketed = new Set([...open, ...unexamined, ...disputed]);
+  const other = unsettled.filter((f) => !bucketed.has(f));
 
   // A lane that was TRIED and FAILED reviewed nothing, and "reviewed and found
   // nothing" is the same input to this gate as "never looked": both contribute

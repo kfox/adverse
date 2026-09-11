@@ -8,11 +8,13 @@
 // exit 1 is a claim about a review, and this run could not read one" — so a
 // script that never got as far as reading its input exits 2, everywhere.
 
-import { constants, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { importFromSrc } from './package-root.mjs';
 
+const { clipReason } = await importFromSrc('ledger.mjs');
 const { parsePlan, splitLanes } = await importFromSrc('scaling.mjs');
 const { refuseDirectRun } = await importFromSrc('entryGuard.mjs');
 
@@ -21,6 +23,24 @@ const { refuseDirectRun } = await importFromSrc('entryGuard.mjs');
 // Unlike package-root.mjs beside it, this file has already located src/ and can
 // use the shared guard.
 refuseDirectRun(import.meta.url);
+
+// One sentence, on one line, bounded — for every value a bridge interpolates
+// into what it prints.
+//
+// What these bridges print is what the Skill tells the orchestrating agent to
+// read and act on, and every string in it came off disk or off argv: a finding's
+// `reason`, a file path, an errno message. `clipReason` bounds the length and
+// maps control bytes to spaces, but deliberately keeps newlines, because a
+// reason is prose and JSON-escaping contains it in briefing.json. Printed as
+// plain text there is nothing to contain it: a newline ends this tool's
+// sentence, and the next line can look like the tool speaking.
+//
+// Here rather than in two private copies: converge.mjs and decisions.mjs each
+// carried this line, which is two chances for one of them to drift from the
+// class `clipReason` covers.
+export function oneLine(value) {
+  return clipReason(String(value ?? '')).replace(/\s+/g, ' ').trim();
+}
 
 export function readJson(file, prefix) {
   try {
@@ -80,6 +100,108 @@ export function requireKnownPersona(persona, { prefix, file, personas }) {
   return persona;
 }
 
+// A destination this run has claimed: create it, truncate what is there, and
+// never follow a symlink. Every run directory in this flow is writable by every
+// agent in the run, so a symlink can be planted at any output path after any
+// pre-write check has looked at it; O_NOFOLLOW fails the open itself (ELOOP)
+// instead of narrowing that window to something smaller than a scheduler tick.
+const CLAIMED_PATH_FLAGS = constants.O_WRONLY | constants.O_CREAT
+  | constants.O_TRUNC | constants.O_NOFOLLOW;
+
+// The open and the write are two different failures, and only one of them has
+// touched the destination.
+//
+// A refused OPEN — EACCES on a read-only file, ELOOP on a symlink, ENOTDIR,
+// EISDIR — leaves whatever was there exactly as it was, and it must: the file
+// at `--out` may be the previous iteration's output, or an operator's own
+// `latest.json` symlink, and a run that wrote nothing does not get to delete
+// either. Unlink permission comes from the DIRECTORY, so a `writeFileSync` that
+// cleans up after any error will happily remove a file it was not allowed to
+// open.
+//
+// A refused WRITE has already truncated it, because the open did that. Some
+// prefix of a JSON document at a path the next glob reads is the one outcome
+// worse than not writing at all: unreadable is a refusal every reader here
+// handles, and half-readable is not. So that one is cleared, best-effort — the
+// reason the write failed is often the reason the unlink will.
+//
+// Splitting the two is why this opens the file itself instead of asking
+// `writeFileSync` to. An errno list would be the same judgment with a worse
+// failure mode: an error nobody enumerated defaults to whichever branch was
+// written first.
+function writeClaimed(dest, body) {
+  const fd = openSync(dest, CLAIMED_PATH_FLAGS);
+  try {
+    writeFileSync(fd, body, 'utf-8');
+  } catch (e) {
+    e.truncated = true;
+    try {
+      rmSync(dest, { force: true });
+      e.cleared = true;
+    } catch {
+      // The clear can fail on its own: `O_TRUNC` needs permission on the FILE
+      // and unlink needs it on the DIRECTORY, so a writable file in a
+      // write-protected directory truncates and then will not be removed.
+      // Measured: a 75-byte out.json (0644) in a directory at 0555 ends up at
+      // zero bytes and stays there. Recorded rather than swallowed, because the
+      // refusal that follows would otherwise say it was cleared.
+      e.cleared = false;
+    }
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch { /* the write above is what this call is about */ }
+  }
+}
+
+// What this run did to the destination, for an operator who has to decide
+// whether to look at it. The errno is the cause; this is the consequence, and
+// it is the reason the open and the write are separate calls above.
+//
+// It says what this run did and not what is at the path now: `--out` is
+// unlinked before the write by at least one caller (decisions.mjs's
+// `claimOut`), so "what was there is unchanged" was a claim this function is in
+// no position to make, and its own bridge contradicted it on the next line.
+function destinationOutcome(e) {
+  if (!e.truncated) return 'this run opened nothing at that path';
+  return e.cleared
+    ? 'the write had already truncated it, so it was cleared'
+    : 'the write had already truncated it and it could not be cleared,'
+      + ' so a partial file is at that path';
+}
+
+// One output file, written the way the queue below writes its own.
+//
+// Seven bridges wrote a caller-supplied `--out` with their own
+// `writeFileSync(values.out, …, 'utf-8')`, and six of the seven followed a
+// symlink planted at it — including probe.mjs, whose header advertises
+// O_NOFOLLOW for the patch files it writes elsewhere. That is what a rule
+// restated at each site looks like after a while: the queue below has opened
+// with these flags since it was written, and it says why, and none of that
+// reached the bridges that do not use the queue.
+//
+// A bridge with several outputs still wants `makeWriteQueue`, which also
+// refuses to write one destination twice and holds every write until all of
+// them are judged. This is for the bridges that write exactly one file, and it
+// carries the exit code they had each chosen for themselves: exit 2 and a
+// sentence, never a stack trace under exit 1, because exit 1 is a claim about a
+// review and a run that could not write its output made none.
+export function writeOutput(prefix, dest, body) {
+  try {
+    writeClaimed(dest, body);
+  } catch (e) {
+    // Which of the two failures this was, in the operator's terms. The errno is
+    // the cause and this is the consequence, and they are the reason to split
+    // the two at all: whether the file that was at `--out` is still there is
+    // not something anyone should have to infer from ELOOP versus ENOSPC.
+    process.stderr.write(`${prefix}: ${oneLine(dest)}: cannot be written`
+      + ` (${oneLine(e.message)})\n`
+      + `    ${destinationOutcome(e)}\n`);
+    process.exit(2);
+  }
+}
+
 // Refuses to write a destination this process has already written. Two
 // payloads naming one persona is a stale file or a spoof, never a legitimate
 // state — but only WITHIN a run: Phase 9 loops back through the same outdir on
@@ -92,12 +214,25 @@ export function requireKnownPersona(persona, { prefix, file, personas }) {
 function makeWriteGuard(prefix) {
   const written = new Map();
   return function claimDest(dest, src) {
-    if (written.has(dest)) {
-      process.stderr.write(`${prefix}: ${src}: refuses to overwrite ${dest}, already written`
-        + ` this run from ${written.get(dest)} — two payloads claim one persona\n`);
+    // Compared as paths, not as text: `d/x.json` and `d/./x.json` are one file,
+    // and so are a `..` that cancels, a doubled slash and a trailing dot. The
+    // callers here build their destinations from a persona name, so this is not
+    // where the spelling varies today — it is one line, and the alternative is
+    // a guard whose answer depends on how its caller spelled the directory.
+    const key = path.resolve(dest);
+    if (written.has(key)) {
+      // "Claimed", not "written": this runs from `queue`, and every caller of
+      // the queue flushes once after queuing everything, so at this moment
+      // nothing has been written and there is no file at that path —
+      // tests/verify-bridge.test.mjs asserts exactly that. "Already written
+      // this run" is also the signal `flush` uses for an outdir that really is
+      // partial, which is the one thing this refusal must not be confused with.
+      process.stderr.write(`${prefix}: ${oneLine(src)}: refuses to overwrite ${oneLine(dest)},`
+        + ` already claimed this run by ${oneLine(written.get(key))}`
+        + ' — two payloads claim one persona\n');
       process.exit(1);
     }
-    written.set(dest, src);
+    written.set(key, src);
     return dest;
   };
 }
@@ -122,9 +257,20 @@ function makeWriteGuard(prefix) {
 export function makeWriteQueue(prefix) {
   const claim = makeWriteGuard(prefix);
   const queued = [];
+  let flushed = false;
 
   return {
     queue(dest, src, body) {
+      // After `flush` there is nothing left that will write this, and the
+      // payload would be dropped in silence. `flush` chose the noisy direction
+      // for its own second call and left this one silent, which is worse: a
+      // late `queue` followed by a late `flush` is refused with "outputs are
+      // already written", a sentence that is false about this entry.
+      if (flushed) {
+        process.stderr.write(`${prefix}: ${oneLine(src)}: queued after flush()`
+          + ` — ${oneLine(dest)} would never be written\n`);
+        process.exit(2);
+      }
       queued.push({ dest: claim(dest, src), src, body });
     },
     // A write that fails is exit 2 and a sentence, not a stack trace under exit
@@ -134,27 +280,44 @@ export function makeWriteQueue(prefix) {
     // there is no atomic multi-file write in the stdlib, so saying so is the
     // whole remedy.
     flush(verb) {
+      // Once, and the queue is drained. `done` is per-call and `queued` was
+      // never cleared, so a second `flush()` re-wrote every file under a fresh
+      // `done` list: a write that succeeded the first time and failed the
+      // second printed "no other file was written" over an outdir the first
+      // call had already filled — reviving the exact confusion the two
+      // sentences below exist to remove. Every caller flushes once, and that
+      // was a comment standing over an exported factory, which is not a guard.
+      if (flushed) {
+        process.stderr.write(`${prefix}: flush() twice — this run's outputs are already`
+          + ' written, and a second pass would report a filled outdir as empty\n');
+        process.exit(2);
+      }
+      flushed = true;
       const done = [];
-      for (const { dest, src, body } of queued) {
+      for (const { dest, src, body } of queued.splice(0)) {
         try {
-          // The run directory is writable by every agent in the run, so a
-          // symlink can be planted after any pre-write check. O_NOFOLLOW fails
-          // the open itself (ELOOP) instead of narrowing that window.
-          writeFileSync(dest, body, {
-            encoding: 'utf-8',
-            flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC
-              | constants.O_NOFOLLOW,
-          });
+          writeClaimed(dest, body);
         } catch (e) {
-          process.stderr.write(`${prefix}: ${dest}: cannot be written (${e.message.trim()})\n`
+          // Two sentences, about two different things, and the second one used
+          // to answer for both. `done` is the OTHER files, and "nothing was
+          // written" over an empty one stood above a destination the failed
+          // write had truncated and could not clear — measured under `ulimit
+          // -f`, an EFBIG four kilobytes in, and again with a 0555 directory
+          // where the clear itself fails. So this destination gets the sentence
+          // `writeOutput` gives it, in the same words, and the other files get
+          // one that says it is about them.
+          process.stderr.write(`${prefix}: ${oneLine(dest)}: cannot be written`
+            + ` (${oneLine(e.message)})\n`
+            + `    ${destinationOutcome(e)}\n`
             + (done.length
-              ? `    ${done.join(', ')} ${done.length === 1 ? 'was' : 'were'} already written,`
+              ? `    ${done.map(oneLine).join(', ')} ${done.length === 1 ? 'was' : 'were'}`
+                + ' already written,'
                 + ' so this outdir is partial: clear it or fold into a fresh one\n'
-              : '    nothing was written\n'));
+              : '    no other file was written\n'));
           process.exit(2);
         }
         done.push(dest);
-        process.stdout.write(`${verb} ${src} -> ${dest}\n`);
+        process.stdout.write(`${verb} ${src} -> ${oneLine(dest)}\n`);
       }
     },
   };

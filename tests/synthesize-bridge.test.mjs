@@ -316,6 +316,98 @@ function probesFile(dir, head) {
   return p;
 }
 
+// A group citation's reporter reaches every artifact the run leaves behind:
+// both renderers print it verbatim and the PR comment counts it. It arrives
+// out of a file nothing had checked past `Array.isArray(groups)`, so a value
+// that is not a lane name rendered as `[object Object]` in report.md and the
+// dashboard, and suppressed the PR comment outright. Refused here, where the
+// file that carries it can be named, before any of the three is written.
+for (const [label, citation] of [
+  ['a reporter that is not a lane name', { id: 'F1', title: 't', reporter: 42 }],
+  // The value the lane-list vocabulary exists for: `"auditor"` is iterable,
+  // so a reader that spread it published seven reviewers.
+  ['a reporters that is a string', { id: 'F1', title: 't', reporters: 'auditor' }],
+  ['a reporters holding something that is not a lane name',
+    { id: 'F1', title: 't', reporters: ['auditor', 7] }],
+  // The list is what decides which lanes a group reports, and the singular is
+  // what both renderers print beside the citation id — so a good one of each
+  // is not enough. This shape passed a check that read only the list, and
+  // published `[object Object]` into all three artifacts.
+  ['a good reporters list beside a junk reporter',
+    { id: 'F1', title: 't', reporters: ['auditor'], reporter: { lane: 'auditor' } }],
+  // An absence inside the list, which is a list that got a lane wrong rather
+  // than a citation that named nobody.
+  ['a reporters holding an absence', { id: 'F1', title: 't', reporters: [null] }],
+  // A lane name with no name in it: it cleared every check on this path,
+  // printed as nothing beside the citation id, and was still counted in the PR
+  // comment's reviewer tally.
+  ['a reporter that is the empty string', { id: 'F1', title: 't', reporter: '' }],
+  // One codepoint past what `trim` reaches, and the same phantom reviewer.
+  ['a reporter that is a zero-width space',
+    { id: 'F1', title: 't', reporter: '\u200b' }],
+  // And one past the invisible CATEGORIES: a filler that is a letter.
+  ['a reporter that is a Hangul filler',
+    { id: 'F1', title: 't', reporter: '\u3164' }],
+  // A name that prints as a real one and is not it.
+  ['a reporter carrying an invisible character',
+    { id: 'F1', title: 't', reporter: 'auditor\u200b' }],
+]) test(`a briefing citation with ${label} is refused, naming the file`, () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-cite-'));
+  const briefing = path.join(dir, 'briefing.json');
+  writeFileSync(briefing, JSON.stringify({ base: 'main', head: HEAD, findings: [],
+    groups: [{ id: 'G1', title: 'one thing', anchor: 'F1', citations: [citation] }] }));
+
+  const r = runSynth(['--round1', round1File(dir), '--briefing', briefing,
+    '--out', path.join(dir, 'report.md')]);
+
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /`groups\[0\]\.citations\[0\]` claims a reporter that is not a lane name/);
+  assert.match(r.stderr, new RegExp(briefing.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// The shapes underneath the field. This loop is the one place that can name
+// the file a value came from, so a group or a citation that is not an object
+// belongs to it too — otherwise the run died in the report builder reading a
+// property of null, naming neither the file nor which citation.
+for (const [label, groups, expected] of [
+  ['a group that is not an object', [null], /`groups\[0\]` is not a group/],
+  ['a citations that is not a list',
+    [{ id: 'G1', title: 't', citations: 'F1' }], /`groups\[0\]\.citations` is not a list/],
+  ['a citation that is not an object',
+    [{ id: 'G1', title: 't', citations: [null] }],
+    /`groups\[0\]\.citations\[0\]` is not a citation/],
+]) test(`a briefing with ${label} is refused, naming the file`, () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-shape-'));
+  const briefing = path.join(dir, 'briefing.json');
+  writeFileSync(briefing, JSON.stringify({ base: 'main', head: HEAD, findings: [], groups }));
+
+  const r = runSynth(['--round1', round1File(dir), '--briefing', briefing,
+    '--out', path.join(dir, 'report.md')]);
+
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, expected);
+  assert.match(r.stderr, new RegExp(briefing.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// And the shape that is not a claim at all. A citation with no reporter is
+// what triage writes for a finding synthesis did not build, and refusing it
+// would refuse the tool's own output.
+test('a briefing citation claiming no reporter is not refused', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'adverse-cite-'));
+  const briefing = path.join(dir, 'briefing.json');
+  writeFileSync(briefing, JSON.stringify({ base: 'main', head: HEAD, findings: [],
+    groups: [{ id: 'G1', title: 'one thing', anchor: 'F1',
+               citations: [{ id: 'F1', title: 't' }] }] }));
+
+  const r = runSynth(['--round1', round1File(dir), '--briefing', briefing,
+    '--out', path.join(dir, 'report.md')]);
+
+  assert.equal(r.status, 0, r.stderr);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 function briefingFile(dir, head) {
   const p = path.join(dir, 'briefing.json');
   writeFileSync(p, JSON.stringify({ base: 'main', head, groups: [], findings: [] }));

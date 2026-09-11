@@ -27,7 +27,8 @@
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import {
-  SETTLING_SCORE, UNREPORTED_DISPOSITION, normalizeTitle, requireFindings, scoreMatch,
+  SETTLING_SCORE, UNREPORTED_DISPOSITION, identityGap, normalizeTitle, requireFindings,
+  scoreMatch,
 } from './ledger.mjs';
 
 refuseDirectRun(import.meta.url);
@@ -39,6 +40,12 @@ refuseDirectRun(import.meta.url);
 // per-run and re-derived — so this is for whoever reads the ledger afterward,
 // and which batch noticed the item is most of what they want to know.
 const namedItemId = (agent, n) => `NF-${agent}-${n}`;
+
+// `named_not_fixed` is the one list whose schema carries no `id`, and both
+// readers below have to agree about that: `reconciliations` decides whether to
+// refuse the fold on an id claim, and `foldFixPayloads` mints the entry that
+// claim would have bound.
+const NAMES_NO_ID = { statesId: false };
 
 // Every item a fix agent named but did not fix is recorded with this
 // disposition, and the whole point of it is that `isSettled` says no.
@@ -67,9 +74,12 @@ const namedItemId = (agent, n) => `NF-${agent}-${n}`;
 // Taken from src/ledger.mjs rather than spelled again, because the ledger has
 // to know the same fact from the other side: `uncoveredDecisions` skips this
 // disposition outright, and lets an entry carrying it excuse the next decision
-// that matches it — provided the report carried the entry, which is what
-// `reconciled` below records. Two spellings of one disposition is how the
-// summary line stopped counting `noted` at all.
+// that matches it — unless the fold checked that identity against a report and
+// no lane had filed it, which is the one thing `reconciled` below withholds the
+// exemption on. A fold given no report records `reconciled: null` and the entry
+// still excuses; that degraded mode is the bridge's warning to make, not this
+// predicate's. Two spellings of one disposition is how the summary line
+// stopped counting `noted` at all.
 export const NAMED_NOT_FIXED_DISPOSITION = UNREPORTED_DISPOSITION;
 
 // Does this entry carry the identity that SETTLES that one?
@@ -179,8 +189,14 @@ function identityOf(d, finding) {
 // it, so a stale one cannot settle the wrong finding — while including it
 // refused a title-and-file match over a line the merge had moved, which both
 // cried wolf and left the stale `kind` in the ledger. Measured.
+// The fields `anchorsAgree` guards on, and the same list `identityGap` is
+// handed when it explains a refusal. One list, so the message cannot name a
+// field the guard never read — which is the whole of what went wrong when the
+// bridge explained an anchor refusal in terms of the title.
+export const ANCHOR_FIELDS = ['file', 'counterpart'];
+
 function anchorsAgree(d, finding) {
-  return ['file', 'counterpart'].every((field) => {
+  return ANCHOR_FIELDS.every((field) => {
     const claimed = d[field] ?? null;
     return claimed === null || claimed === (finding[field] ?? null);
   });
@@ -196,8 +212,11 @@ function anchorsAgree(d, finding) {
 // too. Its whitelist used to end one field short of this one, so every reader
 // downstream had only the disposition to go on — and `uncoveredDecisions`
 // grants its one exemption on exactly this difference: a `noted` identity the
-// report CARRIED excuses the decision answering it, and one this fold made up
-// out of the payload does not.
+// report CARRIED excuses the decision answering it, and one this fold looked up
+// in a report and did not find does not. `null` — no report reached the fold —
+// is neither of those and still excuses; withholding on it would make a
+// hand-written decisions.json excuse nothing, and choosing to fold without a
+// report is the orchestrator's call, warned about on stderr by both bridges.
 function reconciledAgainst(finding, checked) {
   return checked ? finding !== null : null;
 }
@@ -269,18 +288,198 @@ function toNamedNotFixed(item, { agent, n, finding = null, checked = false }) {
   };
 }
 
-// Look up a report finding by the one field that identifies it.
+// The briefing entries a decision's `id` may name, by id.
 //
-// Returns a function rather than the Map so the no-report case has one spelling
-// — every caller asks the same question and gets null — instead of each of them
-// deciding what an absent report means.
-function reportIndex(report) {
-  if (report === null || report === undefined) return () => null;
+// Unique within one briefing, so no ambiguity sentinel is needed — unlike
+// `indexByTitle` in verify.mjs, which needs one because the briefing is
+// per-lane and PRE-merge, so two lanes reporting one title give two entries
+// with that title. An id route does not have that problem and a title route
+// does.
+//
+// An entry with no string `id` cannot be named by a decision, and one with no
+// string `title` cannot answer the question a decision's id is looked up to
+// ask. Both are skipped rather than refused, for the same reason: `briefing.mjs`
+// mints the ids and copies the titles, so a missing one is this tool's own bug
+// and not a payload's claim. Whether a briefing that yields no usable entries
+// is an error is the caller's call, and the bridge makes it.
+//
+// The title used to go unchecked, and the id route reads `entry.title`:
+// `normalizeTitle(undefined)` is `''`, so every decision naming a title-less
+// entry read as transposed and the whole batch was refused with `the briefing
+// calls F3 undefined` — a payload blamed, in a sentence built to quote a title,
+// for a field the briefing did not have.
+//
+// Through `normalizeTitle`, which is what the comparison uses. Truthiness alone
+// closed the instance and left the class: `title: "   "` and `title: "."` both
+// pass `typeof === 'string' && e.title`, normalize to `''`, and refuse the batch
+// with `the briefing calls F3 " "`.
+//
+// The refusal is `requireFindings`' sibling and for the same reason: the bridge
+// needs this exact list to decide whether the file it was handed is a briefing
+// at all, and it had grown a hand-typed copy of the predicate. Two copies is
+// how the bridge came to exit 1 with a raw `TypeError` on a `findings` that is
+// an object, where its `--report` sibling ten lines up exits 2 naming the file.
+export function briefingEntries(briefing) {
+  if (!Array.isArray(briefing?.findings)) {
+    throw new Error('briefing has no findings array; this is not a briefing.json');
+  }
+  return briefing.findings.filter((e) => e
+    && typeof e.id === 'string' && e.id
+    && normalizeTitle(e.title));
+}
+
+function briefingIndex(briefing) {
+  const byId = new Map();
+  for (const e of briefingEntries(briefing)) byId.set(e.id, e);
+  return byId;
+}
+
+// Every id the briefing STATES, usable entry or not.
+//
+// The difference matters to the operator and only to the operator: an id that
+// names nothing in this briefing is a citation from an earlier iteration, and
+// an id that names an entry this tool could not use is this tool's own briefing
+// being incomplete. Both leave the id/title check with nothing to compare, and
+// the bridge told the operator to "check the id against briefing.json" in both
+// — advice that sends them looking for an id the file plainly carries.
+function briefingIds(briefing) {
+  const ids = new Set();
+  for (const e of briefing?.findings ?? []) {
+    if (e && typeof e.id === 'string' && e.id) ids.add(e.id);
+  }
+  return ids;
+}
+
+// Which report finding a decision may be bound to, and why not when the answer
+// is nothing.
+//
+// Returns a function rather than the Maps so each absent input has ONE spelling
+// — every caller asks the same question and gets the same shape — instead of
+// each of them deciding what a missing report or briefing means.
+//
+// The `cause` is the point. A bare null had two causes and the bridge printed
+// one remedy for both: "correct the title against report.json", which for an
+// anchor disagreement sends the operator to edit the one field that is already
+// verbatim. Reproduced with a byte-identical title and `file: src/authz.py`
+// against the report's `src/auth.py`. `ANCHOR_FIELDS` is what `anchorsAgree`
+// guards on and what `identityGap` is handed, so the message cannot name a
+// field the guard does not read.
+//
+// **The briefing is asked FIRST, and it is the only guard that catches a
+// transposition.** A decision's `id` names a BRIEFING entry — never a report
+// finding, which carries no id at all — and the round-2 and verify prompts both
+// state outright that `id` and `title` must agree with the briefing. Nothing
+// enforced it for a fix payload, because `validateFix` has no briefing to check
+// against. So a payload that swapped two titles bound by title alone onto the
+// OTHER finding and settled it: measured end to end on `65bc979`, a `declined`
+// on a `design` advisory with no file closed a cross-validated `critical` at
+// `src/auth.py:88`, and the loop reported `done` with nothing open.
+//
+// `anchorsAgree` cannot catch that and is not meant to: a `null` on the
+// payload's side is no claim, which is what makes the legitimate merge case
+// still bind — and the documented shape of a `design` advisory is exactly no
+// file and no counterpart. With no anchor stated there is nothing to disagree,
+// so title-alone binding is the whole of the check, and the title is the field
+// that was mis-copied.
+//
+// This is not a new join. `bindToBriefing` in
+// skills/adverse-review/scripts/verify.mjs already refuses an id whose briefing
+// entry disagrees with the payload's title, for the same attack one channel
+// over — naming an `info` id to bring a critical back non-blocking. One of the
+// two bridges that bind a model-supplied id to a finding had the guard and the
+// other did not.
+//
+// Both presences are tracked as FLAGS rather than read off a map's size. A
+// briefing that parses to an object with no usable entries is not the same
+// claim as no briefing, and neither is a report with no findings — reading
+// either from `.size` is how a file containing the literal `null` came to mean
+// "nothing was given", which the `--report` path already learned once.
+//
+// `statesId` is the caller's answer to whether the entry's schema HAS an `id`,
+// and only the two dispositions that do are asked the id question. A
+// `named_not_fixed` item's schema carries no id (`FIX_INSTRUCTIONS`, and
+// `validateFix` never asks for one), so an `id` on one is an extra key the
+// validator tolerates and not an identity claim the payload was asked to make.
+// Read as one, it put a stray key one keystroke away from refusing a whole
+// batch: a `noted` item whose id happened to name a briefing entry with another
+// title reached `cause: 'briefing'`, and the bridge refuses the fold on that —
+// taking every legitimate `fixed` decision beside it down as well.
+function bindingFor(report, briefing) {
+  const haveBriefing = briefing !== null && briefing !== undefined;
+  const briefed = haveBriefing ? briefingIndex(briefing) : new Map();
+  const stated = haveBriefing ? briefingIds(briefing) : new Set();
+  const haveReport = report !== null && report !== undefined;
   const byTitle = new Map();
-  for (const f of requireFindings(report)) byTitle.set(normalizeTitle(f.title), f);
-  return (d) => {
-    const f = byTitle.get(normalizeTitle(d.title)) ?? null;
-    return f && anchorsAgree(d, f) ? f : null;
+  if (haveReport) {
+    for (const f of requireFindings(report)) byTitle.set(normalizeTitle(f.title), f);
+  }
+
+  return (d, { statesId = true } = {}) => {
+    // Only a decision that STATES an id makes an id claim, and only one whose
+    // id RESOLVES makes a claim the briefing can contradict. Both near-misses
+    // cost this function the correction it exists to make, and each cost it in
+    // the same way — an early return before the report was ever consulted.
+    //
+    // States none: a `named_not_fixed` item, whose payload schema has no `id`
+    // field at all (`fix.txt`) and whose id is minted here afterwards, and a
+    // decision on a round-2 `added` finding, which is in report.json under no
+    // briefing key and could not copy an id if it wanted one, because
+    // report.json carries none. Reading "states none" as "names nothing"
+    // refused every one of them as a stale citation, and printed a remedy
+    // ("check the id against briefing.json") for entries with no id to check.
+    //
+    // States one that resolves to nothing: `briefing.mjs` re-mints ids
+    // positionally on every triage run, so an id copied out of an earlier
+    // iteration names nothing here. That is worth REPORTING and it is not
+    // worth refusing on, because the id is not what binds — the title is, and
+    // an id that resolves to nothing leaves the transposition check with
+    // nothing to compare, which is exactly the pre-briefing posture. Refusing
+    // instead dropped the correction and settled nothing, so the decision's
+    // own finding held the loop open: measured on a correct title with
+    // `file: null`, where the report supplied `src/auth.py:88` without
+    // `--briefing` and supplied nothing with it, and `--briefing` is what
+    // references/convergence-loop.md tells an operator to pass on every fold.
+    // It travels as `staleId` so binding and reporting can both happen.
+    let staleId = null;
+    let unusableId = false;
+    if (statesId && haveBriefing && d.id !== null && d.id !== undefined && d.id !== '') {
+      const entry = briefed.get(d.id) ?? null;
+      if (!entry) {
+        staleId = d.id;
+        // Which of the two it is, for the bridge's wording. `stated` carries
+        // the ids of entries this tool skipped as unusable, and telling an
+        // operator to check an id that briefing.json does carry is advice that
+        // cannot be followed.
+        unusableId = stated.has(d.id);
+      }
+      else if (normalizeTitle(entry.title) !== normalizeTitle(d.title)) {
+        return {
+          finding: null,
+          cause: 'briefing',
+          staleId: null,
+          unusableId: false,
+          gap: `the briefing calls ${d.id} ${JSON.stringify(entry.title)}`,
+        };
+      }
+    }
+    if (!haveReport) {
+      return { finding: null, cause: 'unchecked', gap: null, staleId, unusableId };
+    }
+    const finding = byTitle.get(normalizeTitle(d.title)) ?? null;
+    if (!finding) return { finding: null, cause: 'title', gap: null, staleId, unusableId };
+    if (!anchorsAgree(d, finding)) {
+      return {
+        finding: null,
+        cause: 'anchor',
+        staleId,
+        unusableId,
+        // The same tolerance `anchorsAgree` applies, handed to the walk with
+        // the same field list: a message that can name a field this guard
+        // waved through is the defect one field over.
+        gap: identityGap(d, finding, ANCHOR_FIELDS, { tolerateNullClaims: true }),
+      };
+    }
+    return { finding, cause: null, gap: null, staleId, unusableId };
   };
 }
 
@@ -332,8 +531,8 @@ function refuseSelfIssuedExemptions(decisions) {
 // validator must not be able to mint an entry that dies inside the ledger; that
 // is the failure the whole channel exists to stop, and it would arrive wearing
 // the ledger's name.
-export function foldFixPayloads(payloads, { report = null } = {}) {
-  const findingFor = reportIndex(report);
+export function foldFixPayloads(payloads, { report = null, briefing = null } = {}) {
+  const findingFor = bindingFor(report, briefing);
   // The FLAG, not the match: "no report was given" and "the report answers
   // nothing" are different claims and `reconciledAgainst` keeps them apart.
   const checked = report !== null && report !== undefined;
@@ -343,11 +542,13 @@ export function foldFixPayloads(payloads, { report = null } = {}) {
     const agent = requireAgent(payload);
     (payload.fixed ?? []).forEach((d, i) => {
       requireItem(d, `fixed[${i}] from ${agent}`);
-      decisions.push(toDecision(d, { disposition: 'fixed', agent, finding: findingFor(d), checked }));
+      decisions.push(toDecision(d,
+        { disposition: 'fixed', agent, finding: findingFor(d).finding, checked }));
     });
     (payload.declined ?? []).forEach((d, i) => {
       requireItem(d, `declined[${i}] from ${agent}`);
-      decisions.push(toDecision(d, { disposition: 'declined', agent, finding: findingFor(d), checked }));
+      decisions.push(toDecision(d,
+        { disposition: 'declined', agent, finding: findingFor(d).finding, checked }));
     });
     // Reconciled against the report exactly as the two lists above are. This
     // one used to skip it, on the grounds that no lane had reported these items
@@ -359,7 +560,8 @@ export function foldFixPayloads(payloads, { report = null } = {}) {
     // its own exemption into.
     (payload.named_not_fixed ?? []).forEach((item, i) => {
       requireItem(item, `named_not_fixed[${i}] from ${agent}`);
-      decisions.push(toNamedNotFixed(item, { agent, n: i + 1, finding: findingFor(item), checked }));
+      decisions.push(toNamedNotFixed(item,
+        { agent, n: i + 1, finding: findingFor(item, NAMES_NO_ID).finding, checked }));
     });
   }
 
@@ -376,42 +578,120 @@ export function foldFixPayloads(payloads, { report = null } = {}) {
 // which disposition it will become. The two unbound cases are different
 // accusations and the bridge prints them under different headings: an unbound
 // `fixed` or `declined` settles nothing and `converge.mjs --record --report`
-// names it, while an unbound `noted` records fine and becomes the identity that
-// excuses the next decision matching it.
+// names it, while an unbound `noted` records fine and excuses nothing — the
+// fold's own `reconciled: false` is what `uncoveredDecisions` withholds its
+// exemption on. That is narrower than "only an identity the report carried
+// excuses anything": `cannotVouch` withholds on `false` and on a value no fold
+// wrote, so an entry from a fold that consulted no report records `null` and
+// still excuses.
+// Withholding on `null` too would make a hand-written decisions.json unable to
+// excuse anything, and that call belongs to the orchestrator that chose to fold
+// without a report — which is why both bridges warn about it on stderr.
 function payloadEntries(payload) {
   const agent = payload?.agent ?? null;
   // Guarded here as well as in the fold, and with the same helper: this reader
   // walks the same three lists and the bridge runs it FIRST, so a `null` in one
   // of them reached `Cannot read properties of null (reading 'title')` from
   // here rather than from the refusal the fold now makes.
-  const list = (name, disposition) => (payload?.[name] ?? []).map((d, i) => {
-    requireItem(d, `${name}[${i}] from ${agent}`);
-    return { d, disposition };
-  });
+  const list = (name, disposition, statesId = true) => (payload?.[name] ?? [])
+    .map((d, i) => {
+      requireItem(d, `${name}[${i}] from ${agent}`);
+      return { d, disposition, statesId };
+    });
 
   return [
     ...list('fixed', 'fixed'),
     ...list('declined', 'declined'),
-    ...list('named_not_fixed', NAMED_NOT_FIXED_DISPOSITION),
+    ...list('named_not_fixed', NAMED_NOT_FIXED_DISPOSITION, false),
   ];
 }
 
-export function reconciliations(payloads, report) {
-  const findingFor = reportIndex(report);
+// What made EVERY citation disagree at once, as far as the payloads and this
+// briefing can say: `'briefing'`, `'partial'`, `'either'`, or null for "one
+// wrong pair at a time", which is the ordinary case and needs no paragraph of
+// its own.
+//
+// The refusal is right in all three — an id and a title naming different
+// findings cannot both be honored — but the remedy is not, and pointing an
+// operator at the wrong file costs them the iteration.
+//
+// `briefing.mjs` re-mints ids positionally on every triage run and the loop
+// writes them to the same path, so handing the fold another iteration's
+// briefing makes every citation disagree together. So does a payload that
+// pairs two entries with each other's ids. At two citations those two inputs
+// are the same document, and no field distinguishes them:
+//
+//   briefing        F1 -> "the guard", F3 -> "the budget"
+//   payload cites   F3 -> "the guard", F1 -> "the budget"
+//
+// which is either ids rotated between iterations or a payload with its pairs
+// swapped. `'either'` is that answer, said out loud. What the first version of
+// this said instead was "check your briefing", and the correction to it said
+// "check your payload" — by requiring that none of the titles be in this
+// briefing, which is true only of a briefing from an unrelated review and is
+// exactly the case that needs the least explaining.
+//
+// Between those two lies the shape a re-minted briefing actually tends to
+// have: SOME of the cited titles in it and some not, because two iterations of
+// the same review share most of their findings and not all of them. Answering
+// `'either'` there was a false claim and an impossible instruction — the
+// paragraph says every one of these titles is in this briefing under another
+// id, and offers a swap inside the payload as one of two remedies, when a
+// title this briefing never states cannot have been paired with another of its
+// entries. `'partial'` is that third state, and it points at the briefing:
+// whatever else is true, this one does not hold every finding these payloads
+// decided.
+//
+// One thing holds in every non-null answer, and it was the first way of
+// getting this wrong: every citation the check COULD contradict does. The
+// denominator is not every stated id — an id that resolves to nothing leaves
+// the check with nothing to compare and can never land in `transposed`, so
+// counting those suppressed the whole diagnosis on any batch that also carried
+// one stale citation, which a briefing of a different length tends to produce.
+export function transpositionCause(changes, payloads, briefing) {
+  const transposed = changes.filter((c) => c.cause === 'briefing');
+  if (transposed.length < 2) return null;
+
+  const stated = payloads
+    .flatMap((p) => [...(p?.fixed ?? []), ...(p?.declined ?? [])])
+    .filter((d) => d && d.id !== null && d.id !== undefined && d.id !== '').length;
+  const unresolvable = changes.filter((c) => c.staleId !== null && c.staleId !== undefined).length;
+  if (transposed.length !== stated - unresolvable) return null;
+
+  const titles = new Set(briefingEntries(briefing).map((e) => normalizeTitle(e.title)));
+  const briefed = transposed.filter((c) => titles.has(normalizeTitle(c.title))).length;
+  if (briefed === 0) return 'briefing';
+  return briefed === transposed.length ? 'either' : 'partial';
+}
+
+export function reconciliations(payloads, report, briefing = null) {
+  const findingFor = bindingFor(report, briefing);
   const changes = [];
   for (const payload of payloads) {
     const agent = payload?.agent ?? null;
-    for (const { d, disposition } of payloadEntries(payload)) {
-      const finding = findingFor(d);
+    for (const { d, disposition, statesId } of payloadEntries(payload)) {
+      const { finding, cause, gap, staleId, unusableId } = findingFor(d, { statesId });
       if (!finding) {
-        changes.push({ agent, title: d.title, disposition, bound: false, fields: [] });
+        changes.push({
+          agent, title: d.title, disposition, bound: false, cause, gap, staleId,
+          unusableId, fields: [],
+        });
         continue;
       }
       const before = identityOf(d, null);
       const after = identityOf(d, finding);
       const fields = Object.keys(after).filter((k) => before[k] !== after[k])
         .map((k) => ({ field: k, from: before[k], to: after[k] }));
-      if (fields.length) changes.push({ agent, title: d.title, disposition, bound: true, fields });
+      // A stale id is reported whether or not anything was corrected. Keyed on
+      // `fields.length` alone it was silent in the one case an operator most
+      // needs it — an id from an earlier iteration whose title still binds
+      // cleanly — and silence there reads as an id that resolved.
+      if (fields.length || staleId !== null) {
+        changes.push({
+          agent, title: d.title, disposition, bound: true, cause, gap, staleId,
+          unusableId, fields,
+        });
+      }
     }
   }
   return changes;

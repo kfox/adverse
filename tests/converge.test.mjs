@@ -356,7 +356,11 @@ test('a ledger anchored in another repository is refused', () => {
   const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
   const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /does not belong to this repository/);
+  // The lead names what this pass refuses, which is wider than a foreign tree:
+  // `checkBinding` reports fields only this tool writes holding values it never
+  // writes, too. The line under it is where THIS ledger's problem is named.
+  assert.match(r.stderr, /this ledger is not one this tool wrote for this tree/);
+  assert.match(r.stderr, /not a commit in this repository/, r.stderr);
 });
 
 test('a blocking finding nobody cross-examined holds the loop open', () => {
@@ -680,6 +684,124 @@ test('a noted identity a batch minted cannot excuse its decision an iteration la
   assert.doesNotMatch(r.stderr, /FIX NOT SUPPORTED/, 'the commit does touch the file it names');
 });
 
+// A `noted` entry, at the shape `decisions.mjs --fix` folds one into. `noted`
+// is the disposition that carries the exemption: the ledger lets a recorded
+// `noted` entry excuse the next decision matching it, and withholds that only
+// where the fold checked the identity against a report and no lane had filed
+// it — which travels as `reconciled: false`.
+const notedEntry = (over = {}) => ({
+  id: 'NF-fix-loop-bound-1', title: 'preflight_emu is not budgeted',
+  kind: 'behavioral', severity: null, file: 'app.py', line: 30, counterpart: null,
+  agent: 'fix-loop-bound', disposition: 'noted', reason: 'out of scope for this batch',
+  ...over,
+});
+
+test('the vouching warning is about the entries that vouch, not about --report', () => {
+  // Whether an entry can excuse the next decision was decided at FOLD time and
+  // travels in `reconciled`. Said in the `--report not given` block, the
+  // warning was keyed on the wrong document in both directions: it stayed
+  // silent on a vouching entry recorded WITH a report, which is this case.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+  const decisions = writeJson(repo, 'd.json',
+    { decisions: [notedEntry({ reconciled: null })] });
+
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--record', decisions,
+                 '--report', report, '--repo', repo, '--at', reviewed], repo);
+
+  assert.notEqual(r.status, 2, r.stderr);
+  assert.match(r.stderr, /1 noted entry was folded with no report/, r.stderr);
+  assert.match(r.stderr, /it keeps the exemption/, r.stderr);
+  assert.doesNotMatch(r.stderr, /--record without --report/,
+    'this run was given one — the fold was not, and that is the difference');
+});
+
+test('an entry the fold checked against a report is not warned about', () => {
+  // The other direction, and the one that stated the opposite of the truth: a
+  // fold run WITH a report writes `reconciled: false` onto an entry no lane
+  // filed, and that is the value the ledger already withholds the exemption
+  // on. Recorded here without a report, it was warned about anyway.
+  //
+  // An OMITTED field is not that: `recordDecisions` normalizes it to `null`
+  // and the entry vouches like any other, so the count below is 1 rather than
+  // 0 or 2, and it names the entry that vouches instead of the batch it came
+  // in.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [
+      notedEntry({ title: 'the fold checked this one', reconciled: false }),
+      notedEntry({ id: 'NF-fix-loop-bound-2' }),
+    ],
+  });
+
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--record', decisions,
+                 '--repo', repo, '--at', reviewed], repo);
+
+  assert.notEqual(r.status, 2, r.stderr);
+  assert.match(r.stderr, /1 noted entry was folded with no report/, r.stderr);
+  assert.doesNotMatch(r.stderr, /2 noted entries/, r.stderr);
+  assert.match(r.stderr, /--record without --report/,
+    'the missing flag has its own sentence, about the report this run did not name');
+});
+
+test('a reconciled the fold never writes is refused, not granted the exemption', () => {
+  // The reader asked whether `reconciled` was exactly `false`, so anything
+  // that is not VOUCHED — and the field went into the ledger as
+  // `d.reconciled ?? null`, unchecked, while its own comment said three values.
+  // A hand-written `"false"` is the string spelling of the one value that
+  // withholds the exemption, and it granted it; converge's warning is about
+  // `null`, so neither bridge said a word.
+  const { repo, reviewed } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  const decisions = writeJson(repo, 'd.json',
+    { decisions: [notedEntry({ reconciled: 'false' })] });
+
+  const r = run(['--ledger', ledger, '--record', decisions,
+                 '--repo', repo, '--at', reviewed], repo);
+
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /carries reconciled: "false"/, r.stderr);
+  assert.match(r.stderr, /true, false or null/, r.stderr);
+  assert.equal(existsSync(ledger), false, 'and nothing was recorded');
+});
+
+test('the singular warning agrees with itself all the way through', () => {
+  // Three pronouns, and the third was not branched: "1 noted entry was folded
+  // with no report, so it keeps the exemption that excuses the next decision
+  // matching THEM".
+  const { repo, reviewed } = repoWithTwoCommits();
+  const decisions = writeJson(repo, 'd.json',
+    { decisions: [notedEntry({ reconciled: null })] });
+
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--record', decisions,
+                 '--repo', repo, '--at', reviewed], repo);
+
+  assert.match(r.stderr, /1 noted entry was folded/, r.stderr);
+  assert.doesNotMatch(r.stderr, /matching\n\s+them:/, r.stderr);
+  assert.match(r.stderr, /matching\n\s+it:/, r.stderr);
+});
+
+test('a batch with nothing that vouches is not warned about an exemption', () => {
+  // The control: the warning is gated on the entries, so a batch holding none
+  // of them is told nothing about one. Same run, same missing --report.
+  const { repo, reviewed, fixed } = repoWithTwoCommits();
+  const decisions = writeJson(repo, 'd.json', {
+    decisions: [notedEntry({
+      disposition: 'fixed', title: 'Off-by-one in the loop bound',
+      reason: 'corrected the bound', fixCommit: fixed,
+    })],
+  });
+
+  const r = run(['--ledger', path.join(repo, 'l.json'), '--record', decisions,
+                 '--repo', repo, '--at', reviewed], repo);
+
+  assert.notEqual(r.status, 2, r.stderr);
+  // The wording either half of a plural, because the count is what the block
+  // interpolates and zero renders as the plural: "0 noted entries were folded".
+  assert.doesNotMatch(r.stderr, /the exemption that excuses/, r.stderr);
+  assert.match(r.stderr, /--record without --report/, 'which is a different sentence');
+});
+
 test('a decisions array holding null is refused by name, not by TypeError', () => {
   // `decisionsIn` accepts the array and every reader past it assumed an object,
   // so the run died on `Cannot read properties of null (reading 'disposition')`
@@ -709,6 +831,22 @@ test('a ledger file holding null is refused by shape, not by version', () => {
   const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /not a ledger object/);
+  assert.doesNotMatch(r.stderr, /Cannot read properties/);
+});
+
+test('a ledger entry that is not an object is refused, not walked', () => {
+  // `checkBinding` runs outside the try/catch that wraps `loadLedger` here, so
+  // this was an uncaught `Cannot read properties of null` at exit 1 — the code
+  // this bridge reserves for a batch that IS in the ledger.
+  const { repo } = repoWithTwoCommits();
+  const ledger = path.join(repo, 'l.json');
+  writeFileSync(ledger, JSON.stringify({ version: 1, entries: [null], iterations: [] }));
+  const report = writeJson(repo, 'report.json', { findings: [blockingFinding()] });
+
+  const r = run(['--ledger', ledger, '--report', report, '--repo', repo], repo);
+
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /entries\[0\]/, r.stderr);
   assert.doesNotMatch(r.stderr, /Cannot read properties/);
 });
 

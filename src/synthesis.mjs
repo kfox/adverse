@@ -38,7 +38,8 @@ import { fenced, flatten, quoted, verbatim, verbatimCell } from './markdown.mjs'
 import { isLaneAgent } from './personas.mjs';
 import { indexProbes, probeDeclaration, probeKey, probeState } from './probe.mjs';
 import { ADVISORY_KINDS, GROUP_RULINGS, KINDS, PROVENANCE, ROOT_CAUSE_STATUSES, SEVERITY_RANK,
-         assertCoversConfidences, assertCoversStatuses } from './taxonomy.mjs';
+         assertCoversConfidences, assertCoversStatuses, citationReporter, citesLaneNames,
+         claimedLanes } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -372,7 +373,7 @@ function reportedBy(finding, persona, agent) {
 // which costs a voice rather than minting one.
 function ruledOnOwnCitations(ruling, citations) {
   return citations.every((c) => {
-    const reporters = c.reporters ?? [c.reporter];
+    const reporters = claimedLanes(c) ?? [];
     const reporterAgents = c.reporterAgents ?? reporters;
     return reporters.length === 1
       && reportedBy({ reporters, reporterAgents }, ruling.persona, ruling.agent);
@@ -572,7 +573,22 @@ function buildRootCauses(groups, round2, findByTitle) {
     // Resolved reporters where synthesis has them, the citation's claim only
     // where it does not — an unresolved citation should not erase a reporter,
     // but it should not silently vouch for one either.
-    const reporters = [...new Set(citations.flatMap((c) => c.reporters ?? [c.reporter]))];
+    //
+    // A citation claiming no reporter contributes nobody; one claiming a
+    // reporter that is not a lane name stops the report being built at all.
+    // Both renderers print this list verbatim and the PR comment counts it, so
+    // carrying such a value produced `[object Object]` in two permanent
+    // artifacts and suppressed the third — and dropping it produced "0
+    // reviewers" with nothing said about why. synthesize refuses the briefing
+    // that carries one, naming the file and the citation; this is the same
+    // refusal for a caller that did not come through it.
+    const reporters = [...new Set(citations.flatMap((c) => {
+      if (!citesLaneNames(c)) {
+        throw new TypeError(`root cause ${JSON.stringify(g.id ?? g.title)} cites`
+          + ` ${JSON.stringify(c.id)}, which claims a reporter that is not a lane name`);
+      }
+      return claimedLanes(c);
+    }))];
 
     // A ruling from the reviewer that is the only reporter of every citation is
     // that reviewer confirming that its own findings are one thing. `validate`
@@ -1040,7 +1056,12 @@ function renderRootCauses(rootCauses) {
       // One span for the whole identity triple: all three arrive on a group
       // citation out of briefing.json, where nothing has gated them against
       // the taxonomy the way `buildFinding` gates a finding's own pair.
-      const who = verbatim(`${c.reporter}, ${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}`);
+      // Separated the way the dashboard separates it, because the first part
+      // is a LIST now: `auditor, steward, warning·defect` is three
+      // comma-separated things of which two are reporters, and the comma was
+      // unambiguous only while that field held exactly one lane.
+      const who = verbatim(`${citationReporter(c)} · `
+        + `${c.severity ?? 'no severity'}·${c.kind ?? 'unclassified'}`);
       lines.push(`- **${verbatim(c.id)}** (${who}) `
         + `${c.title}${loc}${against}`
 

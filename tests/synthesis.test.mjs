@@ -1023,6 +1023,57 @@ test('the JSON report carries the groups and each finding\'s back-reference', ()
   assert.deepEqual(json.findings.map((x) => x.group), ['G1', 'G1', 'G1']);
 });
 
+test('a citation claiming no reporter contributes nobody, not a null reviewer', () => {
+  // `[c.reporter]` on a citation that has none yields `undefined`, which
+  // serializes as `null`: counted as one reviewer in the PR comment, rendered
+  // as the word "null" in the HTML. That is the vouching this list is careful
+  // not to do, spelled by an absence instead of a name.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const withUnresolved = [{ ...g,
+    citations: [...g.citations,
+      { id: 'F9', kind: 'defect', severity: 'warning', file: 'a.py', line: 1,
+        title: 'nobody filed this' }] }];
+
+  const json = toJsonReport(synthesize(round1, rulings('one'),
+    { rootCauseGroups: withUnresolved }));
+
+  assert.deepEqual(json.root_causes[0].reporters, ['auditor', 'adversary', 'steward'],
+    JSON.stringify(json.root_causes[0].reporters));
+});
+
+test('a citation whose reporter is not a lane name stops the report', () => {
+  // Absence is the case the filter beside this is for. A reporter that is
+  // present and not a lane name is a malformed briefing: carried, it reached
+  // both renderers, which print this list verbatim, and the PR comment, which
+  // counts it — `[object Object]` in two permanent artifacts and no comment at
+  // all from the third. Dropped, it published "0 reviewers" with nothing said
+  // about why. Neither is an answer, so no report is built.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const withJunk = [{ ...g,
+    citations: [...g.citations,
+      { id: 'F9', kind: 'defect', severity: 'warning', file: 'a.py', line: 1,
+        title: 'nobody filed this', reporter: 42 }] }];
+
+  assert.throws(() => synthesize(round1, rulings('one'), { rootCauseGroups: withJunk }),
+    /root cause "G1" cites "F9", which claims a reporter that is not a lane name/);
+});
+
+test('a resolved citation is refused for the reporter the renderers print', () => {
+  // A RESOLVED citation gets its `reporters` from the finding synthesis built,
+  // so the list is always well formed and a check made of it saw nothing. The
+  // singular claim rides along untouched, and both renderers print it beside
+  // the citation id.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const withJunk = [{ ...g,
+    citations: [{ ...g.citations[0], reporter: { lane: 'auditor' } }, ...g.citations.slice(1)] }];
+
+  assert.throws(() => synthesize(round1, rulings('one'), { rootCauseGroups: withJunk }),
+    /which claims a reporter that is not a lane name/);
+});
+
 test('a report from a run that never grouped still has the keys, empty', () => {
   const json = toJsonReport(synthesize({ auditor: review('auditor', [f('x')]) }, {}));
   assert.deepEqual(json.root_causes, []);
@@ -1076,6 +1127,43 @@ test('a split group is not counted as covered by the headline', () => {
   // Round 2 said these are separate problems; the same file already refuses to
   // back-reference them, and the headline was the one place that forgot.
   assert.match(md, /covering 0 findings still grouped/);
+});
+
+test('both renderers say a citation names no reporter, rather than printing the absence', () => {
+  // A citation claiming nobody is what a briefing writes for a finding
+  // synthesis did not build, so it is legal and it reaches both renderers.
+  // Interpolated bare, the markdown printed the word `undefined` beside the
+  // citation id and the dashboard printed nothing at all — where the two
+  // fields beside it have said `no severity` and `unclassified` all along.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const anonymous = [{ ...g,
+    citations: [...g.citations,
+      { id: 'F9', kind: 'defect', severity: 'warning', file: 'a.py', line: 1,
+        title: 'nobody filed this' }] }];
+  const syn = synthesize(round1, rulings('one'), { rootCauseGroups: anonymous });
+
+  const md = renderMarkdown(syn);
+  assert.match(md, /`no reporter · warning·defect`/);
+  assert.doesNotMatch(md, /undefined/);
+  assert.match(renderHtml(syn), /no reporter · warning·defect/);
+});
+
+test('a citation that claimed nobody is named by what synthesis resolved', () => {
+  // `buildRootCauses` overwrites a resolved citation's `reporters` with the
+  // lanes of the finding it matched, and both renderers fell back on the
+  // singular claim alone — so a citation that omitted `reporter` and resolved
+  // anyway said "no reporter" in the same card whose header names the
+  // reviewers it came from. Words are the answer only when there is no other.
+  const { round1, groups } = oneGuard();
+  const [g] = groups;
+  const unclaimed = [{ ...g, citations: g.citations.map((c) => ({ ...c, reporter: undefined })) }];
+  const syn = synthesize(round1, rulings('one'), { rootCauseGroups: unclaimed });
+
+  const md = renderMarkdown(syn);
+  assert.doesNotMatch(md, /no reporter/, md);
+  assert.match(md, /`auditor · warning·defect`/, md);
+  assert.match(renderHtml(syn), /auditor · warning·defect/);
 });
 
 test('both renderers show a contract citation\'s counterpart', () => {

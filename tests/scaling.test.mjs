@@ -20,6 +20,7 @@ import {
   MAX_SPLIT_AGENTS, SPLIT_AGENTS, agentNames, diffSize, escalate, parseDepth, parseNumstat,
   parsePlan, parseProbePolicy, planReview, runLanes, sizeSkippable, skippedLanes, splitLanes,
 } from '../src/scaling.mjs';
+import { isLaneName } from '../src/taxonomy.mjs';
 
 const filesOf = (n) => Array.from({ length: n }, (_, i) => `src/render/mod${i}.mjs`);
 
@@ -447,6 +448,19 @@ test('runLanes and skippedLanes partition the roster', () => {
     { persona: 'pragmatist', run: false, agents: 0 });
   assert.deepEqual(runLanes(lanes).map((l) => l.persona), ['auditor']);
   assert.deepEqual(skippedLanes(lanes).map((l) => l.persona), ['pragmatist']);
+});
+
+// The other half of the coupling tests/personas.test.mjs asserts for personas:
+// every id a plan can emit has to satisfy src/taxonomy.mjs's lane-name shape,
+// or a split lane's citations refuse at the synthesize boundary.
+test('every agent name a plan can emit is a lane name', () => {
+  const lanes = lanesOf(...DEFAULT_PERSONAS.map((persona) =>
+    ({ persona, run: true, agents: MAX_SPLIT_AGENTS })));
+  const names = agentNames(lanes);
+  assert.equal(names.length, DEFAULT_PERSONAS.length * MAX_SPLIT_AGENTS);
+  for (const name of [...names, ...DEFAULT_PERSONAS]) {
+    assert.equal(isLaneName(name), true, name);
+  }
 });
 
 test('agentNames suffixes a split lane per agent and leaves a solo lane bare', () => {

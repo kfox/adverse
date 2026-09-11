@@ -81,6 +81,130 @@ export function assertCoversConfidences(map, where) {
 // from a string literal of its own.
 export const PROVENANCE = Object.freeze({ review: 'review', regression: 'regression' });
 
+// What a `reporters` field is allowed to hold, wherever one is read: a list of
+// lane names. Here rather than in either reader by this file's own test — it is
+// the shape of a field the ledger, the synthesizer, the HTML renderer and the
+// PR comment all read, and none of them owns it.
+//
+// A string is the reason it exists. `"auditor"` is iterable, so
+// `(rc.reporters ?? []).length` published "7 reviewers" and an entry carrying
+// one answered `closureOf` with the lanes a, d, i, o, r, t, u. Every reader
+// refuses it now, each in its own register.
+// And a lane name has a name. `""` is not a lane that declined to identify
+// itself: it satisfied every check here, printed as nothing at all beside a
+// citation id, and was still counted in the PR comment's `N reviewers` tally —
+// a phantom reviewer, which is the same vouching the string case is on this
+// list for.
+//
+// Spelled as what a lane name MAY contain, because the other direction does
+// not close. `trim()` left it open at `\u200b`, a FORMAT character; naming
+// whitespace, format and control characters left it open at `\u3164` HANGUL
+// FILLER, which is a letter, `\u2800` BRAILLE PATTERN BLANK, which is a
+// symbol, and `\ufe0f`, which is a mark. Each prints as no character at all,
+// each passed as a lane name, each was counted in a permanent PR comment's
+// reviewer tally, and each is one codepoint past whatever the previous list
+// named. "The categories that render as nothing" is not a set anyone can
+// finish enumerating.
+//
+// What a lane name is instead: an identifier this tool writes — a persona, or
+// a persona and the letter of one half of a split lane. Anything else came
+// from a hand-edited file, and a refusal is the direction to fail in.
+//
+// Spelled as narrowly as that sentence, because a wider shape reopens the
+// identity half below by another route. `agentNames` (src/scaling.mjs) emits
+// `persona` or `${persona}-${String.fromCharCode(97 + i)}` and every persona
+// in the registry is lowercase, so `Auditor`, `auditor_a` and `auditor-ab`
+// are not names this tool writes — src/roster.mjs calls a re-cased name a
+// phantom reviewer outright, and src/regression.mjs names `auditor_a` and
+// `auditor-ab` as the two shapes an id is not. A predicate admitting them
+// counts one lane three times, which is the same inflated tally as
+// `auditor\u200b`, reached by re-spelling rather than by padding.
+//
+// Bounded like the two sibling identifier checks — `AGENT_LABEL`
+// (src/prompts.mjs) and `GROUP_ID` (src/ledger.mjs) — for the reason
+// src/prompts.mjs states: an identifier interpolated into tool-authored prose
+// gets a shape check. This one is joined into report.md, the dashboard and a
+// permanent PR comment escaped but never clipped, so an unbounded `*` puts a
+// reporter of any length there.
+//
+// This also settles IDENTITY, which a blocklist could not. `auditor` and
+// `auditor\u200b` both passed the old test, deduped as two entries, and
+// published "2 reviewers" with both printing as `auditor` — the same double
+// vouching, reached by duplication rather than by emptiness. There is one
+// spelling of a name now, so the set that counts them counts each once.
+const LANE_NAME = /^[a-z][a-z0-9]{0,31}(-[a-z])?$/;
+export const isLaneName = (value) => typeof value === 'string' && LANE_NAME.test(value);
+export const isLaneList = (value) => Array.isArray(value) && value.every(isLaneName);
+
+// Which lanes a citation claims, or `null` for a claim that is not lane names
+// at all — one reading, for the two readers that would otherwise each have
+// their own.
+//
+// A group citation arrives out of briefing.json, so both fields are whatever
+// that file says: `reporters` where synthesis resolved the citation against a
+// finding, the singular `reporter` it claimed otherwise. An absent one claims
+// NOBODY rather than one reviewer named `undefined` — that value serialized as
+// `null`, counted in the PR comment's reviewer tally and rendered as the word
+// "null" in the dashboard, which is vouching spelled by an absence.
+//
+// Absence ONLY, and only of the FIELD. A reporter that is present and not a
+// lane name is a malformed file rather than an empty claim, and dropping it
+// would put "0 reviewers" in a permanent PR comment with nothing said about
+// why. It comes back `null`, so each caller refuses it in its own register —
+// and never as one reviewer, which is what wrapping a bare `"auditor"` in a
+// list would have made of the string this vocabulary exists to catch.
+//
+// An absence INSIDE a list is not that absence. `[null]` is a list that was
+// written and got a lane wrong, not a citation that named nobody, and
+// filtering it away here would have said "claims nobody" for it while the
+// predicate below said "not lane names" — one file, two answers, on the shape
+// nothing in this repository writes.
+export const claimedLanes = (citation) => {
+  const claimed = citation?.reporters;
+  if (claimed !== undefined && claimed !== null) {
+    return isLaneList(claimed) ? claimed : null;
+  }
+  const reporter = citation?.reporter;
+  if (reporter === undefined || reporter === null) return [];
+  return isLaneName(reporter) ? [reporter] : null;
+};
+
+// Who a citation line names, for the two renderers that print one. The CLAIM
+// first: that line reports what the briefing said, and where the claim and
+// what synthesis resolved disagree, the disagreement is the thing worth
+// seeing. Where the citation claimed NOBODY and synthesis resolved it anyway,
+// the resolved lanes are still an answer, and "no reporter" is a confident
+// wrong one — printed, as it was, in the same card whose header names two
+// reviewers.
+// Each half asks the predicate its neighbors ask, rather than testing for
+// presence: `??` falls through only on an absence, so a claim that is present
+// and blank printed as nothing instead of falling back — the symptom this
+// whole list exists to prevent, reached through the helper written to prevent
+// it. And `.length` alone admits a bare `"auditor"`, whose `join` is not a
+// function: the string case, in the one reader here that would crash on it
+// rather than refuse it.
+export const citationReporter = (citation) => {
+  if (isLaneName(citation?.reporter)) return citation.reporter;
+  const resolved = citation?.reporters;
+  return isLaneList(resolved) && resolved.length ? resolved.join(', ') : 'no reporter';
+};
+
+// Whether a citation's reporter fields are lane names — BOTH of them, because
+// they are read by different things. `claimedLanes` prefers `reporters`, and
+// both renderers print the singular `reporter` beside the citation id; a
+// citation carrying a good list and a junk singular satisfied the first and
+// published `[object Object]` through the second, into report.md, the
+// dashboard and report.json alike.
+//
+// Absence is not a bad value, here as there: a citation naming no reporter is
+// what a briefing writes for a finding synthesis did not build, and each
+// renderer says so in words rather than printing the absence.
+const laneOrAbsent = (value) => value === undefined || value === null
+  || isLaneName(value);
+export const citesLaneNames = (citation) => laneOrAbsent(citation?.reporter)
+  && (citation?.reporters === undefined || citation?.reporters === null
+    || isLaneList(citation.reporters));
+
 // Null prototype, because `severity` is reviewer-supplied and callers test
 // membership with `severity in SEVERITY_RANK` and `SEVERITY_RANK[s]`. A plain
 // object answers `constructor`, `toString`, `valueOf` and nine more with

@@ -48,6 +48,89 @@ test('a paraphrased title is repaired to the briefing\'s canonical string', () =
   }
 });
 
+test('a whitespace briefing title is not repaired INTO the round-2 edge', () => {
+  // The third hand-written index over `briefing.findings`, and the only one
+  // that WRITES: a whitespace title is truthy, so `canonical` was truthy and
+  // the reviewer's correct title was overwritten with whitespace — the join key
+  // every downstream edge rides on, corrupted in silence by the function that
+  // exists to repair it. `briefing.mjs` copies the titles, so a blank one is
+  // this tool's own output, not the payload's mistake.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{ id: 'F1', title: '   ', reporter: 'auditor' }],
+    }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward',
+      validate: [{ id: 'F1', title: 'the guard is unreachable', from: 'someone' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    // Exit 1, because the edge is unresolved and every unresolved edge sets
+    // it. That is the honest answer here: the id named an entry this tool
+    // could not use, so the title was checked against nothing.
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    const repaired = JSON.parse(
+      readFileSync(path.join(dir, 'round2-steward.repaired.json'), 'utf-8'));
+    assert.equal(repaired.validate[0].title, 'the guard is unreachable',
+      'the reviewer\'s title stands: there was nothing to repair it against');
+    assert.match(r.stderr, /this briefing states that id/, r.stderr);
+    assert.match(r.stderr, /nothing to repair the title against/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an id the briefing does not carry is still the citation to correct', () => {
+  // The control for the sentence above: an id absent from the file gets the
+  // ordinary report and none of the triage-output wording.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{ id: 'F1', title: 'a real one', reporter: 'auditor' }],
+    }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward',
+      validate: [{ id: 'F9', title: 'invented', from: 'someone' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    assert.match(r.stderr, /unresolvable id "F9"/, r.stderr);
+    assert.doesNotMatch(r.stderr, /this briefing states that id/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --briefing whose findings is not an array is exit 2, naming the file', () => {
+  // `.map` on an object is a raw TypeError at exit 1, and exit 1 means this
+  // bridge read a payload that failed its schema. The same input is a named
+  // exit-2 refusal in decisions.mjs and verify.mjs.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({ findings: { F1: 'a real one' } }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward', validate: [{ id: 'F1', title: 't', from: 'someone' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /briefing\.json/, r.stderr);
+    assert.doesNotMatch(r.stderr, /is not a function|TypeError/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an id absent from the briefing is unresolved, reported, and left untouched', () => {
   const dir = freshTmp();
   try {
@@ -251,7 +334,9 @@ test('two payloads claiming one persona refuse to collide, rather than one overw
     const b = round2At(dir, 'round2-auditor-stale.json', 'auditor');
     const r = runRepair(['--briefing', briefingAt(dir), '--round2', a, '--round2', b, '--outdir', dir]);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /already written this run/);
+    assert.match(r.stderr, /already claimed this run/);
+    assert.doesNotMatch(r.stderr, /already written/,
+      'nothing has been written yet: the claim is made at queue time');
     assert.throws(() => readFileSync(path.join(dir, 'round2-auditor.repaired.json')),
       'the collision is refused before the first file is written, not after');
   } finally {
@@ -276,6 +361,111 @@ test('a refused payload leaves no half-published outdir', () => {
     assert.throws(() => readFileSync(path.join(dir, 'round2-auditor.repaired.json')),
       'the honest payload repaired cleanly, but publishing it is a claim this run withdrew');
     assert.equal(r.stdout, '', 'nor may it report a file it did not leave behind');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const [label, payload, named] of [
+  ['a groups that is not an array', { persona: 'steward', groups: { G1: 'accept' } },
+   '`groups` must be an array'],
+  ['a groups that is null', { persona: 'steward', groups: null },
+   '`groups` must be an array'],
+  ['a validate that is null', { persona: 'steward', validate: null },
+   '`validate` must be an array'],
+  ['a null group ruling', { persona: 'steward', groups: [null] },
+   '`groups[0]` is not an object'],
+  ['a null edge', { persona: 'steward', validate: [null] },
+   '`validate[0]` is not an object'],
+  ['an edge that is a string', { persona: 'steward', challenge: ['F1'] },
+   '`challenge[0]` is not an object'],
+]) {
+  // Every list this payload can carry, checked the same way: `groups` had
+  // neither guard and the other two had only the array one, so `{"groups":{…}}`
+  // was `object is not iterable` and `{"validate":[null]}` was `Cannot read
+  // properties of null` — raw stack traces from a bridge whose exit 1 means
+  // "this payload failed its schema", which is what it should have said.
+  test(`${label} is named, not a stack trace`, () => {
+    const dir = freshTmp();
+    try {
+      const briefing = path.join(dir, 'briefing.json');
+      writeFileSync(briefing, JSON.stringify({
+        findings: [{ id: 'F1', title: 'Canonical Title', reporter: 'auditor' }],
+        groups: [{ id: 'G1', title: 'one root cause' }],
+      }));
+      const round2 = path.join(dir, 'round2-steward.json');
+      writeFileSync(round2, JSON.stringify(payload));
+
+      const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+      assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+      assert.ok(r.stderr.includes(named), `names the list and the index: ${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /TypeError|not iterable|at file:/, r.stderr);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('a null entry in `groups` does not take the whole phase down', () => {
+  // The same `f &&` guard `findings` has, on the list that was indexed without
+  // it: `[null]` is a triage output one element short of its shape, and
+  // `.map((g) => g.id)` answered it with a raw TypeError at exit 1 — this
+  // bridge's code for a payload that failed its schema, on a briefing the
+  // payload did not write.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{ id: 'F1', title: 'Canonical Title', reporter: 'auditor' }],
+      groups: [null, { id: 'G1', title: 'one root cause' }],
+    }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward',
+      groups: [{ id: 'G1', ruling: 'accept' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /TypeError|unresolvable id/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const [label, groups] of [
+  ['an object', { G1: 'one root cause' }],
+  // `null` is what a serializer writes for a field it had no value for, so it
+  // is the likeliest spelling of a malformed list — and `briefingEntries`
+  // already refuses a `"findings": null`, so tolerating it here made the two
+  // lists disagree about the one shape most likely to arrive. Only an ABSENT
+  // key is no groups at all.
+  ['null', null],
+]) test(`a \`groups\` that is ${label} is refused, not read as no groups at all`, () => {
+  // Read as empty, it reports every group ruling in every payload as
+  // unresolvable — which sends the reviewer to check citations that are
+  // correct, and blames the payloads for the shape of the briefing.
+  const dir = freshTmp();
+  try {
+    const briefing = path.join(dir, 'briefing.json');
+    writeFileSync(briefing, JSON.stringify({
+      findings: [{ id: 'F1', title: 'Canonical Title', reporter: 'auditor' }],
+      groups,
+    }));
+    const round2 = path.join(dir, 'round2-steward.json');
+    writeFileSync(round2, JSON.stringify({
+      persona: 'steward',
+      groups: [{ id: 'G1', ruling: 'accept' }],
+    }));
+
+    const r = runRepair(['--briefing', briefing, '--round2', round2, '--outdir', dir]);
+
+    assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /briefing\.json: `groups` is not an array/, r.stderr);
+    assert.doesNotMatch(r.stderr, /unresolvable id/,
+      'the payload cited a group correctly; the briefing is what could not be read');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

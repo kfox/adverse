@@ -35,7 +35,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { refuseDirectRun } from './entryGuard.mjs';
-import { DEFAULT_PERSONAS, isLaneAgent } from './personas.mjs';
+import { laneOf } from './personas.mjs';
 import { probeSummary } from './probe.mjs';
 import { runLanes } from './scaling.mjs';
 import { UNCLASSIFIED, isBlocking } from './synthesis.mjs';
@@ -77,14 +77,6 @@ const KNOWN_SEVERITIES = new Set(SEVERITIES);
 const KNOWN_STATUSES = new Set(ROOT_CAUSE_STATUSES);
 
 const oneOf = (allowed) => (value) => (allowed.has(value) ? value : OFF_VOCABULARY);
-
-// Which LANE a name belongs to — `auditor` and `auditor-a` are both the
-// auditor's — or null for a string that is not a persona at all. Asked through
-// src/personas.mjs's own predicate rather than by re-deriving the split-lane
-// spelling here, which is exactly the duplication that has drifted before.
-export function laneOf(name) {
-  return DEFAULT_PERSONAS.find((persona) => isLaneAgent(persona, name)) ?? null;
-}
 
 // A base is recorded only as a commit sha. `--briefing` carries whatever
 // `triage.mjs --base` was given, and that can be a branch name — which is free

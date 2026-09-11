@@ -618,6 +618,20 @@ export function isLaneAgent(persona, agent) {
   return agent.startsWith(prefix) && LANE_AGENT_SUFFIX.test(agent.slice(prefix.length));
 }
 
+// Which LANE a name belongs to — `auditor` and `auditor-a` are both the
+// auditor's — or null for a string that names no lane at all. Asked through
+// `isLaneAgent` rather than by re-deriving the split-lane spelling, which is
+// exactly the duplication that has drifted before.
+//
+// Here rather than in src/telemetry.mjs, where it was, because it is a
+// question about personas and three callers outside telemetry now ask it. The
+// case is NOT folded: lane identity is case-sensitive in
+// `requireKnownPersona`, in combine.mjs and in validate.mjs, so `Auditor`
+// resolves to nothing here too.
+export function laneOf(name) {
+  return DEFAULT_PERSONAS.find((persona) => isLaneAgent(persona, name)) ?? null;
+}
+
 // Whose work an agent id names: `claimed` when `isLaneAgent` accepts it, and
 // the LANE otherwise. `isLaneAgent` answers whether an id is well formed; this
 // answers the question every caller of it actually had, which is who to
