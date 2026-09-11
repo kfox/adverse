@@ -20,7 +20,19 @@ import {
   laneAgentOf,
 } from '../src/personas.mjs';
 import { sizeSkippable } from '../src/scaling.mjs';
-import { ADVISORY_KINDS, KINDS } from '../src/taxonomy.mjs';
+import { ADVISORY_KINDS, KINDS, isLaneName } from '../src/taxonomy.mjs';
+
+// src/taxonomy.mjs refuses a reporter that is not "an identifier this tool
+// writes", and nothing coupled that claim to the identifiers it writes. A
+// persona added outside the shape would refuse every briefing citation naming
+// it — `synthesize` dies at the flag, `buildRootCauses` throws — with the
+// whole suite green, because `isLaneName` is otherwise exercised only against
+// hand-written literals in tests/taxonomy.test.mjs.
+test('every persona this tool ships is a lane name', () => {
+  for (const persona of [...Object.keys(PERSONAS), ...DEFAULT_PERSONAS]) {
+    assert.equal(isLaneName(persona), true, persona);
+  }
+});
 
 // One arm of a persona's severity rubric, whitespace-collapsed.
 //

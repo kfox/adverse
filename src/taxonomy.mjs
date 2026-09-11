@@ -110,12 +110,29 @@ export const PROVENANCE = Object.freeze({ review: 'review', regression: 'regress
 // a persona and the letter of one half of a split lane. Anything else came
 // from a hand-edited file, and a refusal is the direction to fail in.
 //
+// Spelled as narrowly as that sentence, because a wider shape reopens the
+// identity half below by another route. `agentNames` (src/scaling.mjs) emits
+// `persona` or `${persona}-${String.fromCharCode(97 + i)}` and every persona
+// in the registry is lowercase, so `Auditor`, `auditor_a` and `auditor-ab`
+// are not names this tool writes — src/roster.mjs calls a re-cased name a
+// phantom reviewer outright, and src/regression.mjs names `auditor_a` and
+// `auditor-ab` as the two shapes an id is not. A predicate admitting them
+// counts one lane three times, which is the same inflated tally as
+// `auditor\u200b`, reached by re-spelling rather than by padding.
+//
+// Bounded like the two sibling identifier checks — `AGENT_LABEL`
+// (src/prompts.mjs) and `GROUP_ID` (src/ledger.mjs) — for the reason
+// src/prompts.mjs states: an identifier interpolated into tool-authored prose
+// gets a shape check. This one is joined into report.md, the dashboard and a
+// permanent PR comment escaped but never clipped, so an unbounded `*` puts a
+// reporter of any length there.
+//
 // This also settles IDENTITY, which a blocklist could not. `auditor` and
 // `auditor\u200b` both passed the old test, deduped as two entries, and
 // published "2 reviewers" with both printing as `auditor` — the same double
 // vouching, reached by duplication rather than by emptiness. There is one
 // spelling of a name now, so the set that counts them counts each once.
-const LANE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const LANE_NAME = /^[a-z][a-z0-9]{0,31}(-[a-z])?$/;
 export const isLaneName = (value) => typeof value === 'string' && LANE_NAME.test(value);
 export const isLaneList = (value) => Array.isArray(value) && value.every(isLaneName);
 

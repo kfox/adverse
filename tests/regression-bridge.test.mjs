@@ -996,12 +996,35 @@ test('a derived lane name this review cannot produce is refused too', () => {
   // this review cannot produce is a ledger that cannot pick a reviewer, and
   // treating a list as pre-validated because a program assembled it is the
   // same fail-open one layer over.
+  //
+  // `referee` rather than `Auditor`, because the two are refused by different
+  // checks and this one is about the agent-id check: a re-cased name is not a
+  // lane name at all (src/taxonomy.mjs) and never survives the ledger load to
+  // reach here. The case below pins that half.
   const dir = gitRepo();
   try {
-    const ledger = ledgerClosing(dir, ['Auditor']);
+    const ledger = ledgerClosing(dir, ['referee']);
     const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-ledger', ledger, '--json']);
     assert.equal(r.status, 2);
-    assert.match(r.stderr, /"Auditor" names no agent id this review produces/);
+    assert.match(r.stderr, /"referee" names no agent id this review produces/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a derived name that is not a lane name is refused at the ledger, not later', () => {
+  // The shapes `agentNames` cannot emit, refused where the ledger is read —
+  // one layer before the agent-id check, so a re-spelled lane never reaches
+  // the list a reviewer is picked off. Each of these used to load clean and be
+  // caught only if something later happened to ask.
+  const dir = gitRepo();
+  try {
+    for (const name of ['Auditor', 'auditor_a', 'auditor-ab', 'auditor\u200b']) {
+      const ledger = ledgerClosing(dir, [name]);
+      const r = run(['--repo', dir, '--commit', 'HEAD', '--closed-by-ledger', ledger, '--json']);
+      assert.equal(r.status, 2, name);
+      assert.match(r.stderr, /which is not a list of lane names/, name);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -199,7 +199,25 @@ test('a lane name of invisible characters is not a lane name', () => {
 test('a lane has one spelling, so two of them are two lanes', () => {
   assert.equal(isLaneList(['auditor\u200b']), false, 'not the name it looks like');
   assert.equal(isLaneList([' auditor ']), false, 'nor is it padded');
-  assert.equal(new Set(['auditor', 'auditor-b'].filter(isLaneName)).size, 2);
+  // Every way of re-spelling one lane, against the one spelling it has. A set
+  // built off this list used to have five entries and publish five reviewers.
+  assert.deepEqual(
+    ['auditor', 'Auditor', 'AUDITOR', 'auditor_a', 'auditor-ab', 'auditor\u200b',
+      ' auditor '].filter(isLaneName),
+    ['auditor'],
+    'one lane, one spelling');
+  // And the two halves of a split lane are two, because the tool writes both.
+  assert.deepEqual(['auditor-a', 'auditor-b'].filter(isLaneName),
+    ['auditor-a', 'auditor-b']);
+});
+
+// A lane name reaches report.md, the dashboard and a permanent PR comment
+// escaped and unclipped, so it is bounded where `AGENT_LABEL` and `GROUP_ID`
+// are bounded.
+test('a lane name is bounded, like the other identifiers held to a shape', () => {
+  assert.equal(isLaneName('a'.repeat(32)), true);
+  assert.equal(isLaneName('a'.repeat(33)), false);
+  assert.equal(isLaneName(`${'a'.repeat(32)}-b`), true, 'the half suffix is not the bound');
 });
 
 // What a citation line says about who reported it: the claim, then what
