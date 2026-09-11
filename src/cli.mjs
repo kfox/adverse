@@ -7,7 +7,7 @@ import process from 'node:process';
 
 import { collectDirectory, collectDiff } from './collect.mjs';
 import { refuseDirectRun } from './entryGuard.mjs';
-import { PERSONAS, DEFAULT_PERSONAS, crossReviews, laneOf } from './personas.mjs';
+import { PERSONAS, DEFAULT_PERSONAS, crossReviews, isLaneAgent, laneOf } from './personas.mjs';
 import { normalizeProbes } from './probe.mjs';
 import {
   buildPhase1Prompt,
@@ -387,36 +387,54 @@ const showKey = (key) => {
 // it when overwriting it can only cost that entry its independence, never
 // invent any.
 //
-// A payload filed under the BARE lane has its header overwritten like any
-// other — the key is the identity of the file — and its ENTRIES left alone. The
-// two differ because a lane-keyed file may legitimately hold both halves' work:
-// `mergeSplitReviews` stamps each half's id onto that half's entries, and those
-// ids are what let `auditor-b`'s ruling on `auditor-a`'s finding count at all.
-// A header is one claim about the whole file, and a file the whole lane is
-// accountable for is the lane's.
+// A payload filed under the BARE lane is left exactly as it is, header and
+// entries. Its file was not written by one half, so there is no key to hold it
+// to, and the ids inside it are combine.mjs's honest output — `mergeSplitReviews`
+// stamps each half's id onto that half's entries, and those ids are what let
+// `auditor-b`'s ruling on `auditor-a`'s finding count at all.
 //
-// Overwritten rather than refused, because combine.mjs copies a LONE half's
-// payload through untouched and keys it by the persona, so `agent: 'auditor-a'`
-// beside `persona: 'auditor'` is a shape the documented pipeline writes. The
-// overwrite is what that shape means: one agent reviewed, and it cannot rule on
-// its own finding. Believing it instead hands the lane two names under one key
-// — round 1 saying `auditor-a` and round 2 saying `auditor-b` took a
-// cross-validated critical to `disputed` and emptied `open_blocking`, and the
-// validate direction took a `solo` critical to `consensus`, on one lane's word.
-// Nothing in either file, and nothing in a `--plan` that is optional anyway,
-// can tell that apart from a split that happened; the key can, so the key does.
+// Which also means nothing IN the file can check them, in either direction:
+// overwriting them discards a real validator on the documented lone-half path,
+// and believing them hands one lane two names under one key. `byLane` below is
+// where that is settled, against the plan, because the plan is the only
+// evidence `synthesize` has that is not the file itself.
 const stampedAs = (lane, key, payload) => {
+  if (key === lane) return payload;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
 
-  const stamped = { ...payload, agent: key };
-  if (key === lane) return stamped;
-
+  // The header is not stamped, only the entries. `byLane` refuses a header that
+  // disagrees with the key, so by here it is the key or it is absent — and
+  // `claimedAgent` reads an entry's `agent` before the payload's, so a header
+  // written in either case is a value no reader can reach.
+  const stamped = { ...payload };
   for (const [field, value] of Object.entries(stamped)) {
     if (!Array.isArray(value)) continue;
     stamped[field] = value.map((entry) => (entry && typeof entry === 'object'
       && !Array.isArray(entry) ? { ...entry, agent: key } : entry));
   }
   return stamped;
+};
+
+// Every half of `lane` a payload says had a hand in writing it — its header
+// `agent`, and each entry's, which is where a merge puts them. Deduplicated,
+// because one claim repeated on forty findings is one claim, and bounded by
+// `isLaneAgent`, whose suffix is a single letter.
+const claimedHalves = (lane, payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return [];
+
+  const claims = new Set();
+  const claim = (id) => {
+    if (id !== lane && isLaneAgent(lane, id)) claims.add(id);
+  };
+
+  claim(payload.agent);
+  for (const value of Object.values(payload)) {
+    if (!Array.isArray(value)) continue;
+    for (const entry of value) {
+      if (entry && typeof entry === 'object' && !Array.isArray(entry)) claim(entry.agent);
+    }
+  }
+  return [...claims];
 };
 
 async function cmdSynthesize(rest) {
@@ -486,6 +504,31 @@ async function cmdSynthesize(rest) {
     return Object.keys(payload);
   };
 
+  // Parsed ONCE, and the parsed form is what its four readers share: the
+  // roster check, the report's depth, and the telemetry row. Parsing it twice —
+  // or handing one reader the raw JSON and another the parsed object — lets
+  // them describe different plans, and `parsePlan` is where a lane's `agents`
+  // count and the run's depth are normalized.
+  let plan = null;
+  if (values.plan) {
+    try {
+      plan = parsePlan(readJsonArg(values.plan));
+    } catch (e) {
+      die(`synthesize: --plan ${values.plan}: ${e.message}`);
+    }
+  }
+
+  // Which lanes the plan says reviewed in halves. A lane-keyed payload naming a
+  // half of itself is a claim about how the review was staffed, and this is the
+  // only thing `synthesize` can check it against that the file's own author did
+  // not write. Absent a plan the claim is unverifiable, and unverifiable is
+  // refused rather than guessed at in either direction: believing it lets one
+  // lane cross-examine itself, and overwriting it throws away a lone half's
+  // genuine id on the path combine.mjs documents.
+  const splitLanes = new Set(runLanes(plan?.lanes ?? [])
+    .filter((lane) => agentNames([lane]).length > 1)
+    .map((lane) => lane.persona));
+
   const byLane = (flag, file, payload, keys) => {
     const lanes = Object.create(null);
     const spelledAs = Object.create(null);
@@ -504,6 +547,21 @@ async function cmdSynthesize(rest) {
           + ` reviewer: union the two with combine.mjs --merge-personas ${lane}, which`
           + " is where the rule for whose verdict and whose summary survive lives");
       }
+      const halves = claimedHalves(lane, payload[key]);
+      if (key === lane && halves.length && !splitLanes.has(lane)) {
+        const shown = halves.slice(0, 3).map((half) => `\`${half}\``).join(', ')
+          + (halves.length > 3 ? ', …' : '');
+        const because = plan
+          ? `the plan ran ${lane} as one agent`
+          : 'no --plan was passed that could';
+        die(`synthesize: ${file}: ${flag}'s \`${lane}\` payload is filed under the lane and`
+          + ` says ${shown} had a hand in writing it. A lane's halves cross-examine each`
+          + " other as independent reviewers, and under the lane's own name nothing here can"
+          + ` check that claim — ${because}. Pass the --plan that split the lane, or file`
+          + ` each half's payload under its own key (\`${lane}-a\`), which is what a claim`
+          + ' like this is held against');
+      }
+
       const claim = payload[key]?.agent;
       if (key !== lane && claim !== undefined && claim !== key) {
         die(`synthesize: ${file}: ${flag} is keyed by reviewer, \`${showKey(key)}\` says`
@@ -612,20 +670,6 @@ async function cmdSynthesize(rest) {
   // do by hand through --skipped/--degraded; with the plan on disk it is
   // checked instead.
   //
-  // Parsed ONCE, and the parsed form is what the three readers below share: the
-  // roster check, the report's depth, and the telemetry row. Parsing it twice —
-  // or handing one reader the raw JSON and another the parsed object — lets
-  // them describe different plans, and `parsePlan` is where a lane's `agents`
-  // count and the run's depth are normalized.
-  let plan = null;
-  if (values.plan) {
-    try {
-      plan = parsePlan(readJsonArg(values.plan));
-    } catch (e) {
-      die(`synthesize: --plan ${values.plan}: ${e.message}`);
-    }
-  }
-
   if (plan) {
     const planned = runLanes(plan.lanes);
     const accounted = new Set([

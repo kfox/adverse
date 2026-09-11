@@ -749,11 +749,11 @@ test('a payload whose header contradicts the key it was filed under is refused',
       assert.ok(r.status === 0 || r.status === 1, `${label}: ${r.stderr}`);
     }
 
-    // And the bare lane has no half to contradict: combine.mjs copies a lone
-    // half's payload through untouched, header included, and keys it by the
-    // persona.
+    // A key that names no half carries no contradiction, whatever it says about
+    // itself — under the lane's own name the question is a different one, and
+    // the test below is where it is asked.
     writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
-      auditor: { persona: 'auditor', agent: 'auditor-a', verdict: 'approve',
+      auditor: { persona: 'auditor', agent: 'auditor', verdict: 'approve',
         summary: 'ok', findings: [] },
       steward: { persona: 'steward', verdict: 'approve', summary: 'ok', findings: [] },
     }));
@@ -874,8 +874,12 @@ test('a payload filed under the bare lane keeps the ids its entries carry', () =
       auditor: { persona: 'auditor',
         validate: [{ title: 'B', reason: 'yes', agent: 'auditor-b' }] },
     }));
+    writeFileSync(path.join(out, 'plan.json'), JSON.stringify({
+      lanes: [{ persona: 'auditor', run: true, agents: 2 },
+        { persona: 'steward', run: true }],
+    }));
     const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json'),
-      '--round2', path.join(out, 'r2.json'),
+      '--round2', path.join(out, 'r2.json'), '--plan', path.join(out, 'plan.json'),
       '--json-out', path.join(out, 'report.json')]);
     assert.ok(r.status === 0 || r.status === 1, r.stderr);
     const report = JSON.parse(readFileSync(path.join(out, 'report.json'), 'utf-8'));
@@ -885,55 +889,108 @@ test('a payload filed under the bare lane keeps the ids its entries carry', () =
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
-// combine.mjs copies a LONE half's payload through untouched and keys it by the
-// persona, so `agent: 'auditor-a'` beside `persona: 'auditor'` is a shape the
-// documented pipeline writes — and it means one agent reviewed, which cannot
-// rule on its own finding. Believing the claim instead hands one lane two names
-// under one key, which is the whole hole this branch exists to close, reopened
-// one field over. Both directions measured before this: `auditor-a` in round 1
-// against `auditor-b` in round 2 took a cross-validated critical to `disputed`
-// with nothing open, and took a solo critical to `consensus` with one.
-test('a bare-lane header names the lane, so one lane cannot cross-examine itself', () => {
+// Under a lane's own name the ids inside a payload cannot be checked against
+// anything the file's author did not also write, and both answers fail. Believed:
+// round 1 saying `auditor-a` and round 2 saying `auditor-b` took a cross-validated
+// critical to `disputed` with nothing open, and a solo critical to `consensus`
+// with one, on one lane's word. Overwritten: a lone half's genuine id is
+// discarded on the path combine.mjs documents, which drops a real validator in
+// the same direction. So the claim is held against the plan, which is the one
+// thing here the reviewer did not write, and refused when there is no plan to
+// hold it against. The Skill passes --plan on every synthesize (SKILL.md,
+// Phase 6).
+test('a lane-keyed payload naming halves of itself is held against the plan', () => {
   const out = freshTmp();
   try {
     const finding = { severity: 'critical', kind: 'defect', file: 'x.py', line: 1,
       title: 'B', detail: 'd', fix: null };
-    const half = (round) => ({
-      auditor: { persona: 'auditor', agent: 'auditor-a', verdict: 'reject',
-        summary: 'bug', findings: [finding] },
-      ...round,
-    });
-    const synth = (name) => {
-      const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json'),
-        '--round2', path.join(out, 'r2.json'), '--json-out', path.join(out, name)]);
-      assert.ok(r.status === 0 || r.status === 1, r.stderr);
-      return JSON.parse(readFileSync(path.join(out, name), 'utf-8'));
-    };
-
-    writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
-      auditor: { persona: 'auditor', agent: 'auditor-b',
-        challenge: [{ title: 'B', reason: 'no' }] },
+    writeFileSync(path.join(out, 'split.json'), JSON.stringify({
+      lanes: [{ persona: 'auditor', run: true, agents: 2 },
+        { persona: 'adversary', run: true }],
     }));
-    writeFileSync(path.join(out, 'r1.json'), JSON.stringify(half({
-      adversary: { persona: 'adversary', verdict: 'reject', summary: 'bug',
-        findings: [finding] },
-    })));
-    const challenged = synth('challenged.json');
-    assert.equal(challenged.findings[0].confidence, 'cross-validated',
-      'a second name under one key does not discard the lane\'s own critical');
-    assert.equal(challenged.open_blocking.length, 1);
+    writeFileSync(path.join(out, 'one.json'), JSON.stringify({
+      lanes: [{ persona: 'auditor', run: true }, { persona: 'adversary', run: true }],
+    }));
+    const synth = (args, name) => runCli(['synthesize',
+      '--round1', path.join(out, 'r1.json'), '--round2', path.join(out, 'r2.json'),
+      '--json-out', path.join(out, name), ...args]);
+    const read = (name) => JSON.parse(readFileSync(path.join(out, name), 'utf-8'));
 
+    // The claim on the entries, which is where a merge puts it, and on the
+    // header, which is where combine.mjs's lone-half copy-through leaves it.
+    for (const [where, r1Auditor, r2Auditor] of [
+      ['on its entries',
+        { persona: 'auditor', verdict: 'reject', summary: 'bug',
+          findings: [{ ...finding, agent: 'auditor-a' }] },
+        { persona: 'auditor', challenge: [{ title: 'B', reason: 'no', agent: 'auditor-b' }] }],
+      ['in its header',
+        { persona: 'auditor', agent: 'auditor-a', verdict: 'reject', summary: 'bug',
+          findings: [finding] },
+        { persona: 'auditor', agent: 'auditor-b', challenge: [{ title: 'B', reason: 'no' }] }],
+    ]) {
+      writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+        auditor: r1Auditor,
+        adversary: { persona: 'adversary', verdict: 'reject', summary: 'bug',
+          findings: [finding] },
+      }));
+      writeFileSync(path.join(out, 'r2.json'), JSON.stringify({ auditor: r2Auditor }));
+
+      for (const [label, args] of [
+        ['with no plan to check it against', []],
+        ['against a plan that ran the lane as one agent',
+          ['--plan', path.join(out, 'one.json')]],
+      ]) {
+        const r = synth(args, 'report.json');
+        assert.equal(r.status, 2, `${where}, ${label}: exit ${r.status}\n${r.stderr}`);
+        assert.match(r.stderr, /is filed under the lane and says/, `${where}, ${label}`);
+        assert.match(r.stderr, /`auditor-a`|`auditor-b`/, `${where}, ${label}`);
+        assert.equal(existsSync(path.join(out, 'report.json')), false, `${where}, ${label}`);
+      }
+
+      // And with the plan that split the lane, the halves are what they say
+      // they are: `auditor-b` challenging `auditor-a`'s finding is the
+      // independent cross-review a split lane is spawned for.
+      const vouched = synth(['--plan', path.join(out, 'split.json')], 'vouched.json');
+      assert.ok(vouched.status === 0 || vouched.status === 1, `${where}: ${vouched.stderr}`);
+      assert.equal(read('vouched.json').findings[0].confidence, 'disputed', where);
+    }
+
+    // The direction that regressed when the ids were overwritten instead: a
+    // lone half's round-2 validate, on a round 1 the other half wrote. Its
+    // `agent` is honest — validate.mjs bound it to the filename and combine.mjs
+    // copied it through — and discarding it takes a live critical out of
+    // `Open blocking`.
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+      auditor: { persona: 'auditor', verdict: 'reject', summary: 'bug',
+        findings: [{ ...finding, agent: 'auditor-a' }] },
+      adversary: { persona: 'adversary', verdict: 'approve', summary: 'ok', findings: [] },
+    }));
     writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
       auditor: { persona: 'auditor', agent: 'auditor-b',
         validate: [{ title: 'B', reason: 'yes' }] },
     }));
-    writeFileSync(path.join(out, 'r1.json'), JSON.stringify(half({
-      adversary: { persona: 'adversary', verdict: 'approve', summary: 'ok', findings: [] },
-    })));
-    const validated = synth('validated.json');
-    assert.equal(validated.findings[0].confidence, 'solo',
-      'a second name under one key does not vouch for the lane\'s own critical');
-    assert.equal(validated.open_blocking.length, 0);
+    const lone = synth(['--plan', path.join(out, 'split.json')], 'lone.json');
+    assert.ok(lone.status === 0 || lone.status === 1, lone.stderr);
+    assert.equal(read('lone.json').findings[0].confidence, 'consensus',
+      "the other half's validate is not discarded");
+    assert.equal(read('lone.json').open_blocking.length, 1);
+
+    // A lane-keyed payload that claims no half needs no plan: it is every
+    // unsplit lane, and the overwhelming majority of what this flag is handed.
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+      auditor: { persona: 'auditor', verdict: 'reject', summary: 'bug',
+        findings: [finding] },
+      adversary: { persona: 'adversary', verdict: 'reject', summary: 'bug',
+        findings: [finding] },
+    }));
+    writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
+      auditor: { persona: 'auditor', challenge: [{ title: 'B', reason: 'no' }] },
+    }));
+    const plain = synth([], 'plain.json');
+    assert.ok(plain.status === 0 || plain.status === 1, plain.stderr);
+    assert.equal(read('plain.json').findings[0].confidence, 'cross-validated',
+      'the lane cannot discard its own critical');
+    assert.equal(read('plain.json').open_blocking.length, 1);
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
