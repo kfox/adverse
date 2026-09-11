@@ -348,13 +348,22 @@ export function checkBinding(ledger, resolve) {
       problems.push(`entry ${named(e.title)} has disposition ${brief(JSON.stringify(e.disposition))}, which is not one of ${DISPOSITIONS.join(', ')}`);
     }
     // Refused here as well as at the read, and for the reason every other
-    // field on this list is: `recordDecisions` writes an array of lane names
-    // on every entry, so anything else did not come from this tool. `lanesOf`
-    // alone caught it only when someone happened to ask about that entry's fix
-    // commit, so a forged `reporters` loaded, recorded and saved clean and
-    // became a refusal an iteration later, if ever.
+    // field on this list is: `recordDecisions` derives an array of lane names
+    // on every entry, so anything else did not come from today's fold.
+    // `lanesOf` alone caught it only when someone happened to ask about that
+    // entry's fix commit, so a forged `reporters` loaded, recorded and saved
+    // clean and became a refusal an iteration later, if ever.
+    //
+    // The message says "does not derive" rather than "does not write", which
+    // is the same sentence the two fields below get and is NOT true here: the
+    // fold copied `reporters` straight off the decision payload until
+    // `reportersOf` replaced it, so a ledger from a build before that can
+    // legitimately carry a fix batch's own label — `['fix-auth-guard']` is the
+    // example in `reportersOf`'s own comment. The remedy is the same either
+    // way, and a refusal that accuses the operator of forging their own file
+    // sends them looking for a forger.
     if (e.reporters !== undefined && !isLaneList(e.reporters)) {
-      problems.push(`entry ${named(e.title)} has reporters ${brief(JSON.stringify(e.reporters))}, which is not a list of lane names; the fold writes that field and this value is not one it writes, so correct or remove that entry`);
+      problems.push(`entry ${named(e.title)} has reporters ${brief(JSON.stringify(e.reporters))}, which is not a list of lane names; the fold derives that field from the report, so this came from a hand edit or from a ledger older than that — either way the entry cannot say who reported the finding, so correct or remove that entry`);
     }
     // The same evidence as the disposition above, and it was only ever caught
     // reactively: `reconciled` is a field `recordDecisions` writes and nothing

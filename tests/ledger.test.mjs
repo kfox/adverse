@@ -589,8 +589,9 @@ for (const [label, reporters] of [
 ]) test(`a reporters that is ${label} is refused with the ledger, not at the read`, () => {
   // `lanesOf` catches it only when someone asks about that entry's fix commit,
   // so a forged `reporters` loaded, recorded and saved clean — and became a
-  // refusal an iteration later, if ever. It is a field only the fold writes,
-  // which is exactly what this pass is for.
+  // refusal an iteration later, if ever. It is a field the fold derives,
+  // which is exactly what this pass is for. The remedy has to survive
+  // converge's clip, so it stays at the end: see the over-long table above.
   const l = { ...emptyLedger(),
               entries: [{ title: 't', kind: 'defect', file: 'x.py', line: 1,
                           disposition: 'noted', reason: 'r', atCommit: 'deadbeef', reporters }] };

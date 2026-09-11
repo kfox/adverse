@@ -238,8 +238,15 @@ for (const [label, key] of [
   ['one that prints as a real lane', 'auditor\u200b'],
   ['a re-cased one', 'Auditor'],
   ['one in a shape agentNames cannot emit', 'auditor_a'],
+  ['a suffix longer than the one letter agentNames emits', 'auditor-ab'],
   ['a prototype key JSON.parse makes own', '__proto__'],
   ['an empty one', ''],
+  // The two a shape check cannot reach: both are well-formed lane names and
+  // neither names a lane. Measured before this: `auditor` (reject, one
+  // critical), `referee` (approve) and `helper` (approve) exited 0 with
+  // `SHIP (2/3 ship, 1/3 block)` over that critical and "3 reviewers".
+  ['an invented one', 'referee'],
+  ['a half of an invented one', 'referee-a'],
 ]) {
   test(`synthesize refuses a round-1 reviewer key: ${label}`, () => {
     const out = freshTmp();
@@ -252,7 +259,7 @@ for (const [label, key] of [
         '--out', path.join(out, 'report.md')]);
       assert.equal(r.status, 2, r.stderr);
       assert.match(r.stderr, /--round1 is keyed by reviewer/);
-      assert.match(r.stderr, /is not a lane name/);
+      assert.match(r.stderr, /names no review lane/);
       assert.match(r.stderr, new RegExp(path.join(out, 'r1.json').replace(/[.\\]/g, '\\$&')));
       assert.equal(existsSync(path.join(out, 'report.md')), false, 'nothing was published');
     } finally { rmSync(out, { recursive: true, force: true }); }
@@ -263,7 +270,7 @@ for (const [label, key] of [
 // `crossReviews` answers `true` for any name outside the registry, so the
 // roster rule directly below this check passed a phantom through, and one
 // `challenge` from it relabels a cross-validated critical `disputed`.
-test('synthesize refuses a round-2 reviewer key that is not a lane name', () => {
+test('synthesize refuses a round-2 reviewer key that names no lane', () => {
   const out = freshTmp();
   try {
     const finding = { severity: 'critical', kind: 'defect', file: 'x.py', line: 1,
@@ -279,6 +286,34 @@ test('synthesize refuses a round-2 reviewer key that is not a lane name', () => 
       '--round2', path.join(out, 'r2.json')]);
     assert.equal(r.status, 2, r.stderr);
     assert.match(r.stderr, /--round2 is keyed by reviewer/);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+// Two characters walked around the refusal that exists to stop exactly this.
+// `crossReviews` answers `true` for any name it does not recognize, so it was
+// answering about the KEY: `pragmatist` exited 2 as a spoof and `pragmatist-a`
+// exited 0, relabeled a critical that two lanes reported as `disputed`, and
+// emptied `open_blocking`.
+test('synthesize asks whether the LANE cross-reviews, not the key', () => {
+  const out = freshTmp();
+  try {
+    const finding = { severity: 'critical', kind: 'defect', file: 'x.py', line: 1,
+      title: 'B', detail: 'd', fix: null };
+    writeFileSync(path.join(out, 'r1.json'), JSON.stringify({
+      auditor:   { persona: 'auditor', verdict: 'reject', summary: 'bug', findings: [finding] },
+      adversary: { persona: 'adversary', verdict: 'reject', summary: 'bug', findings: [finding] },
+    }));
+    for (const key of ['pragmatist', 'pragmatist-a', 'pragmatist-z']) {
+      writeFileSync(path.join(out, 'r2.json'), JSON.stringify({
+        [key]: { persona: key, agent: key, challenge: [{ title: 'B', reason: 'no' }] },
+      }));
+      const r = runCli(['synthesize', '--round1', path.join(out, 'r1.json'),
+        '--round2', path.join(out, 'r2.json'),
+        '--json-out', path.join(out, 'report.json')]);
+      assert.equal(r.status, 2, `${key}: exit ${r.status}\n${r.stderr}`);
+      assert.match(r.stderr, /does not cross-review/, key);
+      assert.equal(existsSync(path.join(out, 'report.json')), false, `${key} published`);
+    }
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 

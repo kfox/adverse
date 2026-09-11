@@ -55,7 +55,8 @@ import { statSync } from 'node:fs';
 import { refuseDirectRun } from './entryGuard.mjs';
 import { flatten, verbatim } from './markdown.mjs';
 import { probeState } from './probe.mjs';
-import { ADVISORY_KINDS, isLaneList, isLaneName } from './taxonomy.mjs';
+import { laneOf } from './personas.mjs';
+import { ADVISORY_KINDS, isLaneList } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);
 
@@ -589,13 +590,20 @@ export function renderComment(report, { branch, head = null, base = null, iterat
   // check above passes any object, and `root_causes[].reporters` below is
   // already held to this vocabulary; the map that does the counting was not.
   //
+  // `laneOf`, not a shape check: a shape check closes the SPELLING and leaves
+  // the class. `referee` and `helper` are both well-formed lane names, and a
+  // report.json keyed `auditor` (reject, one critical), `referee` (approve)
+  // and `helper` (approve) published `SHIP (2/3 ship, 1/3 block)` over that
+  // critical with "3 reviewers" beside it. A name nobody can point at a lane
+  // for is not a reviewer.
+  //
   // Counted rather than quoted, the same way the telemetry writer handles an
   // unknown lane: the strings here are whatever a hand-edited file says, and
   // this message is read on a terminal.
-  const strangers = Object.keys(report.verdicts).filter((k) => !isLaneName(k)).length;
+  const strangers = Object.keys(report.verdicts).filter((k) => !laneOf(k)).length;
   if (strangers) {
     throw new Error(`venue: this report.json keys \`verdicts\` by ${strangers} name(s)`
-      + ' that are not lane names, so the reviewer count it publishes is not one');
+      + ' that name no review lane, so the reviewer count it publishes is not one');
   }
 
   // A root cause's own lists, for the reason the top-level ones are checked and

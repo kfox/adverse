@@ -7,7 +7,7 @@ import process from 'node:process';
 
 import { collectDirectory, collectDiff } from './collect.mjs';
 import { refuseDirectRun } from './entryGuard.mjs';
-import { PERSONAS, DEFAULT_PERSONAS, crossReviews } from './personas.mjs';
+import { PERSONAS, DEFAULT_PERSONAS, crossReviews, laneOf } from './personas.mjs';
 import { normalizeProbes } from './probe.mjs';
 import {
   buildPhase1Prompt,
@@ -18,7 +18,7 @@ import {
 import { AgentRunner, runParallel } from './runner.mjs';
 import { agentNames, parsePlan, runLanes } from './scaling.mjs';
 import { renderMarkdown, synthesize, toJsonReport } from './synthesis.mjs';
-import { citesLaneNames, isLaneName } from './taxonomy.mjs';
+import { citesLaneNames } from './taxonomy.mjs';
 import {
   appendRunRecord, buildRunRecord, repoIdentity, telemetryDisabled, telemetryPath,
 } from './telemetry.mjs';
@@ -394,12 +394,12 @@ async function cmdSynthesize(rest) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       die(`synthesize: ${file}: ${flag} is not an object keyed by reviewer`);
     }
-    for (const persona of Object.keys(payload)) {
-      if (isLaneName(persona)) continue;
-      die(`synthesize: ${file}: ${flag} is keyed by reviewer and \`${showKey(persona)}\``
-        + ' is not a lane name — expected a lowercase persona, optionally with a split'
-        + " lane's half like `auditor-a`. Every key in this file is counted as one"
-        + ' reviewer, so correct or remove it');
+    for (const key of Object.keys(payload)) {
+      if (laneOf(key)) continue;
+      die(`synthesize: ${file}: ${flag} is keyed by reviewer and \`${showKey(key)}\``
+        + ` names no review lane — expected one of ${DEFAULT_PERSONAS.join(', ')},`
+        + " or a split lane's half like `auditor-a`. Every key in this file is counted"
+        + ' as one reviewer, so correct or remove it');
     }
   }
 
@@ -407,11 +407,21 @@ async function cmdSynthesize(rest) {
   // there, so the shipped binary still accepted a round-2 payload from a lane
   // that never cross-reviews — and a single such `challenge` moves a critical
   // reported by two lanes out of `Open blocking`. Two paths, one rule.
-  for (const persona of Object.keys(round2)) {
-    if (!crossReviews(persona, 2)) {
-      die(`synthesize: ${values.round2}: '${persona}' does not cross-review: every kind it`
-        + ` owns is advisory, so it has no blocking claim to validate or challenge.`
-        + ` A round-2 payload under its name is a stale round-1 file or a spoof.`);
+  //
+  // Asked about the LANE, not about the key. `crossReviews` answers `true` for
+  // any name it does not recognize, so it answered `true` for `pragmatist-a`:
+  // the payload keyed `pragmatist` exited 2 as a spoof, and the identical
+  // payload keyed `pragmatist-a` exited 0, relabeled a critical that `auditor`
+  // and `adversary` both reported as `disputed`, and emptied `open_blocking`.
+  // Two characters walked around the refusal whose own comment describes that
+  // outcome.
+  for (const key of Object.keys(round2)) {
+    const lane = laneOf(key);
+    if (!crossReviews(lane, 2)) {
+      die(`synthesize: ${values.round2}: '${key}' does not cross-review: every kind`
+        + ` ${lane === key ? 'it' : `the ${lane} lane`} owns is advisory, so it has no`
+        + ' blocking claim to validate or challenge.'
+        + ' A round-2 payload under its name is a stale round-1 file or a spoof.');
     }
   }
 

@@ -729,9 +729,11 @@ for (const [label, verdicts] of [
   ['one that prints as a real lane', { auditor: 'approve', 'auditor\u200b': 'approve' }],
   ['a re-cased one', { auditor: 'approve', Auditor: 'approve' }],
   ['a shape agentNames cannot emit', { auditor: 'approve', auditor_a: 'approve' }],
+  // The one a shape check cannot reach: a well-formed name for no lane.
+  ['an invented one', { auditor: 'approve', referee: 'approve' }],
 ]) test(`renderComment refuses a verdicts map keyed by ${label}`, () => {
   assert.throws(() => renderComment(report({ verdicts }), { branch: BRANCH }),
-    /keys `verdicts` by 1 name\(s\) that are not lane names/, JSON.stringify(verdicts));
+    /keys `verdicts` by 1 name\(s\) that name no review lane/, JSON.stringify(verdicts));
 });
 
 test('renderComment counts the strangers in a verdicts map rather than quoting them', () => {
