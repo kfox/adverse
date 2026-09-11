@@ -342,6 +342,9 @@ for (const [label, citation] of [
   // printed as nothing beside the citation id, and was still counted in the PR
   // comment's reviewer tally.
   ['a reporter that is the empty string', { id: 'F1', title: 't', reporter: '' }],
+  // One codepoint past what `trim` reaches, and the same phantom reviewer.
+  ['a reporter that is a zero-width space',
+    { id: 'F1', title: 't', reporter: '\u200b' }],
 ]) test(`a briefing citation with ${label} is refused, naming the file`, () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'adverse-cite-'));
   const briefing = path.join(dir, 'briefing.json');

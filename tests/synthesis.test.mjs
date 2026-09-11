@@ -1144,7 +1144,7 @@ test('both renderers say a citation names no reporter, rather than printing the 
   const syn = synthesize(round1, rulings('one'), { rootCauseGroups: anonymous });
 
   const md = renderMarkdown(syn);
-  assert.match(md, /`no reporter, warning·defect`/);
+  assert.match(md, /`no reporter · warning·defect`/);
   assert.doesNotMatch(md, /undefined/);
   assert.match(renderHtml(syn), /no reporter · warning·defect/);
 });
@@ -1162,7 +1162,7 @@ test('a citation that claimed nobody is named by what synthesis resolved', () =>
 
   const md = renderMarkdown(syn);
   assert.doesNotMatch(md, /no reporter/, md);
-  assert.match(md, /`auditor, warning·defect`/, md);
+  assert.match(md, /`auditor · warning·defect`/, md);
   assert.match(renderHtml(syn), /auditor · warning·defect/);
 });
 

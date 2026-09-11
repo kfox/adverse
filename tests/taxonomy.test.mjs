@@ -99,6 +99,15 @@ for (const [label, citation, expected] of [
   // A name of no characters is not a lane that declined to identify itself.
   ['a reporter that is the empty string', { reporter: '' }, null],
   ['a reporter that is only whitespace', { reporter: '  ' }, null],
+  // One codepoint past what `trim` reaches. Each of these printed as nothing
+  // beside the citation id and was still counted as a reviewer.
+  ['a reporter that is a zero-width space', { reporter: '\u200b' }, null],
+  ['a reporter that is a word joiner', { reporter: '\u2060' }, null],
+  ['a reporter that is a byte-order mark', { reporter: '\ufeff' }, null],
+  ['a reporter that is a control character', { reporter: '\u0000' }, null],
+  // And a real name is still a name with one of those beside it.
+  ['a reporter carrying an invisible character', { reporter: 'auditor\u200b' },
+    ['auditor\u200b']],
 ]) test(`claimedLanes reads ${label}`, () => {
   assert.deepEqual(claimedLanes(citation), expected);
 });
@@ -160,6 +169,18 @@ test('a lane name with no name in it is not a lane name', () => {
   assert.equal(isLaneList(['auditor']), true);
 });
 
+// `trim()` strips whitespace, and a zero-width space is a FORMAT character —
+// so the first version of this closed the class for a name of spaces and left
+// it open for the four below, each of which prints as nothing and counts as
+// one reviewer in a permanent PR comment.
+test('a lane name of invisible characters is not a lane name either', () => {
+  for (const blank of ['\u200b', '\u2060', '\u180e', '\ufeff', '\u0000', '\u00a0',
+    '\u200b\u2060 ']) {
+    assert.equal(isLaneList([blank]), false, JSON.stringify(blank));
+  }
+  assert.equal(isLaneList(['auditor\u200b']), true, 'a name with one beside it is a name');
+});
+
 // What a citation line says about who reported it: the claim, then what
 // synthesis resolved, then words. The middle one is why this exists — a
 // citation that claimed nobody and resolved anyway said "no reporter" in the
@@ -170,6 +191,18 @@ for (const [label, citation, expected] of [
     { reporters: ['auditor', 'steward'] }, 'auditor, steward'],
   ['words, where there is neither', { reporters: [] }, 'no reporter'],
   ['words, for a citation that is not there at all', undefined, 'no reporter'],
+  // Each half asks the same predicate its neighbors ask. `??` fell through
+  // only on an absence, so a blank claim printed as nothing — inside the
+  // helper written to stop exactly that.
+  ['what synthesis resolved, where the claim is blank',
+    { reporter: '', reporters: ['auditor'] }, 'auditor'],
+  ['words, where the claim is blank and nothing was resolved',
+    { reporter: '\u200b' }, 'no reporter'],
+  // And the value this vocabulary exists for, in the one reader here that
+  // would have crashed on it rather than refused it: `"auditor".length` is 7,
+  // and its `join` is not a function.
+  ['words, where the resolved lanes are a bare string',
+    { reporters: 'auditor' }, 'no reporter'],
 ]) test(`citationReporter names ${label}`, () => {
   assert.equal(citationReporter(citation), expected);
 });

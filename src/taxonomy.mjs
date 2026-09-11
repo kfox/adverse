@@ -94,8 +94,18 @@ export const PROVENANCE = Object.freeze({ review: 'review', regression: 'regress
 // itself: it satisfied every check here, printed as nothing at all beside a
 // citation id, and was still counted in the PR comment's `N reviewers` tally —
 // a phantom reviewer, which is the same vouching the string case is on this
-// list for. Whitespace with it, since a name of spaces prints the same way.
-export const isLaneName = (value) => typeof value === 'string' && value.trim() !== '';
+// list for.
+//
+// A name is what is left when nothing invisible is: `trim()` alone closed this
+// for spaces and left it open one codepoint away, since it strips only
+// whitespace and a zero-width space is a FORMAT character. `\u200b`,
+// `\u2060`, `\u180e` and a bare NUL each survived it, each printing as
+// nothing and each counting as a reviewer. So the test is what remains after
+// whitespace, format and control characters come out — the three categories
+// that render as no character at all.
+const INVISIBLE = /[\p{White_Space}\p{Cf}\p{Cc}]/gu;
+export const isLaneName = (value) => typeof value === 'string'
+  && value.replace(INVISIBLE, '') !== '';
 export const isLaneList = (value) => Array.isArray(value) && value.every(isLaneName);
 
 // Which lanes a citation claims, or `null` for a claim that is not lane names
@@ -138,8 +148,18 @@ export const claimedLanes = (citation) => {
 // the resolved lanes are still an answer, and "no reporter" is a confident
 // wrong one — printed, as it was, in the same card whose header names two
 // reviewers.
-export const citationReporter = (citation) => citation?.reporter
-  ?? (citation?.reporters?.length ? citation.reporters.join(', ') : 'no reporter');
+// Each half asks the predicate its neighbors ask, rather than testing for
+// presence: `??` falls through only on an absence, so a claim that is present
+// and blank printed as nothing instead of falling back — the symptom this
+// whole list exists to prevent, reached through the helper written to prevent
+// it. And `.length` alone admits a bare `"auditor"`, whose `join` is not a
+// function: the string case, in the one reader here that would crash on it
+// rather than refuse it.
+export const citationReporter = (citation) => {
+  if (isLaneName(citation?.reporter)) return citation.reporter;
+  const resolved = citation?.reporters;
+  return isLaneList(resolved) && resolved.length ? resolved.join(', ') : 'no reporter';
+};
 
 // Whether a citation's reporter fields are lane names — BOTH of them, because
 // they are read by different things. `claimedLanes` prefers `reporters`, and
