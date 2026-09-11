@@ -516,6 +516,12 @@ for (const [label, over, base, keeps] of [
    /which is not one of fixed, declined, deferred, noted$/],
   ['reporters', { reporters: 'R'.repeat(600) }, null,
    /correct or remove that entry$/],
+  // Two quoted fields at once, which is the case that actually bounds the
+  // wording: each is clipped to 121 by `brief`, so a message with both in it
+  // is the longest this pass can emit. The `reconciled` overflow one row up
+  // got in because only one field at a time was ever measured.
+  ['title beside reporters', { title: 'T'.repeat(600), reporters: 'R'.repeat(600) }, null,
+   /correct or remove that entry$/],
   ['atCommit', { atCommit: 'A'.repeat(600) }, null,
    /which is not a commit in this repository$/],
   ['fixCommit', { disposition: 'fixed', fixCommit: 'F'.repeat(600) }, null,

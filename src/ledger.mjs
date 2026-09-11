@@ -354,16 +354,22 @@ export function checkBinding(ledger, resolve) {
     // entry's fix commit, so a forged `reporters` loaded, recorded and saved
     // clean and became a refusal an iteration later, if ever.
     //
-    // The message says "does not derive" rather than "does not write", which
-    // is the same sentence the two fields below get and is NOT true here: the
-    // fold copied `reporters` straight off the decision payload until
-    // `reportersOf` replaced it, so a ledger from a build before that can
-    // legitimately carry a fix batch's own label — `['fix-auth-guard']` is the
-    // example in `reportersOf`'s own comment. The remedy is the same either
-    // way, and a refusal that accuses the operator of forging their own file
-    // sends them looking for a forger.
+    // The message says "derives" rather than the "writes that field and this
+    // value is not one it writes" its two neighbors say, because that sentence
+    // is NOT true here: the fold copied `reporters` straight off the decision
+    // payload until `reportersOf` replaced it, so a ledger from a build before
+    // that can legitimately carry a fix batch's own label —
+    // `['fix-auth-guard']` is the example in `reportersOf`'s own comment. The
+    // remedy is the same either way, and a refusal that accuses the operator
+    // of forging their own file sends them looking for a forger.
+    //
+    // Kept SHORT, and the table in tests/ledger.test.mjs measures it with both
+    // quoted fields at full length. converge re-clips the finished sentence at
+    // MAX_REASON_CHARS, cutting the words after the last long field — so the
+    // remedy at the end is what a long message loses, and the first draft of
+    // this wording left one character of margin.
     if (e.reporters !== undefined && !isLaneList(e.reporters)) {
-      problems.push(`entry ${named(e.title)} has reporters ${brief(JSON.stringify(e.reporters))}, which is not a list of lane names; the fold derives that field from the report, so this came from a hand edit or from a ledger older than that — either way the entry cannot say who reported the finding, so correct or remove that entry`);
+      problems.push(`entry ${named(e.title)} has reporters ${brief(JSON.stringify(e.reporters))}, which is not a list of lane names; the fold derives that field, so this came from a hand edit or a ledger older than it does — correct or remove that entry`);
     }
     // The same evidence as the disposition above, and it was only ever caught
     // reactively: `reconciled` is a field `recordDecisions` writes and nothing

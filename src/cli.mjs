@@ -337,6 +337,30 @@ const showKey = (key) => {
   return shown.length > MAX_KEY_CHARS ? `${shown.slice(0, MAX_KEY_CHARS)}…` : shown;
 };
 
+// A payload re-keyed from a split lane's half to the lane itself, carrying the
+// half it was filed under.
+//
+// `synthesize` counts one reviewer per KEY, which is why SKILL.md's guarantee
+// — "the synthesizer counts distinct personas, not agents, so a split lane
+// cannot inflate consensus" — held only on the bridge path, where combine.mjs
+// unions halves under the bare persona. On this path the key was whatever the
+// file said: `auditor` plus `auditor-a` published "2 reviewers" and rendered a
+// finding both reported as `cross-validated`, and a `--round2` keyed
+// `auditor-a` against a `--round1` keyed `auditor` slipped past
+// `reportedBy`'s self-ruling guard and let the auditor discard its own
+// critical. Both are one lane wearing two names.
+//
+// The half is not discarded, it moves to `agent`, which is the field
+// `claimedAgent` already reads and the one round 2's self-validation guard
+// needs to tell `auditor-a` from `auditor-b`. A payload that names its own
+// agent keeps it: that claim is the reviewer's, this is only a default for a
+// file whose spelling carried the id instead.
+const keyedAsLane = (lane, key, payload) => {
+  if (key === lane) return payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  return payload.agent === undefined ? { ...payload, agent: key } : payload;
+};
+
 async function cmdSynthesize(rest) {
   const { values } = parseArgs({
     args: rest,
@@ -363,8 +387,8 @@ async function cmdSynthesize(rest) {
     return 0;
   }
   if (!values.round1) die('synthesize: --round1 is required');
-  const round1 = readJsonArg(values.round1);
-  const round2 = values.round2 ? readJsonArg(values.round2) : {};
+  let round1 = readJsonArg(values.round1);
+  let round2 = values.round2 ? readJsonArg(values.round2) : {};
 
   // The keys of both files ARE the reviewer tally, so they get the shape check
   // a briefing's citations get, at this same boundary and for the same reason.
@@ -385,8 +409,15 @@ async function cmdSynthesize(rest) {
   // `advisoryOnlyLane` returns `false` for one — so a phantom key passed that
   // rule too, and one `challenge` from it relabels a cross-validated critical
   // `disputed` and moves it out of `Open blocking`.
-  for (const [flag, file, payload] of [['--round1', values.round1, round1],
-    ['--round2', values.round2, round2]]) {
+  //
+  // And the keys are reduced to LANES here, so what is counted downstream is
+  // lanes: one spelling per reviewer, the shape combine.mjs produces, and the
+  // shape every reader from `verdicts` to `reportedBy` was written against.
+  // Two keys for one lane are refused rather than merged — choosing which
+  // half's verdict and summary survive is combine.mjs's `--merge-personas`,
+  // and a second copy of that policy here is how two copies of one rule
+  // drift.
+  const reviewerKeys = (flag, file, payload) => {
     // Walked here rather than reached at `Object.entries` in synthesis,
     // because this is the only place that can name the file: a `--round1`
     // holding `null` or a list died four frames down as "Cannot convert
@@ -394,14 +425,44 @@ async function cmdSynthesize(rest) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       die(`synthesize: ${file}: ${flag} is not an object keyed by reviewer`);
     }
-    for (const key of Object.keys(payload)) {
-      if (laneOf(key)) continue;
-      die(`synthesize: ${file}: ${flag} is keyed by reviewer and \`${showKey(key)}\``
-        + ` names no review lane — expected one of ${DEFAULT_PERSONAS.join(', ')},`
-        + " or a split lane's half like `auditor-a`. Every key in this file is counted"
-        + ' as one reviewer, so correct or remove it');
+    return Object.keys(payload);
+  };
+
+  const byLane = (flag, file, payload, keys) => {
+    const lanes = Object.create(null);
+    const spelledAs = Object.create(null);
+    for (const key of keys) {
+      const lane = laneOf(key);
+      if (!lane) {
+        die(`synthesize: ${file}: ${flag} is keyed by reviewer and \`${showKey(key)}\``
+          + ` names no review lane — expected one of ${DEFAULT_PERSONAS.join(', ')},`
+          + " or a split lane's half like `auditor-a`. Every key in this file is counted"
+          + ' as one reviewer, so correct or remove it');
+      }
+      if (spelledAs[lane] !== undefined) {
+        die(`synthesize: ${file}: ${flag} carries two payloads for the ${lane} lane,`
+          + ` \`${showKey(spelledAs[lane])}\` and \`${showKey(key)}\`, and every key`
+          + ' here is counted as one reviewer. A lane reviewed in halves is one'
+          + ` reviewer: union the two with combine.mjs --merge-personas ${lane}, which`
+          + " is where the rule for whose verdict and whose summary survive lives");
+      }
+      lanes[lane] = keyedAsLane(lane, key, payload[key]);
+      spelledAs[lane] = key;
     }
-  }
+    return lanes;
+  };
+
+  // Captured BEFORE the reduction, because the two questions below want
+  // different spellings. Counting reviewers wants lanes. The --plan accounting
+  // wants the spelling the payloads actually arrived under: a plan that split
+  // the auditor in two against a run that produced only `auditor-a` is half
+  // the files reviewed by nobody, and a lane-keyed set reads that as the lane
+  // fully accounted for — the silent direction, and the exact gap --plan
+  // exists to close.
+  const round1Keys = reviewerKeys('--round1', values.round1, round1);
+  const round2Keys = reviewerKeys('--round2', values.round2, round2);
+  round1 = byLane('--round1', values.round1, round1, round1Keys);
+  round2 = byLane('--round2', values.round2, round2, round2Keys);
 
   // The same rule src/roster.mjs applies in the Skill bridge. It lived only
   // there, so the shipped binary still accepted a round-2 payload from a lane
@@ -496,14 +557,14 @@ async function cmdSynthesize(rest) {
   if (plan) {
     const planned = runLanes(plan.lanes);
     const accounted = new Set([
-      ...Object.keys(round1),
+      ...round1Keys,
       ...skippedPersonas.map((s) => s.persona),
       ...failedPersonas,
     ]);
-    // A split lane is accounted under either spelling: combine.mjs unions its
-    // halves under the bare persona, while raw per-agent payloads and the
-    // --skipped/--degraded flags speak agentNames' persona-a/-b. Requiring one
-    // spelling false-refuses the other's fully reported lane.
+    // A split lane is accounted under either spelling. Round 1's keys are
+    // reduced to lanes above, but the --skipped/--degraded flags still speak
+    // agentNames' persona-a/-b, and requiring one spelling false-refuses the
+    // other's fully reported lane.
     const unaccounted = planned.flatMap((lane) => {
       if (accounted.has(lane.persona)) return [];
       return agentNames([lane]).filter((name) => !accounted.has(name));

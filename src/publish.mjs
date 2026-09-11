@@ -54,8 +54,8 @@ import { statSync } from 'node:fs';
 
 import { refuseDirectRun } from './entryGuard.mjs';
 import { flatten, verbatim } from './markdown.mjs';
-import { probeState } from './probe.mjs';
 import { laneOf } from './personas.mjs';
+import { probeState } from './probe.mjs';
 import { ADVISORY_KINDS, isLaneList } from './taxonomy.mjs';
 
 refuseDirectRun(import.meta.url);

@@ -35,7 +35,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { refuseDirectRun } from './entryGuard.mjs';
-import { DEFAULT_PERSONAS, laneOf } from './personas.mjs';
+import { laneOf } from './personas.mjs';
 import { probeSummary } from './probe.mjs';
 import { runLanes } from './scaling.mjs';
 import { UNCLASSIFIED, isBlocking } from './synthesis.mjs';

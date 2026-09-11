@@ -196,7 +196,7 @@ for (const persona of DEFAULT_PERSONAS) {
 // `validate.mjs`, and a fifth rule that disagreed with those four is the second
 // signal table this module's own header warns against. The bridge refuses it by
 // value instead.
-function laneOf(agent) {
+function roughLaneOf(agent) {
   if (typeof agent !== 'string') return null;
   return DEFAULT_PERSONAS.find((p) => agent === p || agent.startsWith(`${p}-`)) ?? null;
 }
@@ -228,11 +228,17 @@ function requireString(value, label) {
 // `auditor_a` (not the id shape), `auditor-ab` (a lane, but not a half
 // `agentNames` can emit), a null, a number.
 //
-// This is the EXACT question, and it is a different one from `laneOf`'s: not
-// "which lane is out" but "did the caller name something this system could have
-// written". Both are needed and each is safe for its own question. `laneOf`
-// being generous keeps the routing fail-safe for any caller; this keeps the
-// caller from being silently guessed at.
+// This is the EXACT question, and it is a different one from `roughLaneOf`'s:
+// not "which lane is out" but "did the caller name something this system could
+// have written". Both are needed and each is safe for its own question.
+// `roughLaneOf` being generous keeps the routing fail-safe for any caller;
+// this keeps the caller from being silently guessed at.
+//
+// The `rough` in that name is load-bearing. `laneOf` in src/personas.mjs is
+// the STRICT answer — `auditor-ab` resolves here and not there — and importing
+// it in place of this one would turn an over-excluding regression pass, which
+// costs at worst a CONFLICTED run that says so, into an under-excluding one
+// that hands a reporter its own fix commit in silence.
 //
 // The silence was the defect, not the routing. `--closed-by Auditor
 // --closed-by adversary` differs from the accepted spelling by one capital
@@ -259,7 +265,7 @@ function requireString(value, label) {
 export function unresolvedLanes(closedBy) {
   requireArray(closedBy, 'closedBy');
   return closedBy.filter((agent) => {
-    const lane = laneOf(agent);
+    const lane = roughLaneOf(agent);
     return lane === null || !isLaneAgent(lane, agent);
   });
 }
@@ -393,7 +399,7 @@ export function chooseRegressionLane(
 
   const reported = new Set();
   for (const agent of names) {
-    const lane = laneOf(agent);
+    const lane = roughLaneOf(agent);
     if (lane) reported.add(lane);
   }
 
@@ -402,7 +408,7 @@ export function chooseRegressionLane(
   // beside it: the harm was never the lane chosen, it was a `reason` claiming
   // the pass is disinterested while part of the exclusion list had been
   // discarded in silence. It says what it could not read and makes no claim
-  // about what that did or did not exclude — `laneOf` is generous, so an id
+  // about what that did or did not exclude — `roughLaneOf` is generous, so an id
   // like `auditor-ab` is unreadable AND still excluded the auditor, and a
   // sentence asserting either half would be false for the other.
   const dropped = unresolved.length
