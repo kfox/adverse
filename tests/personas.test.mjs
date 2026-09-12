@@ -149,7 +149,7 @@ test('every statement of the attack requirement admits an availability bound', (
   // different test.
   const system = PERSONAS.adversary.system.replace(/\s+/g, ' ');
 
-  // #87 appended an exception after ONE of ten statements of this filter and
+  // #113 appended an exception after ONE of ten statements of this filter and
   // left nine standing, three of them ahead of the scope list and one in
   // last-word position. Each is pinned separately: the generated-copy drift
   // test proves the copies agree, and the suite stayed green through the whole
@@ -166,7 +166,7 @@ test('every statement of the attack requirement admits an availability bound', (
   assert.match(system, /The evidence is what separates the two reports, not the topic/);
 
   // The one ABSOLUTE imperative statement of the requirement, and the only one
-  // #87 left without the exception beside it — it appended a paragraph after
+  // #113 left without the exception beside it — it appended a paragraph after
   // this sentence rather than amending it.
   assert.match(system, /or, for an availability bound, a load story in its place/);
   assert.match(system, /coherent attack — or, for an availability bound, the load that exhausts the resource/);
@@ -267,7 +267,7 @@ test('every other exclusion list hands the availability class over', () => {
   // persona's out-of-scope list in the same change, because two lanes that both
   // believe they own a kind report it twice and duplicate reports render
   // `cross-validated` (src/synthesis.mjs:741) — the one signal the design
-  // trusts most. #87 widened the Adversary and left three lists unedited, so
+  // trusts most. #113 widened the Adversary and left three lists unedited, so
   // this asserts the sweep from the side that would have produced the duplicate.
   // Derived, never listed. src/personas.mjs:35-41 states a rule about EVERY
   // other persona, and a hardcoded three pins today's roster instead: a fifth
